@@ -1,4 +1,6 @@
-# Frontend Implementation Plan: 踢球履历 UI 原型
+# Frontend Implementation Plan: 球历 UI 原型
+
+中文正式名：球历；英文正式名：`football-record`。英文名称不代表已设定 Bundle ID。
 
 ## 技术环境
 
