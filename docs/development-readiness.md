@@ -1,8 +1,8 @@
 # 原生开发准备检查
 
-检查日期：2026-10-15（原检查为 2026-10-14）；bootstrap 事实以 [NATIVE-000](native/tasks/NATIVE-000.md) 为准。
+检查日期：2026-10-15（原检查为 2026-10-14）；bootstrap 初始记录见 [NATIVE-000](native/tasks/NATIVE-000.md)，后续集成与远端当前事实见 [GIT-001](native/tasks/GIT-001.md)。
 
-结论：产品正常流程足够明确；NATIVE-001 已建立 iOS / watchOS 开发预览壳与共享 MatchCore 身份入口，SwiftPM 及双端无签名构建、模拟器启动已验证，见 [实际证据](native/validation/NATIVE-001.md)。比赛事件引擎与事务存储尚未实现，浏览器原型继续保留。2026-10-15 实查 Xcode 27.0（27A266a）、Swift 6.4 可用；正式名称为球历 / `football-record`。
+结论：产品正常流程足够明确；NATIVE-001 已建立 iOS / watchOS 开发预览壳与共享 MatchCore 身份入口，SwiftPM 及双端无签名构建、模拟器启动已验证，见 [实际证据](native/validation/NATIVE-001.md)。NATIVE-002 比赛事件引擎已进入实施，事务存储尚未开始，浏览器原型继续保留。2026-10-15 实查 Xcode 27.0（27A266a）、Swift 6.4 可用；正式名称为球历 / `football-record`。
 
 ## 开发依据
 
@@ -33,12 +33,12 @@
 
 | 项目 | 检查结果 | 处理阶段 |
 |---|---|---|
-| 原生工程 | NATIVE-001 的双端 SwiftUI 工程和本地 MatchCore 入口已构建并在模拟器启动；无 entitlements、业务引擎或业务测试，详见 [任务卡](native/tasks/NATIVE-001.md) | NATIVE-002 事件引擎、NATIVE-003 事务存储 / outbox 继续 M1；双审与集成以实际提交记录为准 |
+| 原生工程 | NATIVE-001 双端 SwiftUI 工程和本地 MatchCore 入口已构建、在模拟器启动，并经双审以 `b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入 `dev`；无 entitlements、业务引擎或业务测试，初始交付见 [任务卡](native/tasks/NATIVE-001.md) | NATIVE-002 事件引擎实施中；NATIVE-003 事务存储 / outbox 尚未开始；工程基础不代表 M1 全部完成 |
 | Xcode | 2026-10-15 实查 Xcode 27.0（27A266a）/ Swift 6.4 可用；`scripts/native/verify.sh` 已通过 SwiftPM、iOS Simulator 和 watchOS Simulator 无签名构建 | 后续业务实现加入确定性测试；构建不替代设备能力验收 |
 | 签名与 CloudKit | 仅配置 `com.example.footballrecord` / `.watchapp` 本地 Bundle ID 占位，未注册；没有开发团队、CloudKit 容器或能力权限 | 真机、Apple 登录及 CloudKit 联调前配置；操作指引见 `native/README.md` |
 | 唯一比赛锁后台 | 原方案定义了职责，尚无接口实现及运行环境 | 确定工程接口与供应商，开始比赛链路联调前部署 |
 | 真机行为 | 用户暂不能连接真机；真实心率、GPS、后台运行、崩溃恢复和跨设备可靠同步尚未验证 | 不阻塞 M1；M2 起使用配对 iPhone / Watch 验收，签名指导随工程交付 |
-| Git 与远端 | `dev/release/main`、原型 tag、文档 worktree 已建立；`origin` 已登记为 public 仓库，当前只读、`gh` 未登录，尚未推送 | 用户已明确选择 private，当前仍为 public，待仓库管理员操作并确认私有；private 状态确认且远端写权限落实前不推送。本地按授权继续 |
+| Git 与远端 | 三条长期分支与原型 tag 已建立，规划治理及工程基础已双审合入 `dev`；用户已接受 `origin` 的 public 可见性，主代理已核对 `gh` 登录和 `ADMIN` 权限，尚未推送 | GIT-001 双审集成后首次推送长期分支与原型 tag；先前 private 意向已被覆盖。代码同步不等于原生分发，PR、CI 与保护规则尚未配置 |
 
 供应商和后续模块拆分由开发者按方案决定；[NATIVE-001 子计划](superpowers/plans/2026-10-15-native-foundation.md) 已固定单个共享 SwiftPM 包的工程边界；事务仓储选型与失败测试由后续 NATIVE-003 独立任务确认。正式名称已确定为球历 / `football-record`；图标、未来付费边界、热图和 PC 路线不再次阻止开工。
 
