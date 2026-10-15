@@ -1,4 +1,6 @@
-# UI UX Spec: 踢球履历前端原型
+# UI UX Spec: 球历前端原型
+
+中文正式名：球历；英文正式名：`football-record`。英文名称不代表已设定 Bundle ID。
 
 ## 视觉与设备画布
 

@@ -289,7 +289,7 @@ function render() {
   const routeScroll = state.routeOpen && $(".route-gallery")?.dataset?.routeMatch === state.detailMatchId ? $(".phone-main")?.scrollTop : null;
   const calibrationScroll = state.modal?.type === "calibration" ? $(".calibration-modal")?.scrollTop : null;
   $("#app").innerHTML = `<div class="app-shell">
-    <header class="topbar"><h1 class="brand">踢球履历</h1><p class="topbar-note">iPhone 与 Apple Watch · 交互预览</p></header>
+    <header class="topbar"><h1 class="brand">球历</h1><p class="topbar-note">iPhone 与 Apple Watch · 交互预览</p></header>
     <div class="device-grid">
       <div class="phone-preview"><div class="device-label">iPhone <span>基准 390 × 844 pt</span></div>
         <section class="phone"><div class="phone-screen"><div class="phone-status"><span>9:41</span><span aria-hidden="true">● ● ▮</span></div><main class="phone-main">${renderPhone()}</main></div></section>
@@ -373,7 +373,7 @@ function renderAuthorContact() {
   return `<button class="back-link contact-back" data-action="back-settings">‹ 返回设置</button>
   <div class="section-head contact-heading"><div><h2>联系作者</h2><p>聊聊使用体验，一起把踢球记录做好。</p></div></div>
   <section class="panel contact-group-panel"><div class="panel-head"><h3>加入 QQ 交流群</h3><span>问题 · 建议 · 交流</span></div><p class="contact-description">扫码进群，直接与作者沟通，分享你的反馈和功能建议。</p>
-  ${qr ? `<div class="contact-qr-frame"><div class="contact-qr-viewport"><img class="contact-group-qr" src="${esc(qr)}" alt="足球记录 QQ 交流群入群二维码" /></div></div><a class="contact-save-qr" href="${esc(qr)}" download="足球记录交流群二维码.png">保存二维码图片</a><p class="contact-qr-hint">使用 QQ 扫一扫，或保存图片后在 QQ 中识别。</p>` : `<div class="contact-qr-placeholder" role="status"><strong>群二维码待提供</strong><span>你也可以先通过下方邮箱联系作者</span></div>`}</section>
+  ${qr ? `<div class="contact-qr-frame"><div class="contact-qr-viewport"><img class="contact-group-qr" src="${esc(qr)}" alt="球历 QQ 交流群入群二维码" /></div></div><a class="contact-save-qr" href="${esc(qr)}" download="球历交流群二维码.png">保存二维码图片</a><p class="contact-qr-hint">使用 QQ 扫一扫，或保存图片后在 QQ 中识别。</p>` : `<div class="contact-qr-placeholder" role="status"><strong>群二维码待提供</strong><span>你也可以先通过下方邮箱联系作者</span></div>`}</section>
   <section class="panel contact-email-panel"><div class="panel-head"><h3>邮件联系</h3><span>随时欢迎反馈</span></div><p class="contact-description">使用问题、功能建议，都可以写信告诉我。</p><a class="contact-email-address" href="mailto:${authorContact.email}">${authorContact.email}</a><a class="primary-button contact-email-action" href="mailto:${authorContact.email}">发送邮件<span aria-hidden="true">↗</span></a></section>`;
 }
 
