@@ -1,11 +1,11 @@
 # NATIVE-004：采集片段元数据契约
 
-状态：计划登记，待 TDD 实施和双审。仅 M1 合同补缺，不代表 M2 采集或恢复完成。
+状态：作者实现及自验完成，源码已获两位非作者审阅 PASS；最终文档复审及集成待主代理登记。仅 M1 合同补缺，不代表 M2 采集或恢复完成。
 
 | 字段 | 实际值 |
 |---|---|
 | 主代理 / 唯一写入者 | /root / /root/capture_contract |
-| 两位非作者审阅者 | /root/environment_check（规格）、/root（质量），待最终源码 SHA 审阅 |
+| 两位非作者审阅者 | /root/environment_check（规格）、/root（质量）；均对源码36f31bbeecd05418d062dc69ad8f7fb8411be6c9 PASS |
 | 原始 base / 开写 HEAD | f2cf0786fa57f846001a8df67d1861803f4a090d，clean；共享事件引擎已审依赖满足 |
 | 合并目标 / 创建时目标 SHA | dev / f2cf0786fa57f846001a8df67d1861803f4a090d |
 | 临时分支 | feat/capture-metadata-contract |
@@ -14,7 +14,11 @@
 | 所有权 | CaptureMetadata.swift、CaptureMetadataTests.swift、本卡、子计划、验证记录；完整路径见子计划 |
 | 不修改 | 其他 Core 文件、Package.swift、MatchStore、脚本、native/README、Xcode、UI、原型、产品、AGENTS / 治理 / 母计划 |
 | 依赖与并行 | 基于已审核心；与 NATIVE-003 Store 无依赖及文件相交，不改其 worktree |
-| 验证 | 待保存 Core 测试与双端无签名 SDK 构建实际证据；真机不适用 |
+| 验证 | 41 个 Core 测试0失败；iOS / Watch无签名SDK构建通过；真机不适用；见验证记录 |
 | 集成 / 清理 | 作者不推进长期分支或 push；主代理登记审阅与实际 merge，再安全归档并删除临时分支 |
 
 [实施子计划](../../superpowers/plans/2026-10-16-capture-metadata-contract.md)。只定义非健康关联及观测窗口；实际 HealthKit / 恢复 / 元数据落盘接线留 M2，不使用随机 ID 伪造存在的 Workout，不制造缺口内的采样或比赛时长。
+
+源码提交：`36f31bbeecd05418d062dc69ad8f7fb8411be6c9`；计划提交：`4a3bae5`。
+
+[验证记录](../validation/NATIVE-004.md) 保存红绿结果、最终构建、持久日志 / 哈希和 M2 使用边界。完整脚本 exit 0；构建输入与源码提交一致。最新 Store + Core 组合由主代理合并后另验。
