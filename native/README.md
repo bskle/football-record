@@ -4,13 +4,15 @@
 
 用Xcode27打开FootballRecord.xcodeproj，选择共享scheme FootballRecord-iOS或FootballRecord-Watch与相应模拟器。最低iOS17/watchOS10，Swift6。Watch为现代单目标App，iOS构建并嵌入Watch产品。两个App实际消费MatchCore/AppIdentity，目前界面仍只有“开发预览”空状态，没有正式开赛入口。
 
-在仓库根目录执行 scripts/native/verify.sh，依次运行共享包swift test、iOS Simulator与watchOS Simulator无签名构建，任一步失败返回非零。产物、DerivedData和日志位于忽略的native/.build/，可用NATIVE_BUILD_ROOT=/absolute/path改为独立目录。仅宿主行为测试可执行 swift test --package-path native/Packages/MatchCore。
+在仓库根目录执行 scripts/native/verify.sh，依次运行共享包swift test、MatchStore的iOS17/watchOS10 Simulator显式SDK编译、两个App无签名构建，任一步失败返回非零。App仅消费MatchCore，所以单靠App构建不能证明SQLite target编译。产物、DerivedData和日志默认位于忽略的native/.build/，可用NATIVE_BUILD_ROOT=/absolute/path改为独立目录；Desktop存在Finder元数据时使用/tmp内唯一目录。仅宿主行为测试可执行 swift test --package-path native/Packages/MatchCore。
+
+例如 `NATIVE_BUILD_ROOT=/tmp/football-record-native-check scripts/native/verify.sh` 将构建产物放到独立目录；若遇到Desktop FinderInfo资源属性污染，无需清除源码xattr或删除他人产物。
 
 ## 共享引擎与保存边界
 
 NATIVE-002实现纯内存比赛事件引擎与33个独立XCTest方法；App仍是预览壳。MatchDescriptor固定matchID/recordingDeviceID和稳定StartIntent；不可变MatchEvent保存原事实与追加revision。MatchReplay.replay(descriptor:events:now:completionEvidence:)确定性计算双轴区间、比分、出场、生涯及诊断，无Timer累计时长。
 
-LiveMatchRecorder/PostMatchEditor只产生待保存事实与影响预览。应用复制staging值，事务保存descriptor/事实/outbox，成功后才替换状态并反馈成功；NATIVE-003负责事务库与故障恢复，当前不能把内存追加说成已保存。sequence在sourceDeviceID内唯一，修订使用根事实sequence/sourceDeviceID/eventID保留同刻业务顺序。start/end可改时间、不可删除或颠倒；损坏导入诊断conflict，已知终结禁止再次start。
+LiveMatchRecorder/PostMatchEditor只产生待保存事实与影响预览。应用复制staging值，交给MatchStore事务保存descriptor/事实/outbox，成功返回CommitReceipt后才替换状态并反馈成功。预览App尚未装配该保存链路。sequence在sourceDeviceID内唯一，修订使用根事实sequence/sourceDeviceID/eventID保留同刻业务顺序。start/end可改时间、不可删除或颠倒；损坏导入诊断conflict，已知终结禁止再次start。
 
 正常本地结束先为endedPendingSync，不进入生涯；可信完整保存/durable ACK适配器完成实际工作后才调用TrustedCompletionEvidence.acceptedByCompleteSaveBoundary。凭据绑定matchID、当前终结ID、去重原始事实全集canonical SHA256；乱序/相同重传不失效，新增事实/修订使旧凭据失效。核心不实现保存或ACK验证，完成与后台锁释放独立。
 
@@ -18,7 +20,21 @@ LiveMatchRecorder/PostMatchEditor只产生待保存事实与影响预览。应�
 
 手机完全没有start也可保留可信异常终结：incomplete+missingStart，不造开始；matchElapsed快照此时可nil，matchDuration/appearanceDuration/elapsed(at:)未知为nil，timingComplete=false。迟到start/score恢复计算但仍incomplete，未知影响差值nil并要求确认。暂停期间允许比分补记，双时长冻结、场上状态保留，下场不暂停比赛。completed且实际出场才计出场/胜率/体能；未出场completed仅计场次，健康缺失返回nil。
 
-工程基础与引擎只是M1部分交付。实际证据见 [NATIVE-002验证](../docs/native/validation/NATIVE-002.md)；不代表可靠事务保存、真实采集、联网锁或完整M1验收。
+事件引擎证据见 [NATIVE-002验证](../docs/native/validation/NATIVE-002.md)。SQLite仓储证据见 [NATIVE-003验证](../docs/native/validation/NATIVE-003.md)；M1本地组件等待双审集成，不代表真实采集、联网锁、设备同步或发布完成。
+
+## SQLite 事务与可靠传输边界
+
+MatchStore为actor，系统SQLite3使用WAL和synchronous=FULL并核对实际PRAGMA；一笔事务内无await。原记录设备先commit无permit、无events的descriptor以保存StartIntent（expectedGeneration=0），真实网络adapter验证permit后才让LiveMatchRecorder生成start，再用已保存generation提交新facts和完整匹配outbox包。MatchID/recordingDeviceID/intent不可改绑；数据库不保存第二份比分或累计时长，也不保存健康原始样本。
+
+StoreCommit同时保存descriptor、新原始facts、稳定commandID/首次receipt和稳定MatchPacket。重试必须复用第一次完整请求，包括expectedGeneration、事实顺序、包ID/idempotencyKey；相同commandID异请求报commandConflict。成功命令在CAS前查receipt，并核验对应descriptor、原始facts与outbox仍完整，提交后响应丢失并关闭重开仍返回首次receipt；凭据存在但原行缺失或损坏则诊断失败。合法permit升级和后续修订不使首次receipt失效。不同命令用旧generation报staleGeneration，多个连接不能覆盖彼此。SQLite故障抛错，调用端不采纳staging、不反馈成功。重启只需数据库URL，通过matchIDs发现全部已保存意图/比赛，再读snapshot与pendingPackets，无需另存UserDefaults索引。
+
+receive接收可信adapter提供的expectedPeerDeviceID/localDeviceID/expectedMatchID，核对包版本、路由和canonical SHA256，事实与接收receipt同事务COMMIT后才返回DurableACK；首次合法接收已开始比赛不要求本机事先保存intent。同包重传先核验对应descriptor和原始facts仍完整，再返回同ACK，不以receipt代替丢失的事实。修订先到、乱序和跨writer同sequence均保留，业务异常由同一MatchReplay诊断。eventID为全库唯一；相同ID异canonical payload（含跨match碰撞）保留原事实、隔离新bytes并显式失败，不ACK。坏JSON/checksum、错误路由保留非阻塞audit，不影响合法事实回放或正确包重试；事实冲突/库内损坏保留blocking诊断，StoreSnapshot.replay拒绝正常结果。阻塞诊断需后续恢复界面或可信处理流程处理，本阶段不静默选择冲突胜者或自动清除。
+
+pendingPackets返回未确认包；传输完成不清包。acknowledge只接受packetID/checksum/接收设备均匹配的可信持久ACK，重复幂等，仅标记该包并保留包与ACK审计记录；部分ACK不完成比赛。checksum是完整性检查，不是认证。真实同账号、配对、写入权限、实际发送和可信ACK来源仍由后续adapter验证，本组件不伪造这些能力。
+
+saveCompletionEvidence仅保存可信完整保存adapter给出的、与当前全事实集匹配的凭据；正常end、本地保存或任意ACK不自行创建它。新增原始修订让旧凭据失效，异常终结与迟到normal end仍incomplete。本仓储拒绝releaseRequested/releasedConfirmed的本地descriptor写入，后续后台锁adapter需独立设计真实确认路径，不能由本地end释放当前或后来比赛的锁。
+
+schema v0空库到v1创建和user_version更新同事务；没有虚构旧版发布库。未来版本、部分schema、损坏数据库显式失败，不删除或重建原库；未来版本回归也核对原DB/WAL内容及SHM文件保留（SHM读标记是SQLite可变锁索引，不声称字节不变）。坏业务payload保留原bytes及诊断。故障注入和原始SQL仅为internal测试入口，生产公开API无任意SQL。当前29个仓储测试加33个核心测试使用真实临时SQLite文件；尚无进程被系统杀死/物理断电或真机存储压力实测，不能用故障注入代替这些证据。
 
 ## 签名与真机
 
