@@ -16,7 +16,7 @@
 
 ## 行为裁决与仓储接口
 
-同实际时间先按 sequence，再以 eventID 保证稳定顺序；同一 sequence 的不同事实另诊断。修订必须引用前一版本且 revision + 1，分支、循环、同 ID 不同 payload 不静默择一。暂停中比分允许记录：matchElapsed 冻结，球员保留场上状态，按事件序列计算在场进失球；出场时长仅累加与运行区间交集。结束后事实保留并标越界但不统计；预览结果可供保存前确认。只有 completed 且实际出场才有胜率 / 体能资格；健康值未提供则 nil。后台锁释放不由本地结束推定。
+sequence按sourceDeviceID作用域校验；同实际时间按根事实sequence、根sourceDeviceID和根eventID保证稳定业务顺序，修订自身sequence只作追加审计。同一来源/sequence的不同事实另诊断。修订必须引用前一版本且 revision + 1，分支、循环、同 ID 不同 payload 不静默择一。暂停中比分允许记录：matchElapsed 冻结，球员保留场上状态，按事件序列计算在场进失球；出场时长仅累加与运行区间交集。结束后事实保留并标越界但不统计；预览结果可供保存前确认。只有 completed 且实际出场才有胜率 / 体能资格；健康值未提供则 nil。后台锁释放不由本地结束推定。
 
 NATIVE-003 接收原始 descriptor / events 并事务保存，再运行同一回放；StartIntent 必须先持久化。所有命令返回待保存事件，调用方只能在事务提交后反馈成功；outbox / ACK / SQLite 不在本任务范围。开发许可有明确 simulation 标记，不能作为真实网络锁证据。核心要求明确 occurredAt；仅比赛时间落在暂停边界时返回需明确真实时间。
 
