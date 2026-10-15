@@ -9,8 +9,8 @@ package="$repo_root/native/Packages/MatchCore"
 mkdir -p "$log_dir"
 
 printf 'Native verification logs: %s\n' "$log_dir"
-swift build --package-path "$package" --scratch-path "$build_root/SwiftPM" \
-    2>&1 | tee "$log_dir/swift-build.log"
+swift test --package-path "$package" --scratch-path "$build_root/SwiftPM" \
+    2>&1 | tee "$log_dir/swift-test.log"
 xcodebuild -project "$project" -scheme FootballRecord-iOS \
     -destination 'generic/platform=iOS Simulator' \
     -derivedDataPath "$build_root/DerivedData-iOS" CODE_SIGNING_ALLOWED=NO build \
