@@ -14,27 +14,27 @@
 - 临时分支 `build/native-foundation`；合并目标 `dev`。受管 worktree identityKey 与绝对路径均为 `/Users/liam/.codex/worktrees/native-foundation/20260830_足球记录`；开写前实际 HEAD 与上述 base 一致、状态 clean。
 - 唯一写入负责人 `/root/native_foundation`；主代理 `/root`；非作者审阅者 `/root` 与 `/root/environment_check`。共享 `project.pbxproj`、scheme、target 与配置由本作者串行修改。
 - 所有权：`native/FootballRecord.xcodeproj/`、`native/Configuration/`、`native/Apps/iOS/`、`native/Apps/Watch/`、`native/Packages/MatchCore/`、`native/README.md`、`scripts/native/`、`.gitignore`、本计划、`docs/native/tasks/NATIVE-001.md`、`docs/native/validation/NATIVE-001.md`。
-- 不修改原型、产品方案、母计划、治理文档、其他任务卡或其他 worktree，不合并长期分支、不推送。
+- 不修改原型、产品方案、治理文档、其他任务卡或其他 worktree，不合并长期分支、不推送。主代理补充授权仅同步 `docs/development-readiness.md` 的工程当前事实和母计划阶段表 M1 行，不改产品范围或历史快照。
 
 ## Task 1：登记与共享入口
 
-- [ ] 写本计划和任务卡，核对 SHA / 目录 / 所有权后作独立文档提交。
-- [ ] 创建 `native/Packages/MatchCore/Package.swift` 与 `Sources/MatchCore/AppIdentity.swift`：唯一产品 `MatchCore`，只暴露中文名与英文名；无外部依赖、无比赛功能。
-- [ ] 包使用 `.iOS(.v17)`、`.watchOS(.v10)`、`.macOS(.v14)`，Swift tools 6.0。静态身份常量不新增镜像测试，实际消费者编译证明入口可用；尚无业务测试。
+- [x] 写本计划和任务卡，核对 SHA / 目录 / 所有权后作独立文档提交。
+- [x] 创建 `native/Packages/MatchCore/Package.swift` 与 `Sources/MatchCore/AppIdentity.swift`：唯一产品 `MatchCore`，只暴露中文名与英文名；无外部依赖、无比赛功能。
+- [x] 包使用 `.iOS(.v17)`、`.watchOS(.v10)`、`.macOS(.v14)`，Swift tools 6.0。静态身份常量不新增镜像测试，实际消费者编译证明入口可用；尚无业务测试。
 
 ## Task 2：双端工程壳
 
-- [ ] 创建 `native/FootballRecord.xcodeproj/project.pbxproj` 和共享 `FootballRecord-iOS`、`FootballRecord-Watch` scheme。两个 App target 链接同一个本地包产品；iOS 的 Embed Watch Content 与 target dependency 包含 Watch App。
-- [ ] iOS / Watch 各用独立 SwiftUI `@main` 入口与空状态视图，显示共享名称及“开发预览”“尚未开始记录”；不显示假健康数值，不提供正式开赛入口。
-- [ ] 创建显式 Info.plist 和 en / zh-Hans 显示名称。Watch 设置 `WKApplication = YES` 与 `WKCompanionAppBundleIdentifier = com.example.footballrecord`，不建旧 WatchKit extension。
-- [ ] 使用 `com.example.footballrecord`、`com.example.footballrecord.watchapp` 本地占位 Bundle ID；无 Team、entitlements 或付费能力，不接 HealthKit / CloudKit / Sign in with Apple。只设置最低系统与 Swift 6 等本任务所需配置。
+- [x] 创建 `native/FootballRecord.xcodeproj/project.pbxproj` 和共享 `FootballRecord-iOS`、`FootballRecord-Watch` scheme。两个 App target 链接同一个本地包产品；iOS 的 Embed Watch Content 与 target dependency 包含 Watch App。
+- [x] iOS / Watch 各用独立 SwiftUI `@main` 入口与空状态视图，显示共享名称及“开发预览”“尚未开始记录”；不显示假健康数值，不提供正式开赛入口。
+- [x] 创建显式 Info.plist 和 en / zh-Hans 显示名称。Watch 设置 `WKApplication = YES` 与 `WKCompanionAppBundleIdentifier = com.example.footballrecord`，不建旧 WatchKit extension。
+- [x] 使用 `com.example.footballrecord`、`com.example.footballrecord.watchapp` 本地占位 Bundle ID；无 Team、entitlements 或付费能力，不接 HealthKit / CloudKit / Sign in with Apple。只设置最低系统与 Swift 6 等本任务所需配置。
 
 ## Task 3：可重复构建与交付
 
-- [ ] 创建 `scripts/native/verify.sh`，`set -euo pipefail`；项目缺失或任一构建失败立即返回非零，不作 skip。以脚本位置定位仓库，可从任意目录调用。
-- [ ] 依次执行 `swift build --package-path native/Packages/MatchCore`；`xcodebuild -project native/FootballRecord.xcodeproj -scheme FootballRecord-iOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`；Watch 对应 `FootballRecord-Watch` 和 `generic/platform=watchOS Simulator`。DerivedData / 包缓存隔离在 ignored `native/.build/` 下。
-- [ ] README 说明命令、签名占位、M1 未完范围与真机待验。`.gitignore` 仅追加真实 SwiftPM / DerivedData / xcuserdata 产物。
-- [ ] 运行完整脚本并保存本地原始日志；核对退出码、包引用、target dependency、watch 嵌入与 Info.plist；运行 `git diff --check`，将结果和限制写入验证记录。
+- [x] 创建 `scripts/native/verify.sh`，`set -euo pipefail`；项目缺失或任一构建失败立即返回非零，不作 skip。以脚本位置定位仓库，可从任意目录调用。
+- [x] 依次执行 `swift build --package-path native/Packages/MatchCore`；`xcodebuild -project native/FootballRecord.xcodeproj -scheme FootballRecord-iOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`；Watch 对应 `FootballRecord-Watch` 和 `generic/platform=watchOS Simulator`。DerivedData / 包缓存隔离在 ignored `native/.build/` 下。
+- [x] README 说明命令、签名占位、M1 未完范围与真机待验。`.gitignore` 仅追加真实 SwiftPM / DerivedData / xcuserdata 产物。
+- [x] 运行完整脚本并保存本地原始日志；核对退出码、包引用、target dependency、watch 嵌入与 Info.plist；运行 `git diff --check`，将结果和限制写入验证记录。
 - [ ] 按明确路径暂存，提交工程基础与实际证据。向主代理交付完整 HEAD 与提交清单，由两位非作者针对该 SHA 审阅；不提前声明已集成。
 
 ## 后续 M1 子任务

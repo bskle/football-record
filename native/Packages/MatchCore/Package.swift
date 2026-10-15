@@ -1,0 +1,9 @@
+// swift-tools-version: 6.0
+import PackageDescription
+
+let package = Package(
+    name: "MatchCore",
+    platforms: [.iOS(.v17), .watchOS(.v10), .macOS(.v14)],
+    products: [.library(name: "MatchCore", targets: ["MatchCore"])],
+    targets: [.target(name: "MatchCore")]
+)

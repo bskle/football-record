@@ -5,3 +5,9 @@
 # Runtime assets are kept in prototype/assets; ignore duplicate source images.
 /data/用户反馈群邀请二维码/
 /docs/qrcode_1791884906126.jpg
+
+# Native build outputs and per-user Xcode state.
+/native/.build/
+/native/Packages/MatchCore/.build/
+/native/Packages/MatchCore/.swiftpm/
+/native/**/xcuserdata/
