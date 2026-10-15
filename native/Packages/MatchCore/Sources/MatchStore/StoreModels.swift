@@ -77,10 +77,12 @@ public struct DurableACK: Codable, Sendable, Equatable {
     }
 }
 
+public enum StoreDiagnosticSeverity: String, Sendable { case audit, blocking }
 public struct StoreDiagnostic: Sendable, Equatable {
     public let code: String
     public let key: String
     public let rawBytes: Data
+    public let severity: StoreDiagnosticSeverity
 }
 public struct StoreSnapshot: Sendable {
     public let descriptor: MatchDescriptor
@@ -89,7 +91,7 @@ public struct StoreSnapshot: Sendable {
     public let diagnostics: [StoreDiagnostic]
     public let completionEvidence: TrustedCompletionEvidence?
     public func replay(now: Date) throws -> ReplayResult {
-        guard diagnostics.isEmpty else { throw StoreError.unresolvedDiagnostics }
+        guard !diagnostics.contains(where: { $0.severity == .blocking }) else { throw StoreError.unresolvedDiagnostics }
         return MatchReplay.replay(descriptor: descriptor, events: events, now: now, completionEvidence: completionEvidence)
     }
 }

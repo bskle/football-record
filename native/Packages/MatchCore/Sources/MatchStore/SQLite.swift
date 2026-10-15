@@ -121,11 +121,11 @@ final class SQLite: @unchecked Sendable {
     private func check(_ code: Int32) throws { if code != SQLITE_OK { throw failure(code) } }
     private static let schema = [
         "CREATE TABLE matches (match_id TEXT PRIMARY KEY NOT NULL, descriptor BLOB NOT NULL, generation INTEGER NOT NULL, intent_id TEXT UNIQUE NOT NULL)",
-        "CREATE TABLE events (match_id TEXT NOT NULL, event_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(match_id,event_id))",
+        "CREATE TABLE events (match_id TEXT NOT NULL, event_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
         "CREATE TABLE commands (command_id TEXT PRIMARY KEY NOT NULL, request_hash TEXT NOT NULL, receipt BLOB NOT NULL)",
         "CREATE TABLE outbox (packet_id TEXT PRIMARY KEY NOT NULL, idempotency_key TEXT UNIQUE NOT NULL, match_id TEXT NOT NULL, packet BLOB NOT NULL, checksum TEXT NOT NULL, target TEXT NOT NULL, ack BLOB)",
         "CREATE TABLE inbound (packet_id TEXT PRIMARY KEY NOT NULL, idempotency_key TEXT UNIQUE NOT NULL, checksum TEXT NOT NULL, peer TEXT NOT NULL, ack BLOB NOT NULL)",
-        "CREATE TABLE diagnostics (match_id TEXT NOT NULL, code TEXT NOT NULL, key TEXT NOT NULL, raw BLOB NOT NULL, UNIQUE(match_id,code,key,raw))",
+        "CREATE TABLE diagnostics (match_id TEXT NOT NULL, code TEXT NOT NULL, key TEXT NOT NULL, raw BLOB NOT NULL, severity TEXT NOT NULL, UNIQUE(match_id,code,key,raw))",
         "CREATE TABLE completion (match_id TEXT PRIMARY KEY NOT NULL, evidence BLOB NOT NULL)"
     ]
     private static let schemaChecks = [
@@ -134,7 +134,7 @@ final class SQLite: @unchecked Sendable {
         "SELECT command_id,request_hash,receipt FROM commands LIMIT 0",
         "SELECT packet_id,idempotency_key,match_id,packet,checksum,target,ack FROM outbox LIMIT 0",
         "SELECT packet_id,idempotency_key,checksum,peer,ack FROM inbound LIMIT 0",
-        "SELECT match_id,code,key,raw FROM diagnostics LIMIT 0",
+        "SELECT match_id,code,key,raw,severity FROM diagnostics LIMIT 0",
         "SELECT match_id,evidence FROM completion LIMIT 0"
     ]
 }

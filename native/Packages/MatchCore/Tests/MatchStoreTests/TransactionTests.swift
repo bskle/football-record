@@ -121,4 +121,45 @@ final class TransactionTests: XCTestCase, @unchecked Sendable {
         XCTAssertThrowsError(try r.undoLastQuick(eventID: "again", sourceDeviceID: "watch", now: t.addingTimeInterval(7)))
         try await restored.close()
     }
+    func testCommandReceiptCannotConfirmMissingOrCorruptFactsOrOutbox() async throws {
+        for damage in ["missing-event", "corrupt-event", "missing-packet", "corrupt-packet", "missing-match", "corrupt-match"] {
+            let url = path(); try await prepare(url)
+            let store = try MatchStore(url: url); let (d, e) = try facts()
+            let command = try request(descriptor: d, events: e)
+            _ = try await store.commit(command); try await store.close()
+            let sql = try SQLite(url: url, fault: nil)
+            switch damage {
+            case "missing-event": try sql.execute("DELETE FROM events WHERE event_id='goal'")
+            case "corrupt-event": try sql.execute("UPDATE events SET checksum='wrong' WHERE event_id='goal'")
+            case "missing-packet": try sql.execute("DELETE FROM outbox")
+            case "missing-match": try sql.execute("DELETE FROM matches")
+            case "corrupt-match": try sql.execute("UPDATE matches SET descriptor=?", [.blob(Data("broken-match".utf8))])
+            default: try sql.execute("UPDATE outbox SET packet=?", [.blob(Data("broken-packet".utf8))])
+            }
+            try sql.close()
+            let reopened = try MatchStore(url: url)
+            do { _ = try await reopened.commit(command); XCTFail("receipt cannot confirm \(damage)") } catch {}
+            let diagnostics = try await reopened.diagnostics(matchID: "match")
+            XCTAssertFalse(diagnostics.isEmpty)
+            XCTAssertTrue(diagnostics.allSatisfy { $0.severity == .blocking })
+            try await reopened.close()
+        }
+    }
+    func testOriginalIntentReceiptRemainsValidAfterPermitAndLaterRevision() async throws {
+        let url = path(); try await prepare(url)
+        let store = try MatchStore(url: url); let (d, e) = try facts()
+        let command = try request(descriptor: d, events: e)
+        let receipt = try await store.commit(command)
+        var recorder = LiveMatchRecorder(descriptor: d, events: e)
+        let undo = try recorder.undoLastQuick(eventID: "undo", sourceDeviceID: "watch", now: t.addingTimeInterval(5))
+        _ = try await store.commit(request("undo", generation: 2, descriptor: d, events: [undo]))
+        let repeated = try await store.commit(command)
+        XCTAssertEqual(repeated, receipt)
+        let intentReceipt = try await store.commit(StoreCommit(commandID: "intent", expectedGeneration: 0, descriptor: descriptor(), events: [], packets: []))
+        XCTAssertEqual(intentReceipt.generation, 1)
+        let s = try await store.snapshot(matchID: "match")
+        XCTAssertEqual(s.generation, 3); XCTAssertEqual(s.descriptor.startPermit, d.startPermit)
+        XCTAssertEqual(try s.replay(now: t.addingTimeInterval(6)).score.forTeam, 0)
+        try await store.close()
+    }
 }

@@ -35,6 +35,23 @@ final class TransportTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(try s.replay(now: helper.t.addingTimeInterval(10)).score.forTeam, 1)
         try await reopened.close()
     }
+    func testDuplicateReceiptCannotACKMissingOrCorruptCommittedFacts() async throws {
+        for damage in ["missing", "corrupt", "missing-match", "corrupt-match"] {
+            let url = helper.path(); let receiver = try MatchStore(url: url); let p = try packet()
+            _ = try await receive(receiver, p); try await receiver.close()
+            let sql = try SQLite(url: url, fault: nil)
+            if damage == "missing" { try sql.execute("DELETE FROM events WHERE event_id='goal'") }
+            else if damage == "corrupt" { try sql.execute("UPDATE events SET checksum='corrupt' WHERE event_id='goal'") }
+            else if damage == "missing-match" { try sql.execute("DELETE FROM matches") }
+            else { try sql.execute("UPDATE matches SET descriptor=?", [.blob(Data("broken-match".utf8))]) }
+            try sql.close()
+            let reopened = try MatchStore(url: url)
+            do { _ = try await receive(reopened, p); XCTFail("receipt alone must not ACK lost facts") } catch {}
+            let diagnostics = try await reopened.diagnostics(matchID: "match")
+            XCTAssertTrue(diagnostics.contains { $0.key == (damage.contains("match") ? "match" : "goal") && $0.severity == .blocking })
+            try await reopened.close()
+        }
+    }
     func testReceiveFailureBeforeCommitProducesNoACKAndRetryPersistsOnce() async throws {
         let url = helper.path(); let failing = try MatchStore(url: url, fault: .beforeCommit)
         let p = try packet()
@@ -62,6 +79,21 @@ final class TransportTests: XCTestCase, @unchecked Sendable {
         XCTAssertGreaterThanOrEqual(diagnostics.count, 4)
         try await store.close()
     }
+    func testRejectedWireAuditsDoNotPoisonValidFactsOrCorrectRetry() async throws {
+        let store = try MatchStore(url: helper.path()); let p = try packet()
+        _ = try await receive(store, p)
+        for bad in [try altered(p, field: "checksum", value: "bad"), try altered(p, field: "version", value: 99)] {
+            do { _ = try await receive(store, bad); XCTFail("reject wire") } catch {}
+        }
+        do { _ = try await store.receive(p, expectedPeerDeviceID: "other", localDeviceID: "phone", expectedMatchID: "match"); XCTFail("reject peer") } catch {}
+        do { _ = try await store.receive(Data("broken-json".utf8), expectedPeerDeviceID: "watch", localDeviceID: "phone", expectedMatchID: "match"); XCTFail("reject JSON") } catch {}
+        _ = try await receive(store, p)
+        let s = try await store.snapshot(matchID: "match")
+        XCTAssertEqual(s.diagnostics.count, 4)
+        XCTAssertTrue(s.diagnostics.allSatisfy { $0.severity == .audit })
+        XCTAssertEqual(try s.replay(now: helper.t.addingTimeInterval(10)).score.forTeam, 1)
+        try await store.close()
+    }
     func testSameEventIDDifferentPayloadIsQuarantinedWithoutACKOrOverwrite() async throws {
         let url = helper.path(); let store = try MatchStore(url: url); let p = try packet()
         _ = try await receive(store, p)
@@ -78,6 +110,26 @@ final class TransportTests: XCTestCase, @unchecked Sendable {
         XCTAssertTrue(s.diagnostics.contains { $0.code == "event-conflict" })
         XCTAssertThrowsError(try s.replay(now: helper.t.addingTimeInterval(10)))
         try await reopened.close()
+    }
+    func testEventIDsAreGlobalAndCrossMatchCollisionIsNotACKed() async throws {
+        let store = try MatchStore(url: helper.path()); let p = try packet()
+        _ = try await receive(store, p)
+        let intent = StartIntent(id: "intent-B", matchID: "match-B", recordingDeviceID: "watch", requestedAt: helper.t)
+        let descriptor = MatchDescriptor(startIntent: intent, starter: true,
+            startPermit: .acceptedByTrustedNetworkBoundary(for: intent, permitID: "permit-B"), backendLockState: .held)
+        var recorder = LiveMatchRecorder(descriptor: descriptor)
+        try recorder.start(eventID: "start", sourceDeviceID: "watch", now: helper.t)
+        let collision = try MatchPacket(packetID: "packet-B", idempotencyKey: "key-B", revision: 1,
+            sourceDeviceID: "watch", targetDeviceID: "phone", descriptor: descriptor, events: recorder.events)
+        do {
+            _ = try await store.receive(collision, expectedPeerDeviceID: "watch", localDeviceID: "phone", expectedMatchID: "match-B")
+            XCTFail("global event ID collision must not ACK")
+        } catch let error as StoreError { XCTAssertEqual(error, .eventConflict) }
+        let original = try await store.snapshot(matchID: "match")
+        XCTAssertEqual(original.events, p.body.events)
+        let diagnostics = try await store.diagnostics(matchID: "match-B")
+        XCTAssertTrue(diagnostics.contains { $0.code == "event-conflict" && $0.key == "start" })
+        try await store.close()
     }
     func testRevisionBeforeOriginalAndCrossWriterSequenceAreRetained() async throws {
         let store = try MatchStore(url: helper.path()); let (d, events) = try helper.facts()

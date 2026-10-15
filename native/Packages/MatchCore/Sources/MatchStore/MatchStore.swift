@@ -8,12 +8,20 @@ public actor MatchStore {
     public init(url: URL) throws { db = try SQLite(url: url, fault: nil); fault = nil }
     init(url: URL, fault: StoreFault) throws { db = try SQLite(url: url, fault: fault); self.fault = fault }
     public func close() throws { try db.close() }
+    /// Discover persisted intents and matches after process restart using only the database URL.
+    /// Includes terminal matches; snapshots and pendingPackets derive the recovery work to perform.
+    public func matchIDs() throws -> [String] {
+        try db.rows("SELECT match_id FROM matches ORDER BY rowid").map {
+            guard let id = $0[0].string, !id.isEmpty else { throw StoreError.corruptPayload(table: "matches", key: "invalid-id") }
+            return id
+        }
+    }
     public func saveCompletionEvidence(_ evidence: TrustedCompletionEvidence, expectedGeneration: Int64, now: Date) throws {
         try preservingDiagnostics(matchID: evidence.matchID) {
             try db.transaction {
                 let snapshot = try loadSnapshot(matchID: evidence.matchID)
                 guard snapshot.generation == expectedGeneration else { throw StoreError.staleGeneration }
-                guard snapshot.diagnostics.isEmpty else { throw StoreError.unresolvedDiagnostics }
+                guard !snapshot.diagnostics.contains(where: { $0.severity == .blocking }) else { throw StoreError.unresolvedDiagnostics }
                 guard MatchReplay.replay(descriptor: snapshot.descriptor, events: snapshot.events, now: now,
                     completionEvidence: evidence).state == .completed else { throw StoreError.staleCompletionEvidence }
                 try db.execute("INSERT INTO completion VALUES (?,?) ON CONFLICT(match_id) DO UPDATE SET evidence=excluded.evidence",
@@ -34,14 +42,14 @@ public actor MatchStore {
         let ack: DurableACK = try preservingDiagnostics(matchID: expectedMatchID) {
             let packet: MatchPacket
             do { packet = try JSONDecoder().decode(MatchPacket.self, from: bytes) }
-            catch { throw quarantine(.invalidPacket, code: "invalid-wire-json", key: Canonical.hash(bytes), raw: bytes) }
+            catch { throw quarantine(.invalidPacket, code: "invalid-wire-json", key: Canonical.hash(bytes), raw: bytes, severity: .audit) }
             let b = packet.body
             do { try packet.validate() } catch {
-                throw quarantine(.invalidPacket, code: "invalid-wire-checksum-version", key: b.packetID, raw: bytes)
+                throw quarantine(.invalidPacket, code: "invalid-wire-checksum-version", key: b.packetID, raw: bytes, severity: .audit)
             }
             guard b.sourceDeviceID == expectedPeerDeviceID, b.targetDeviceID == localDeviceID,
                   b.descriptor.matchID == expectedMatchID else {
-                throw quarantine(.invalidPacket, code: "invalid-wire-routing", key: b.packetID, raw: bytes)
+                throw quarantine(.invalidPacket, code: "invalid-wire-routing", key: b.packetID, raw: bytes, severity: .audit)
             }
             return try db.transaction {
                 let ack = DurableACK(packetID: b.packetID, checksum: packet.checksum, receivingDeviceID: localDeviceID)
@@ -50,6 +58,7 @@ public actor MatchStore {
                     guard row[0].string == packet.checksum, row[1].string == expectedPeerDeviceID, saved == ack else {
                         throw quarantine(.packetConflict, code: "packet-conflict", key: b.packetID, raw: bytes)
                     }
+                    _ = try verifyPersistedFacts(descriptor: b.descriptor, events: b.events)
                     return saved
                 }
                 let existing = try descriptorAndGeneration(expectedMatchID)
@@ -97,7 +106,16 @@ public actor MatchStore {
             try db.transaction {
                 if let saved = try db.rows("SELECT request_hash,receipt FROM commands WHERE command_id=?", [.text(request.commandID)]).first {
                     guard saved[0].string == hash else { throw StoreError.commandConflict }
-                    return try decode(CommitReceipt.self, saved[1], table: "commands", key: request.commandID)
+                    let receipt = try decode(CommitReceipt.self, saved[1], table: "commands", key: request.commandID)
+                    let persisted = try verifyPersistedFacts(descriptor: request.descriptor, events: request.events)
+                    guard request.expectedGeneration < Int64.max,
+                          receipt == CommitReceipt(commandID: request.commandID, matchID: request.descriptor.matchID,
+                            generation: request.expectedGeneration + 1, eventIDs: request.events.map(\.eventID), packetIDs: request.packets.map(\.body.packetID)),
+                          persisted.1 >= receipt.generation else {
+                        throw quarantine(.corruptPayload(table: "commands", key: request.commandID), code: "corrupt-commands", key: request.commandID, raw: saved[1].data ?? Data())
+                    }
+                    for packet in request.packets { try verifyPersistedPacket(packet) }
+                    return receipt
                 }
                 guard !request.commandID.isEmpty, request.expectedGeneration >= 0,
                       request.expectedGeneration < Int64.max else { throw StoreError.invalidRequest }
@@ -162,11 +180,12 @@ public actor MatchStore {
     }
 
     public func diagnostics(matchID: String) throws -> [StoreDiagnostic] {
-        try db.rows("SELECT code,key,raw FROM diagnostics WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
-            guard let code = $0[0].string, let key = $0[1].string, let raw = $0[2].data else {
+        try db.rows("SELECT code,key,raw,severity FROM diagnostics WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
+            guard let code = $0[0].string, let key = $0[1].string, let raw = $0[2].data,
+                  let severityName = $0[3].string, let severity = StoreDiagnosticSeverity(rawValue: severityName) else {
                 throw StoreError.corruptPayload(table: "diagnostics", key: matchID)
             }
-            return StoreDiagnostic(code: code, key: key, rawBytes: raw)
+            return StoreDiagnostic(code: code, key: key, rawBytes: raw, severity: severity)
         }
     }
 
@@ -226,14 +245,51 @@ public actor MatchStore {
             guard descriptor.startPermit != nil else { throw StoreError.invalidRequest }
         }
     }
+    /// Receipts are assertions about persisted bytes, not substitutes for the bytes. Both command
+    /// retries and duplicate receive ACKs use this check. Later permits/revisions may add facts but
+    /// cannot change identity or remove the raw facts acknowledged by the original receipt.
+    private func verifyPersistedFacts(descriptor: MatchDescriptor, events: [MatchEvent]) throws -> (MatchDescriptor, Int64) {
+        let rawDescriptor = try Canonical.data(descriptor)
+        guard let stored = try descriptorAndGeneration(descriptor.matchID),
+              stored.0.startIntent == descriptor.startIntent, stored.0.starter == descriptor.starter,
+              descriptor.startPermit == nil || stored.0.startPermit == descriptor.startPermit else {
+            throw quarantine(.corruptPayload(table: "matches", key: descriptor.matchID), code: "receipt-match-mismatch", key: descriptor.matchID, raw: rawDescriptor)
+        }
+        for event in events {
+            let expected = try Canonical.data(event)
+            guard let row = try db.rows("SELECT match_id,payload,checksum FROM events WHERE event_id=?", [.text(event.eventID)]).first else {
+                throw quarantine(.corruptPayload(table: "events", key: event.eventID), code: "receipt-event-missing", key: event.eventID, raw: expected)
+            }
+            guard let actual = row[1].data, row[0].string == descriptor.matchID,
+                  row[2].string == Canonical.hash(actual), actual == expected else {
+                throw quarantine(.corruptPayload(table: "events", key: event.eventID), code: "receipt-event-mismatch", key: event.eventID, raw: row[1].data ?? Data())
+            }
+        }
+        return stored
+    }
+    private func verifyPersistedPacket(_ packet: MatchPacket) throws {
+        let body = packet.body, expected = try Canonical.data(packet)
+        guard let row = try db.rows("SELECT packet,checksum,target,idempotency_key,match_id,ack FROM outbox WHERE packet_id=?", [.text(body.packetID)]).first else {
+            throw quarantine(.corruptPayload(table: "outbox", key: body.packetID), code: "receipt-outbox-missing", key: body.packetID, raw: expected)
+        }
+        guard row[0].data == expected, row[1].string == packet.checksum, row[2].string == body.targetDeviceID,
+              row[3].string == body.idempotencyKey, row[4].string == body.descriptor.matchID else {
+            throw quarantine(.corruptPayload(table: "outbox", key: body.packetID), code: "receipt-outbox-mismatch", key: body.packetID, raw: row[0].data ?? Data())
+        }
+        if case .null = row[5] { return }
+        let ack = try decode(DurableACK.self, row[5], table: "outbox", key: body.packetID)
+        guard ack == DurableACK(packetID: body.packetID, checksum: packet.checksum, receivingDeviceID: body.targetDeviceID) else {
+            throw quarantine(.corruptPayload(table: "outbox", key: body.packetID), code: "corrupt-outbox-ack", key: body.packetID, raw: row[5].data ?? Data())
+        }
+    }
     private func append(_ events: [MatchEvent], matchID: String) throws {
         for event in events {
             let bytes = try Canonical.data(event)
-            if let row = try db.rows("SELECT payload,checksum FROM events WHERE match_id=? AND event_id=?", [.text(matchID), .text(event.eventID)]).first {
+            if let row = try db.rows("SELECT payload,checksum,match_id FROM events WHERE event_id=?", [.text(event.eventID)]).first {
                 guard let old = row[0].data, row[1].string == Canonical.hash(old) else {
                     throw quarantine(.corruptPayload(table: "events", key: event.eventID), code: "corrupt-events", key: event.eventID, raw: row[0].data ?? Data())
                 }
-                guard old == bytes else {
+                guard row[2].string == matchID, old == bytes else {
                     throw quarantine(.eventConflict, code: "event-conflict", key: event.eventID, raw: bytes)
                 }
             } else {
@@ -254,8 +310,9 @@ public actor MatchStore {
         let error: StoreError
         let diagnostic: StoreDiagnostic
     }
-    private func quarantine(_ error: StoreError, code: String, key: String, raw: Data) -> Quarantined {
-        Quarantined(error: error, diagnostic: StoreDiagnostic(code: code, key: key, rawBytes: raw))
+    private func quarantine(_ error: StoreError, code: String, key: String, raw: Data,
+                            severity: StoreDiagnosticSeverity = .blocking) -> Quarantined {
+        Quarantined(error: error, diagnostic: StoreDiagnostic(code: code, key: key, rawBytes: raw, severity: severity))
     }
     private func decode<T: Decodable>(_ type: T.Type, _ value: SQLValue, table: String, key: String) throws -> T {
         let raw = value.data ?? Data()
@@ -267,7 +324,7 @@ public actor MatchStore {
         catch let quarantined as Quarantined {
             try db.transaction {
                 let d = quarantined.diagnostic
-                try db.execute("INSERT OR IGNORE INTO diagnostics VALUES (?,?,?,?)", [.text(matchID), .text(d.code), .text(d.key), .blob(d.rawBytes)])
+                try db.execute("INSERT OR IGNORE INTO diagnostics VALUES (?,?,?,?,?)", [.text(matchID), .text(d.code), .text(d.key), .blob(d.rawBytes), .text(d.severity.rawValue)])
             }
             throw quarantined.error
         }

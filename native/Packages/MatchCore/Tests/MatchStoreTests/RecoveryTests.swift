@@ -6,6 +6,54 @@ import SQLite3
 
 final class RecoveryTests: XCTestCase, @unchecked Sendable {
     let helper = TransactionTests()
+    func seedWithoutKeepingMatchIDs(_ url: URL) async throws {
+        let store = try MatchStore(url: url)
+        for started in [false, true] {
+            let intent = StartIntent(id: UUID().uuidString, matchID: UUID().uuidString,
+                recordingDeviceID: "watch", requestedAt: helper.t)
+            let pending = MatchDescriptor(startIntent: intent, starter: true)
+            _ = try await store.commit(StoreCommit(commandID: UUID().uuidString, expectedGeneration: 0,
+                descriptor: pending, events: [], packets: []))
+            if started {
+                let descriptor = MatchDescriptor(startIntent: intent, starter: true,
+                    startPermit: .acceptedByTrustedNetworkBoundary(for: intent, permitID: "permit"), backendLockState: .held)
+                var recorder = LiveMatchRecorder(descriptor: descriptor)
+                try recorder.start(eventID: UUID().uuidString, sourceDeviceID: "watch", now: helper.t)
+                let packet = try MatchPacket(packetID: UUID().uuidString, idempotencyKey: UUID().uuidString,
+                    revision: 1, sourceDeviceID: "watch", targetDeviceID: "phone", descriptor: descriptor, events: recorder.events)
+                _ = try await store.commit(StoreCommit(commandID: UUID().uuidString, expectedGeneration: 1,
+                    descriptor: descriptor, events: recorder.events, packets: [packet]))
+            }
+        }
+        try await store.close()
+    }
+    func testRecoveryDiscoversIntentAndOutboxUsingOnlyDatabaseURL() async throws {
+        let url = helper.path(); try await seedWithoutKeepingMatchIDs(url)
+        let reopened = try MatchStore(url: url)
+        let ids = try await reopened.matchIDs()
+        XCTAssertEqual(ids.count, 2)
+        var pending: StoreSnapshot?
+        var packetCount = 0
+        for id in ids {
+            let snapshot = try await reopened.snapshot(matchID: id)
+            if snapshot.descriptor.startPermit == nil { pending = snapshot }
+            packetCount += try await reopened.pendingPackets(matchID: id).count
+        }
+        XCTAssertEqual(packetCount, 1)
+        let saved = try XCTUnwrap(pending)
+        let resumed = MatchDescriptor(startIntent: saved.descriptor.startIntent, starter: saved.descriptor.starter,
+            startPermit: .acceptedByTrustedNetworkBoundary(for: saved.descriptor.startIntent, permitID: "recovered-permit"), backendLockState: .held)
+        var recorder = LiveMatchRecorder(descriptor: resumed)
+        try recorder.start(eventID: "recovered-start", sourceDeviceID: "watch", now: helper.t)
+        let packet = try MatchPacket(packetID: "recovered-packet", idempotencyKey: "recovered-key", revision: saved.generation,
+            sourceDeviceID: "watch", targetDeviceID: "phone", descriptor: resumed, events: recorder.events)
+        _ = try await reopened.commit(StoreCommit(commandID: "recovered-command", expectedGeneration: saved.generation,
+            descriptor: resumed, events: recorder.events, packets: [packet]))
+        let after = try await reopened.snapshot(matchID: saved.descriptor.matchID)
+        XCTAssertEqual(after.descriptor.startIntent, saved.descriptor.startIntent)
+        XCTAssertEqual(after.events.count, 1)
+        try await reopened.close()
+    }
     func testMigrationInterruptionRollsBackVersionAndSchemaThenReopens() async throws {
         let url = helper.path()
         XCTAssertThrowsError(try MatchStore(url: url, fault: .migrationAfterSchema))
@@ -33,6 +81,22 @@ final class RecoveryTests: XCTestCase, @unchecked Sendable {
         let original = try Data(contentsOf: url)
         XCTAssertThrowsError(try MatchStore(url: url)) { XCTAssertEqual($0 as? StoreError, .unsupportedSchema(99)) }
         XCTAssertEqual(try Data(contentsOf: url), original)
+    }
+    func testFutureSchemaPreservesDatabaseWALAndSHMFiles() throws {
+        let url = helper.path(); var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &handle), SQLITE_OK)
+        guard let handle else { throw StoreError.invalidRequest }
+        XCTAssertEqual(sqlite3_exec(handle, "PRAGMA journal_mode=WAL;CREATE TABLE future_data(value TEXT);INSERT INTO future_data VALUES ('keep');PRAGMA user_version=99", nil, nil, nil), SQLITE_OK)
+        var persist: Int32 = 1
+        XCTAssertEqual(sqlite3_file_control(handle, nil, SQLITE_FCNTL_PERSIST_WAL, &persist), SQLITE_OK)
+        XCTAssertEqual(sqlite3_close(handle), SQLITE_OK)
+        let paths = [url, URL(fileURLWithPath: url.path + "-wal"), URL(fileURLWithPath: url.path + "-shm")]
+        let originals = try paths.map { try Data(contentsOf: $0) }
+        XCTAssertThrowsError(try MatchStore(url: url))
+        for (path, bytes) in zip(paths.prefix(2), originals.prefix(2)) { XCTAssertEqual(try Data(contentsOf: path), bytes) }
+        // SHM is SQLite's live lock/read-mark index, not an immutable fact log. Merely reading
+        // user_version can alter read marks; preserve the file, without asserting byte identity.
+        XCTAssertEqual(try Data(contentsOf: paths[2]).count, originals[2].count)
     }
     func testPhysicalCorruptionPreservesFileAndDoesNotReplaceIt() throws {
         let url = helper.path(); let bytes = Data("not a sqlite database\0preserve".utf8)
