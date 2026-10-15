@@ -10,7 +10,7 @@
 
 ## 共享引擎与保存边界
 
-NATIVE-002实现纯内存比赛事件引擎与33个独立XCTest方法；App仍是预览壳。MatchDescriptor固定matchID/recordingDeviceID和稳定StartIntent；不可变MatchEvent保存原事实与追加revision。MatchReplay.replay(descriptor:events:now:completionEvidence:)确定性计算双轴区间、比分、出场、生涯及诊断，无Timer累计时长。
+NATIVE-002实现纯内存比赛事件引擎与原有33个独立XCTest方法；NATIVE-004增加采集元数据合同的8个测试，当前MatchCore共41个。App仍是预览壳。MatchDescriptor固定matchID/recordingDeviceID和稳定StartIntent；不可变MatchEvent保存原事实与追加revision。MatchReplay.replay(descriptor:events:now:completionEvidence:)确定性计算双轴区间、比分、出场、生涯及诊断，无Timer累计时长。
 
 LiveMatchRecorder/PostMatchEditor只产生待保存事实与影响预览。应用复制staging值，交给MatchStore事务保存descriptor/事实/outbox，成功返回CommitReceipt后才替换状态并反馈成功。预览App尚未装配该保存链路。sequence在sourceDeviceID内唯一，修订使用根事实sequence/sourceDeviceID/eventID保留同刻业务顺序。start/end可改时间、不可删除或颠倒；损坏导入诊断conflict，已知终结禁止再次start。
 
@@ -20,7 +20,11 @@ LiveMatchRecorder/PostMatchEditor只产生待保存事实与影响预览。应�
 
 手机完全没有start也可保留可信异常终结：incomplete+missingStart，不造开始；matchElapsed快照此时可nil，matchDuration/appearanceDuration/elapsed(at:)未知为nil，timingComplete=false。迟到start/score恢复计算但仍incomplete，未知影响差值nil并要求确认。暂停期间允许比分补记，双时长冻结、场上状态保留，下场不暂停比赛。completed且实际出场才计出场/胜率/体能；未出场completed仅计场次，健康缺失返回nil。
 
-事件引擎证据见 [NATIVE-002验证](../docs/native/validation/NATIVE-002.md)。SQLite仓储证据见 [NATIVE-003验证](../docs/native/validation/NATIVE-003.md)；M1本地组件等待双审集成，不代表真实采集、联网锁、设备同步或发布完成。
+事件引擎证据见 [NATIVE-002验证](../docs/native/validation/NATIVE-002.md)，SQLite仓储证据见 [NATIVE-003验证](../docs/native/validation/NATIVE-003.md)。M1本地基础已双审集成：仓储merge为 `9e4ee11e723f6dd46fccce35b93a9c625c7f0d42`，采集合同merge及当前组合为 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`。2026-10-16（上海）主代理在组合提交上运行 `NATIVE_BUILD_ROOT=/tmp/football-record-m1-combined scripts/native/verify.sh` 退出0，70项测试和两端MatchStore SDK、两个App构建全部通过；组合证据与远端快照见 [GIT-002](../docs/native/tasks/GIT-002.md)。App仍为开发预览壳，没有用户记录页面；真实采集、联网锁、设备同步、云、签名与发布均未验收。
+
+## 采集元数据值合同
+
+NATIVE-004新增独立 `CaptureMetadata` 值类型，只保存固定matchID/recordingDeviceID绑定、非健康Workout关联ID、片段/缺口标识与已知或未知的观测时间。恢复失败可表达同一比赛下多个Workout片段和缺口；不补造时间、不插值、不更换原记录设备。构造与Codable解码均验证绑定、标识和已知时间边界。它不含HR、GPS、距离、速度、路线或权限样本，不证明Workout实际存在，也没有接入MatchStore、CloudKit、后台或HealthKit。真实Workout核验、元数据落盘与恢复适配由M2接线，不能把此合同当作采集已实现。证据见 [NATIVE-004验证](../docs/native/validation/NATIVE-004.md)。
 
 ## SQLite 事务与可靠传输边界
 
@@ -34,7 +38,7 @@ pendingPackets返回未确认包；传输完成不清包。acknowledge只接受p
 
 saveCompletionEvidence仅保存可信完整保存adapter给出的、与当前全事实集匹配的凭据；正常end、本地保存或任意ACK不自行创建它。新增原始修订让旧凭据失效，异常终结与迟到normal end仍incomplete。本仓储拒绝releaseRequested/releasedConfirmed的本地descriptor写入，后续后台锁adapter需独立设计真实确认路径，不能由本地end释放当前或后来比赛的锁。
 
-schema v0空库到v1创建和user_version更新同事务；没有虚构旧版发布库。未来版本、部分schema、损坏数据库显式失败，不删除或重建原库；未来版本回归也核对原DB/WAL内容及SHM文件保留（SHM读标记是SQLite可变锁索引，不声称字节不变）。坏业务payload保留原bytes及诊断。故障注入和原始SQL仅为internal测试入口，生产公开API无任意SQL。当前29个仓储测试加33个核心测试使用真实临时SQLite文件；尚无进程被系统杀死/物理断电或真机存储压力实测，不能用故障注入代替这些证据。
+schema v0空库到v1创建和user_version更新同事务；没有虚构旧版发布库。未来版本、部分schema、损坏数据库显式失败，不删除或重建原库；未来版本回归也核对原DB/WAL内容及SHM文件保留（SHM读标记是SQLite可变锁索引，不声称字节不变）。坏业务payload保留原bytes及诊断。故障注入和原始SQL仅为internal测试入口，生产公开API无任意SQL。当前29个仓储测试使用真实临时SQLite文件，与41个纯核心测试合计70个；尚无进程被系统杀死/物理断电或真机存储压力实测，不能用故障注入代替这些证据。
 
 ## 签名与真机
 

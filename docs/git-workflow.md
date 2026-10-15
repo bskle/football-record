@@ -1,12 +1,12 @@
 # Git 与多代理工作树治理方案
 
-状态：2026-10-15 规划治理与工程基础已完成双审并合入 `dev`；用户已接受 public 仓库，GitHub CLI 登录与管理员权限已核对，待首次推送，尚未发布。当前治理记录见 [GIT-001](native/tasks/GIT-001.md)，bootstrap 初始记录见 [NATIVE-000](native/tasks/NATIVE-000.md)。原生开发安排见[原生开发母计划](superpowers/plans/2026-10-15-native-development.md)，执行约束见[根 AGENTS.md](../AGENTS.md)。
+状态快照：2026-10-16（上海）M1 本地基础已完成双审、组合验证并同步 `dev`；App 仍为开发预览壳，尚未发布原生产品。用户已接受 public 仓库；三条长期分支与原型标签已同步。当前治理记录见 [GIT-002](native/tasks/GIT-002.md)，首次访问与同步记录见 [GIT-001](native/tasks/GIT-001.md)，bootstrap 初始记录见 [NATIVE-000](native/tasks/NATIVE-000.md)。原生开发安排见[原生开发母计划](superpowers/plans/2026-10-15-native-development.md)，执行约束见[根 AGENTS.md](../AGENTS.md)。
 
 ## 1. 事实基线与规则优先级
 
 历史快照（2026-10-15 规划启动）：仓库只有本地 `main`，唯一提交为 `59edac891ee3a1cbb79a30b396ad1902d0907a62`（`feat: add interactive football tracking prototype`），没有 remote、其他 worktree 或标签，启动时工作区干净。
 
-当前执行事实（2026-10-15）：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留上述浏览器基线；`dev` 已接收规划治理合并 `2d4616355221af0969e07e9b1f45852449cbb98e` 和工程基础合并 `b7729b75ff29fccb578ec204438aa37dc3ab2136`，两次合并提交均记录两位非作者审阅。`origin = https://github.com/bskle/football-record.git`；用户已明确接受 public，覆盖先前 private 意向。主代理已核对 GitHub CLI 登录及 `PUBLIC` / `ADMIN`，远端尚无分支，首次推送待本任务双审集成后执行。正式名称为球历 / `football-record`。旧任务卡保留当时记录，当前覆盖依据见 GIT-001；后续以实际 Git 和任务台账为准。
+当前执行事实（2026-10-16，GIT-002 定稿前快照）：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留上述浏览器基线；规划治理、工程基础、事件引擎、SQLite 仓储与采集片段合同均经两位非作者审阅进入 `dev`。最新组合 SHA 为 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`，70 项测试及四项无签名构建通过；具体任务 head 与合并见 GIT-002。`origin = https://github.com/bskle/football-record.git`；用户已明确接受 public，覆盖先前 private 意向。主代理已核对 GitHub CLI 登录及 `PUBLIC` / `ADMIN`，首次原子推送三条长期分支与原型标签成功，随后远端 `dev` 已同步并核对为上述组合 SHA；默认分支为 `main`。正式名称为球历 / `football-record`。旧任务卡保留当时记录，后续以实际 Git 和任务台账为准。
 
 当前 `main` 是浏览器原型基线，还不是已发布的 iPhone / Apple Watch 产品。建立分支不代表原生实现、构建、真机验证或发布已经完成。
 
@@ -26,7 +26,7 @@
 
 ## 3. 实际开发前的 bootstrap
 
-以下保留 bootstrap 的执行顺序供核对。2026-10-15 文档已完成双审并以 `2d4616355221af0969e07e9b1f45852449cbb98e` 合入 `dev`，工程基础随后以 `b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入；原文档任务分支与 worktree 已不在活动列表。初始任务卡不回写，当前 Git 核对见 GIT-001。
+以下保留 bootstrap 的执行顺序供核对。2026-10-15 文档已完成双审并以 `2d4616355221af0969e07e9b1f45852449cbb98e` 合入 `dev`，工程基础随后以 `b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入；原文档任务分支与 worktree 已不在活动列表。首次远端同步已在 GIT-001 双审合并后执行。初始任务卡不回写，当前 Git 核对见 GIT-002。
 
 1. 主代理重新检查 Git 版本、仓库根、HEAD、分支、标签、remote、worktree、暂存区、修改、未跟踪及冲突文件，核对本节基线是否仍成立。发现他人改动时按所有权保留，不能用清理命令消除。
 2. 对基线提交创建不可移动的 annotated tag，建议名为 `prototype-baseline-20261015`，明确记录它只标记浏览器原型。若同名标签存在，验证指向，不覆盖。正式版本才使用 `vX.Y.Z`；原型标签不宣称原生版本已发布。
@@ -172,7 +172,7 @@ Limitations: <未验证项及原因；无则写无>
 
 ## 11. 本地执行边界与未来远程保护
 
-当前 `remote.mode = configured-write-authorized`：`origin = https://github.com/bskle/football-record.git` 为用户已接受的 public 仓库。用户最新“公开就公开暂时没事”覆盖此前 private 意向；无需等待可见性改为 private。主代理已在可访问系统 keyring 与网络的上下文核对 `gh auth status`（已登录、HTTPS）及 `gh repo view`（`PUBLIC` / `ADMIN`），并成功执行 `gh auth setup-git --hostname github.com`。受限 sandbox 无法访问系统凭据或网络时的认证失败不能覆盖这次有效核对。`git ls-remote origin` 尚无分支，当前仍未推送。主代理将在本任务双审合入 `dev` 后，按授权首次同步 `main`、`dev`、`release` 和 `prototype-baseline-20261015`；不自动推送其他临时分支或标签。首次代码同步不代表签名、真机验收、TestFlight / App Store 分发或原生发布完成，也不宣称 PR、CI、保护规则已配置。
+当前 `remote.mode = configured-write-authorized`：`origin = https://github.com/bskle/football-record.git` 为用户已接受的 public 仓库。用户最新“公开就公开暂时没事”覆盖此前 private 意向；无需等待可见性改为 private。主代理已在可访问系统 keyring 与网络的上下文核对 `gh auth status`（已登录、HTTPS）及 `gh repo view`（`PUBLIC` / `ADMIN`），并成功执行 `gh auth setup-git --hostname github.com`。受限 sandbox 无法访问系统凭据或网络时的认证失败不能覆盖这次有效核对。2026-10-15 已按授权以 `git push --atomic -u origin main dev release refs/tags/prototype-baseline-20261015` 完成首次同步并核对远端引用；截至 2026-10-16 本快照，远端 `dev` 已同步并核对到 M1 组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`，远端仅三条长期分支，默认分支为 `main`。不自动推送其他临时分支或标签。代码同步不代表签名、真机验收、TestFlight / App Store 分发或原生发布完成；PR、CI 与服务端保护规则尚未配置。
 
 首次推送前核对实际 remote、待推引用及预期 SHA，推送后核对远端结果；后续交付仍须重新识别 upstream、默认分支、保护规则与写权限。当前已核对的登录及管理员权限不证明保护或 CI 已配置。三条长期分支应保护禁止直接推送、删除和历史改写；`dev` 要求双审与相关自动检查，`release` 还要求版本候选验收，`main` 要求发布证据并遵守服务端既有审批规则。真机验证无法自动化的部分以绑定 SHA 的记录作为必需审阅证据。provider 不支持某项强制规则时写明限制，由主代理在流程中执行，不能宣称服务端已经强制。
 

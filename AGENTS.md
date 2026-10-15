@@ -2,12 +2,13 @@
 
 本仓库的原生开发以 [原生开发母计划](docs/superpowers/plans/2026-10-15-native-development.md) 为任务依据，以 [Git 与工作树治理方案](docs/git-workflow.md) 为分支、提交、验证、合并和清理规则。用户当前明确指令优先于历史工作流记录；历史 `.czy-workflow/runtime/` 不能替代实际 Git 状态。
 
-## 当前执行状态（2026-10-15）
+## 当前执行状态（2026-10-16，上海）
 
 - 正式中文名为“球历”，英文名为 `football-record`；Xcode 工程技术名保留 `FootballRecord`。
 - 2026-10-15 规划启动快照曾为“尚未创建分支、worktree、标签”；该快照已被本次 bootstrap 事实取代。`dev`、`release`、`main` 均已从 `59edac891ee3a1cbb79a30b396ad1902d0907a62` 建立或保留，原型 annotated tag 为 `prototype-baseline-20261015`；`main` 仍是浏览器原型基线，`release` 没有活动候选。
-- 规划治理与 NATIVE-001 工程基础已分别经两位非作者审阅，以 `2d4616355221af0969e07e9b1f45852449cbb98e`、`b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入 `dev`；后者仍只是工程壳与构建基础。当前治理事实见 [GIT-001 台账](docs/native/tasks/GIT-001.md)，旧任务卡保留当时状态，不据此宣称业务实现或原生发布完成。
-- 用户已授权按现有计划推进，并以“公开就公开暂时没事”接受当前 public 仓库，覆盖先前 private 意向。`origin = https://github.com/bskle/football-record.git`；主代理已在可访问系统凭据及网络的上下文核对 `gh` 登录、HTTPS 认证与仓库 `PUBLIC` / `ADMIN` 权限。远端尚无分支，待治理双审集成后首次推送 `main`、`dev`、`release` 与原型标签；代码同步不等于原生发布，不虚构已推送、PR、CI 或保护规则。
+- M1 本地基础交付完成：NATIVE-001 工程、NATIVE-002 共享事件引擎、NATIVE-003 SQLite 事务仓储 / outbox 与 NATIVE-004 采集片段值合同均经两位非作者审阅合入 `dev`。组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 已验证 70 项 XCTest 零失败、两端 MatchStore SDK 与两个 App 无签名构建通过。采集元数据仅为合同，落盘及真实采集接线留 M2；App 仍为开发预览壳，没有用户记录页面。当前治理快照见 [GIT-002 台账](docs/native/tasks/GIT-002.md)，旧任务卡保留当时状态。
+- 用户已授权按现有计划推进，并以“公开就公开暂时没事”接受当前 public 仓库，覆盖先前 private 意向。`origin = https://github.com/bskle/football-record.git`；主代理已核对 `gh` 登录、HTTPS 认证与仓库 `PUBLIC` / `ADMIN` 权限。GIT-001 合并后已首次原子推送三条长期分支与原型标签；截至本快照，远端 `dev` 已核对为上述组合 SHA，`main` / `release` 仍为原型基线，默认分支为 `main`。代码同步不等于原生发布，PR、CI 与服务端保护规则尚未配置。
+- NATIVE-002 / 003 / 004 已请求原生 worktree 归档，但工具仍返回 queued 且实际列表仍 active，三个临时分支均保留；不把请求当作清理成功，不强删或手动绕过。证据已保存到工作树外，代码均已进入 `dev`；GIT-002 文档树待双审集成后按同一规则处理。
 - Xcode 27.0 / Swift 6.4 可用；用户暂不能连接真机。签名、真实设备和远端写权限不阻止 M1 工程搭建、纯业务测试与无签名 SDK 构建；真实采集、联网锁及分发仍须各阶段证据。
 
 ## 角色与派工
