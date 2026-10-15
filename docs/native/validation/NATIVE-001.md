@@ -1,6 +1,6 @@
 # NATIVE-001 验证记录
 
-日期：2026-10-15；作者 `/root/native_foundation`；原始基线 `2d4616355221af0969e07e9b1f45852449cbb98e`，分支 `build/native-foundation`。记录随工程提交绑定，最终完整 head 由作者交付及主代理双审记录引用；本记录不宣称已合入 dev。
+日期：2026-10-15；作者 `/root/native_foundation`；原始基线 `2d4616355221af0969e07e9b1f45852449cbb98e`，分支 `build/native-foundation`。工程与构建输入提交为 `b99d1e2a5e9cdfeb6f295f149c272599527eb0fe`；后续证据路径文档提交不改变构建输入。最终完整 head 由作者交付及主代理双审记录引用；本记录不宣称已合入 dev。
 
 ## 环境与命令结果
 
@@ -16,7 +16,7 @@ xcodebuild -project "$repo_root/native/FootballRecord.xcodeproj" -scheme Footbal
 
 其中 `repo_root` 为上述工作目录，`build_root = $repo_root/native/.build`。SwiftPM 输出 `Build complete!`；两个 Xcode 日志均输出 `** BUILD SUCCEEDED **`，脚本输出 `Native verification passed.`。没有业务逻辑、测试 target 或业务测试；本任务未运行 `swift test`。静态身份常量由真实双端消费者编译，不增加镜像测试。
 
-原始日志目录：`native/.build/logs/20261015T092639Z/`；已逐文件复制至工作树外 `/tmp/football-record-NATIVE-001/20261015T092639Z/`，归档 worktree 不会删除该副本。日志摘要：
+原始日志目录：`native/.build/logs/20261015T092639Z/`；持久证据根目录为 `/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-001/`，日志位于其 `20261015T092639Z/` 子目录。已从 `/tmp/football-record-NATIVE-001/` 逐文件复制日志、截图与模拟器信息，全部 SHA-256 与源文件一致，清单为证据根目录的 `SHA256.json`；归档 worktree 不会删除该副本。日志摘要：
 
 | 文件 | 结果 / SHA-256 |
 |---|---|
@@ -40,7 +40,7 @@ Xcode 共出现三条 `Metadata extraction skipped, no AppIntents.framework depe
 
 作者仅为本次验证创建 iPhone 18 Pro / iOS 27.0 模拟器 `C72EE3AF-1761-4276-B496-562B590F6ACF` 和 Apple Watch Series 12 (42mm) / watchOS 27.0 模拟器 `BF4FE046-067C-4DB0-AF7D-AD164FBD4A58`。`xcrun simctl boot`、`bootstatus -b`、`install` 与 `launch` 均返回 0；iOS 启动 PID 为 `9614`，Watch 为 `9725`。未配对模拟器，未验证通信。
 
-启动日志 `/tmp/football-record-NATIVE-001/simulator-launch.log`；截图 `/tmp/football-record-NATIVE-001/ios-preview.png` 与 `/tmp/football-record-NATIVE-001/watch-preview.png`。作者已读取两张图：显示“球历”、`football-record`、“开发预览”与“尚未开始记录”，内容完整，无假健康 / 比赛数据，无正式开赛入口。两个自建临时模拟器在截图后关闭并删除；未操作已有用户模拟器。
+持久证据根目录中的 `simulator-launch.log` 为启动及清理日志，`ios-preview.png`、`watch-preview.png` 为双端截图；其绝对根路径见上节，原始临时副本位于 `/tmp/football-record-NATIVE-001/`。作者已读取两张图：显示“球历”、`football-record`、“开发预览”与“尚未开始记录”，内容完整，无假健康 / 比赛数据，无正式开赛入口。两个自建临时模拟器在截图后关闭并删除；未操作已有用户模拟器。
 
 ## 验收边界
 

@@ -35,7 +35,7 @@
 - [x] 依次执行 `swift build --package-path native/Packages/MatchCore`；`xcodebuild -project native/FootballRecord.xcodeproj -scheme FootballRecord-iOS -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build`；Watch 对应 `FootballRecord-Watch` 和 `generic/platform=watchOS Simulator`。DerivedData / 包缓存隔离在 ignored `native/.build/` 下。
 - [x] README 说明命令、签名占位、M1 未完范围与真机待验。`.gitignore` 仅追加真实 SwiftPM / DerivedData / xcuserdata 产物。
 - [x] 运行完整脚本并保存本地原始日志；核对退出码、包引用、target dependency、watch 嵌入与 Info.plist；运行 `git diff --check`，将结果和限制写入验证记录。
-- [ ] 按明确路径暂存，提交工程基础与实际证据。向主代理交付完整 HEAD 与提交清单，由两位非作者针对该 SHA 审阅；不提前声明已集成。
+- [x] 按明确路径暂存并提交工程基础与实际证据，交付完整 HEAD 与提交清单。两位非作者针对最终 SHA 审阅及主代理集成仍按任务台账继续处理，不提前声明已集成。
 
 ## 后续 M1 子任务
 
