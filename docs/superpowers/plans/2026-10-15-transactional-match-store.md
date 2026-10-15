@@ -14,11 +14,12 @@
 
 ## 实施顺序与通过条件
 
-- [ ] 记录真实 worktree/base/依赖；先提交本计划和任务卡。
-- [ ] 真实临时 SQLite 文件测试：意图恢复、故障事务回滚、关闭重开命令幂等、两连接 CAS、撤销重传不复活；先记录行为红，再实现。
-- [ ] 测试乱序/修订先到、冲突隔离、接收落盘 ACK 丢失重传、错 ACK、版本/checksum/peer 拒绝。
-- [ ] 测试 migration 故障回滚、未来版本与物理损坏显式失败且不重建、坏 JSON/checksum 保留 bytes；异常终结/旧完成证据。
-- [ ] `swift test` 保留原 33 测试；verify.sh 显式 cross-build MatchStore iOS17/watchOS10 Simulator，并构建两个 App schemes。
-- [ ] 持久日志、SHA256 与构建输入 HEAD；两位非作者审阅。root 执行 --no-ff 集成、实际 merge 验证后安全归档与 branch -d；作者不推进长期分支。
+- [x] 记录真实 worktree/base/依赖；计划与任务卡提交24227e7。
+- [x] 真实临时 SQLite 文件测试：意图恢复、故障事务回滚、关闭重开命令幂等、两连接 CAS、撤销重传不复活；红绿日志保留。
+- [x] 乱序/修订先到、全局ID冲突隔离、接收落盘 ACK 丢失重传、错 ACK、版本/checksum/peer 拒绝。
+- [x] migration 故障回滚、未来版本DB/WAL/SHM保留、部分schema与物理损坏显式失败且不重建、坏 JSON/checksum 保留 bytes；异常终结/旧完成证据。
+- [x] 29仓储测试加原33测试；verify.sh 显式 cross-build MatchStore iOS17/watchOS10 Simulator，并构建两个 App schemes，全部退出0。
+- [x] 持久日志、SHA256 与构建输入245252e075487235c27811b493f9bcf518133379；两位非作者源码审阅PASS。审阅补齐恢复发现、receipt数据核验、audit/blocking及全局ID。
+- [ ] 主代理复审最终文档后执行 --no-ff 集成、实际 merge 验证，再安全归档与 branch -d；作者不推进长期分支。
 
 验证使用 NATIVE_BUILD_ROOT=/tmp/任务唯一目录，避免 Desktop 元数据污染构建。生产 API 不开放任意 SQL，故障注入仅 internal 测试入口。迁移版本与 schema 同事务；未知或损坏库保留，禁止删库伪恢复。
