@@ -6,7 +6,7 @@
 
 **Architecture:** 共享事件引擎从比赛事实重算比分、计时、出场和生涯；本地事务日志与 outbox 保证先保存、后反馈，并驱动幂等跨设备同步。Watch 为主要记录端，单场绑定唯一 recordingDeviceID；HealthKit、CloudKit 私有业务数据、最小账号与锁后台各守既定边界。
 
-**Tech Stack:** Swift 6、SwiftUI、XCTest、HealthKit、Core Location、WatchConnectivity、MapKit、CloudKit 私有数据库、AuthenticationServices、Swift Charts；最低 iOS 17 / watchOS 10。本地事务仓储的具体实现由后续 M1 子计划确定；最小后台运行环境在对应子计划中确定，不在母计划指定外部服务商。
+**Tech Stack:** Swift 6、SwiftUI、XCTest、HealthKit、Core Location、WatchConnectivity、MapKit、CloudKit 私有数据库、AuthenticationServices、Swift Charts；最低 iOS 17 / watchOS 10。M1 本地事务仓储已由 NATIVE-003 选定并实现系统 SQLite3；最小后台运行环境在对应子计划中确定，不在母计划指定外部服务商。
 
 ---
 
@@ -15,17 +15,17 @@
 1. 优先执行用户最新明确决定；其次为 [产品方案](../../0-产品方案.md) 中的不变量、V1 范围及日期补充；交互以 [原型说明](../../../prototype/README.md)、[UI 规范](../../ui-ux-spec.md) 与最新已验收原型为依据。过期的三页 Watch、五按钮/二级弹窗等旧描述不覆盖已确认的双页与四按钮交互。
 2. [开发准备检查](../../development-readiness.md) 是风险清单。用户已说明 Xcode 就绪，本轮只读核对为 Xcode 27.0（27A266a）与 iOS/watchOS 27 SDK；最低系统仍为 iOS 17 / watchOS 10。当前工具对设备枚举的权限限制不代表模拟器或真机缺失，不再将旧许可问题列为阻塞。
 3. 已有五份 `docs/superpowers/plans/` 计划与 `docs/frontend-implementation-plan.md` 均为浏览器原型计划；此前没有覆盖原生工程、真实采集、持久化、账号和锁的原生总计划。
-4. 历史规划启动快照只有 `main` 且无 remote。2026-10-15 已执行 bootstrap：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留浏览器基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`；规划治理、工程基础已分别经双审以 `2d4616355221af0969e07e9b1f45852449cbb98e`、`b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入 `dev`。`origin = https://github.com/bskle/football-record.git`；用户已接受 public，覆盖先前 private 意向。主代理已核对 `gh` 登录、HTTPS 认证及 `PUBLIC` / `ADMIN`，远端尚无分支，待本轮治理双审集成后首次推送长期分支与原型标签。当前事实见 [GIT-001](../../native/tasks/GIT-001.md)，[NATIVE-000](../../native/tasks/NATIVE-000.md) 保留初始记录。代码同步不代表原生发布，PR、CI 与保护规则尚未配置；按已有授权推进，不新增重复审批。
+4. 历史规划启动快照只有 `main` 且无 remote。2026-10-15 已执行 bootstrap：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留浏览器基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`；规划治理、工程基础、公开仓库治理与事件引擎已双审集成。2026-10-16 仓储以 `9e4ee11e723f6dd46fccce35b93a9c625c7f0d42`、采集片段合同以 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 双审合入 `dev`。`origin = https://github.com/bskle/football-record.git`；用户已接受 public，覆盖先前 private 意向。主代理已核对 `gh` 登录、HTTPS 认证及 `PUBLIC` / `ADMIN`，首次原子推送三条长期分支与原型标签成功；截至当前上海 2026-10-16 快照，远端 `dev` 已核对为上述 M1 组合 SHA，默认分支为 `main`。当前事实见 [GIT-002](../../native/tasks/GIT-002.md)，[GIT-001](../../native/tasks/GIT-001.md) 与 [NATIVE-000](../../native/tasks/NATIVE-000.md) 保留各自初始记录。代码同步不代表原生发布，PR、CI 与服务端保护规则尚未配置；按已有授权推进，不新增重复审批。
 5. 正式中文名为球历、英文名为 `football-record`；工程名保留 `FootballRecord`。用户暂不能连接真机；不阻塞 M1 共享测试与无签名 SDK 构建，M2 起的真实采集验收仍待设备与签名。
 6. 保留 `prototype/`、`打开足球记录.html`、现有 Node 测试和截图作为浏览器基线。原型 mock 的 41 项检查通过，只能证明原型行为；不能代替原生构建、真实联网锁、HealthKit、CloudKit 或真机验收。
 
-### 阶段进度（2026-10-15）
+### 阶段进度（2026-10-16，上海）
 
 | 阶段 | 当前状态 | 下一门槛 |
 |---|---|---|
 | 浏览器原型 | 已在已记录范围验收 | 保留交互基线 |
 | 原生母计划与工作流 | bootstrap 文档已双审并合入 `dev`（`2d4616355221af0969e07e9b1f45852449cbb98e`） | 后续变更绑定实际 head 与目标重新审阅验证 |
-| M1 工程/事件/本地可靠性 | 工程基础已双审合入 `dev`（`b7729b75ff29fccb578ec204438aa37dc3ab2136`，[验证](../../native/validation/NATIVE-001.md)）；NATIVE-002 事件实施中，仓储未开始 | 事件契约与测试双审集成后，进入 NATIVE-003 事务存储 / outbox |
+| M1 工程/事件/本地可靠性 | 本地基础交付完成，NATIVE-001 至 004 已双审集成；组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试与四项 SDK / App 构建通过（[仓储证据](../../native/validation/NATIVE-003.md)、[采集合同证据](../../native/validation/NATIVE-004.md)、[组合台账](../../native/tasks/GIT-002.md)） | M2 接入记录 UI、元数据落盘与真实采集；M3 接入实际设备传输。当前 App 仍为开发预览壳 |
 | M2 采集/恢复；M3 设备同步 | 均未开始 | M1 契约与对应真机准备 |
 | M4 账号/锁/私有云/设备生命周期 | 未开始 | 真实签名能力与服务环境 |
 | M5 纠错/历史/分析；M6 发布/三场实战 | 均未开始 | 前序交付与逐项验收 |
@@ -94,16 +94,18 @@
 
 **依赖：** 本计划与工作流就绪；无需先等签名、CloudKit 容器或后台服务商。先由工程代理建立可构建壳与共享包入口，再由事件与仓储代理实现基础闭环。
 
-- [ ] 创建 iPhone/Watch targets 与共享 packages；记录 Xcode/SDK、最低系统和可用模拟器；形成 `scripts/native/verify.sh` 的构建/测试入口。
-- [ ] 明确 Match、MatchEvent、比分快照、sourceDeviceID、correctionOfEventID、revision、删除标记、终结事实和采集片段的契约；不在模型里保存另一份最终比分。
-- [ ] 实现全部 V1 事件回放、比赛/上场时间交集、比分与完整/未出场/不完整/冲突的统计归属。真实时间与比赛时间均保存；UI 时钟由事实计算，不能依赖定时器每秒写库或只累加内存秒数。
-- [ ] 同一事务保存 Match、事件、更正及 outbox；包含持久化失败不显示成功、重启重放、迁移、重复包、破损包可诊断恢复与检查点验证。清理 outbox 只以对端持久化 ACK 为依据。
-- [ ] 持久化稳定开赛请求意图；真实锁未取得时不能写为已开赛。异常终结与更正从模型阶段纳入，不能先用不可变的“正常完成”布尔值埋下返工。
-- [ ] 交付可注入时钟、故障与仓储适配的业务测试入口，供采集/同步/后台复用；Debug 模拟器明确标记“开发模拟”，替身不能进入正式开赛链路或作为 E2E 证据。
+- [x] 创建 iPhone/Watch targets 与共享 packages；记录 Xcode/SDK、最低系统和可用模拟器；形成 `scripts/native/verify.sh` 的构建/测试入口。NATIVE-001 已集成，NATIVE-002 已加入共享业务测试。
+- [x] 明确 Match、MatchEvent、派生比分快照、sourceDeviceID、correctionOfEventID、revision、删除标记、终结事实和采集片段的契约；不保存另一份最终比分。NATIVE-004 仅定义采集片段 / 缺口与非健康 Workout 关联值合同，元数据落盘及真实采集接线属于 M2。
+- [x] 实现 V1 共享事件回放、比赛/上场时间交集、比分与完整/未出场/不完整/冲突的统计归属。真实时间与比赛时间保留，时钟从事实派生，不按秒写库；未知时长保持 nil。此项为共享计算实现，不代表页面已接入。
+- [x] 同一事务保存 Match、事件、更正及 outbox；覆盖持久化失败不反馈成功、关闭重开重放、空库 v0→v1 原子迁移、重复包、破损包诊断及当前全事实集的完整保存凭据验证。outbox 仅在匹配的对端持久化 ACK 后标记确认，保留包与审计；真实传输及云检查点留 M3 / M4。
+- [x] 持久化稳定开赛请求意图；无可信许可不能生成正式 start，锁真假由后续真实网络适配器验证。异常终结、追加更正与迟到事件已纳入模型；本地结束或保存不释放后台锁。
+- [x] 交付可注入时钟、故障与仓储适配的业务测试入口，供采集/同步/后台复用。DevelopmentStartFixture 带 developmentSimulation 标记，预览 App 没有正式开赛入口；替身不算真实锁或 E2E 证据。
 
 **自动验收：** 共享包测试覆盖首发/替补、多次上下场、暂停恢复、重复上下场、跨日、未闭合出场、进球/失球/乌龙/助攻、1000ms 防重复与撤销；事件插入/修改/删除/结束改早触发重算；incomplete/conflict 不进生涯；事务中途失败、进程重启、重复写入均不丢已确认事件。无签名 iOS/Watch 构建通过。
 
 **交付：** 可构建工程、共享契约、持久化仓储与测试结果；不会据此宣称能记录一场真实比赛。
+
+**当前验收记录（2026-10-16）：** NATIVE-001 至 004 均双审通过；主代理在上述组合 SHA 执行 `NATIVE_BUILD_ROOT=/tmp/football-record-m1-combined scripts/native/verify.sh` 退出 0，41 Core + 29 Store = 70 个 XCTest 方法零失败，两端 MatchStore SDK 和两个 App 构建通过。恢复证据为真实临时 SQLite 的关闭重开、事务与故障注入；尚无系统杀进程、物理断电或真机存储压力实测。App 仍为开发预览壳，无用户记录页面或真实 Workout。
 
 ### M2：Watch 真实采集、原生记录 UI 与恢复
 
@@ -189,14 +191,14 @@
 
 ## 7. 阻塞与可继续事项
 
-当前已获授权按计划推进；NATIVE-001 子计划与工程基础已双审集成，NATIVE-002 事件引擎实施中，仓储任务尚未开始。不需要再向用户询问产品名、图标、收费、QQ 群号、热图远期形式或 PC 技术路线。
+当前已获授权按计划推进；M1 本地基础已完成双审、实际组合验证并同步 `dev`。NATIVE-004 仅为采集元数据值合同，落盘与真实采集接线留 M2。App 仍是开发预览壳；用户记录页面、真实 HealthKit / Workout、联网锁、跨设备同步、云、签名和分发均未验收。NATIVE-002 / 003 / 004 的归档请求仍 queued 且实际列表 active，临时分支保留，不能以强删绕过工具；此清理状态不改变已验证的组件交付结论。不需要再向用户询问产品名、图标、收费、QQ 群号、热图远期形式或 PC 技术路线。
 
 | 需要落实的环境信息 | 最晚时间 | 未就绪时仍可做的工作 |
 |---|---|---|
 | Apple 账号/Developer Team、Bundle ID、签名和 CloudKit 容器/能力；工程代理指导用户准备 | M2 真机与 M4 身份/云联调前 | M1、共享测试、模拟器界面、协议实现；免费 Personal Team 不等于 CloudKit/TestFlight 能力已就绪 |
 | 用户已有 iPhone + Watch，目前暂不能连接；后续确认配对、开发者模式、安装与可用实测时间 | M2 真机采集前 | 核心/仓储、UI 与故障注入；设备枚举受工具权限限制时不推断没有设备 |
 | 最小后台实际运行环境、部署凭据与服务配置 | M4 真实联网锁前 | 供应商无关接口、原子性测试、账号 UI、同步实现；不能开放正式离线开赛 |
-| `origin` 为用户已接受的 public 仓库；`gh` 登录、HTTPS 与 `ADMIN` 已核对，待首次推送；分发方式未配置 | 首次代码同步与原生发布分别核对 | 治理双审集成后按授权同步长期分支和原型 tag；旧 private 意向已覆盖。代码同步不代替保护、CI、签名、真机验收或分发配置 |
+| `origin` 为用户已接受的 public 仓库；远端仅三条长期分支，`dev` 已核对到 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`，原型 tag 保留；分发方式未配置 | 后续代码同步与原生发布分别核对 | 按授权在双审与实际合并验证后继续同步；旧 private 意向已覆盖。代码同步不代替保护、CI、签名、真机验收或分发配置 |
 
 以上是按阶段需要的实际配置，不是新增产品决策。本轮母计划无必须用户回答后才能完成的阻塞问题；到达对应关口仍无法获取配置时，由主代理只提出当时必需的问题。
 
