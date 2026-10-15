@@ -7,7 +7,7 @@
 - 正式中文名为“球历”，英文名为 `football-record`；Xcode 工程技术名保留 `FootballRecord`。
 - 2026-10-15 规划启动快照曾为“尚未创建分支、worktree、标签”；该快照已被本次 bootstrap 事实取代。`dev`、`release`、`main` 均已从 `59edac891ee3a1cbb79a30b396ad1902d0907a62` 建立或保留，原型 annotated tag 为 `prototype-baseline-20261015`；`main` 仍是浏览器原型基线，`release` 没有活动候选。
 - `docs/native-development-plan` 已在独立受管 worktree 创建，文档提交、双审及合并结果以 [NATIVE-000 台账](docs/native/tasks/NATIVE-000.md) 的实际记录为准；分支存在不表示文档已合入 `dev`，也不表示原生构建或发布已完成。
-- 用户已授权按现有计划本地推进。`origin` 已登记为 `https://github.com/bskle/football-record.git`，实查仓库为 public，当前连接只读且 `gh` 未登录；尚未推送，不将先前“私有远端待提供”当作当前事实，也不虚构 PR、CI 或保护规则。
+- 用户已授权按现有计划本地推进。`origin` 已登记为 `https://github.com/bskle/football-record.git`，实查仓库为 public，当前连接只读且 `gh` 未登录；尚未推送。用户已明确选择 private，当前仍为 public，待仓库管理员操作并确认私有；private 状态确认且远端写权限落实前不推送。不将先前“私有远端待提供”当作当前事实，也不虚构 PR、CI 或保护规则。
 - Xcode 27.0 / Swift 6.4 可用；用户暂不能连接真机。签名、真实设备和远端写权限不阻止 M1 工程搭建、纯业务测试与无签名 SDK 构建；真实采集、联网锁及分发仍须各阶段证据。
 
 ## 角色与派工

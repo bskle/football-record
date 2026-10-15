@@ -6,7 +6,7 @@
 
 历史快照（2026-10-15 规划启动）：仓库只有本地 `main`，唯一提交为 `59edac891ee3a1cbb79a30b396ad1902d0907a62`（`feat: add interactive football tracking prototype`），没有 remote、其他 worktree 或标签，启动时工作区干净。
 
-当前执行事实（同日 bootstrap 后）：`dev`、`release`、`main` 均指向该完整基线，annotated tag `prototype-baseline-20261015` 指向同一提交。`docs/native-development-plan` 与受管 worktree `/Users/liam/.codex/worktrees/native-planning/20260830_足球记录` 已建立。`origin` 为 `https://github.com/bskle/football-record.git`，实查 public；当前连接只读、`gh` 未登录，无推送记录。正式名称为球历 / `football-record`。后续提交与分支前进以实际 Git 和任务台账为准，不将本段快照当作永久状态。
+当前执行事实（同日 bootstrap 后）：`dev`、`release`、`main` 均指向该完整基线，annotated tag `prototype-baseline-20261015` 指向同一提交。`docs/native-development-plan` 与受管 worktree `/Users/liam/.codex/worktrees/native-planning/20260830_足球记录` 已建立。`origin` 为 `https://github.com/bskle/football-record.git`，实查 public；当前连接只读、`gh` 未登录，无推送记录。用户已明确选择 private，当前仍为 public，待仓库管理员操作并确认私有；private 状态确认且远端写权限落实前不推送。正式名称为球历 / `football-record`。后续提交与分支前进以实际 Git 和任务台账为准，不将本段快照当作永久状态。
 
 当前 `main` 是浏览器原型基线，还不是已发布的 iPhone / Apple Watch 产品。建立分支不代表原生实现、构建、真机验证或发布已经完成。
 
@@ -172,7 +172,7 @@ Limitations: <未验证项及原因；无则写无>
 
 ## 11. 本地执行边界与未来远程保护
 
-当前 `remote.mode = configured-read-only`：`origin = https://github.com/bskle/football-record.git` 已按用户给定 URL 登记，实查仓库为 public，不能称为私有仓库。当前连接只读且 `gh` 未登录，尚未推送。用户已授权本地优先推进，本地分支、提交、双审、合并与归档按既有授权完成，不因远端写权限而停止；也不因登记 remote 自动推送、变更可见性或宣称 PR、CI、保护已配置。
+当前 `remote.mode = configured-read-only`：`origin = https://github.com/bskle/football-record.git` 已按用户给定 URL 登记，实查仓库为 public，不能称为私有仓库。当前连接只读且 `gh` 未登录，尚未推送。用户已明确选择 private，当前仍为 public，待仓库管理员操作并确认私有；private 状态确认且远端写权限落实前不推送。用户已授权本地优先推进，本地分支、提交、双审、合并与归档按既有授权完成，不因远端写权限而停止；也不因登记 remote 自动推送、变更可见性或宣称 PR、CI、保护已配置。
 
 远端交付前，重新识别实际 remote、upstream、默认分支、保护规则与写权限；当前已登记的 `origin` 不证明这些能力已具备。三条长期分支应保护禁止直接推送、删除和历史改写；`dev` 要求双审与相关自动检查，`release` 还要求版本候选验收，`main` 要求发布证据并遵守服务端既有审批规则。真机验证无法自动化的部分以绑定 SHA 的记录作为必需审阅证据。provider 不支持某项强制规则时写明限制，由主代理在流程中执行，不能宣称服务端已经强制。
 
