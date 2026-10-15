@@ -1,0 +1,7 @@
+.DS_Store
+/.obsidian/
+/.czy-workflow/
+
+# Runtime assets are kept in prototype/assets; ignore duplicate source images.
+/data/用户反馈群邀请二维码/
+/docs/qrcode_1791884906126.jpg
