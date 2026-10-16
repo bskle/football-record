@@ -16,8 +16,10 @@ private actor FaultRepository: SessionRepository {
   var mode: String?
   var failed = false
   var failedAction: WorkoutOutcome?
+  var cancellationFault: String?
   init(_ inner: SQLiteSessionRepository) { self.inner = inner }
   func inject(_ mode: String, outcome: WorkoutOutcome? = nil) { self.mode = mode; failed = false; failedAction = outcome }
+  func injectCancellation(_ mode: String) { cancellationFault = mode; failed = false }
   func databaseNamespace() async -> String { await inner.databaseNamespace() }
   func matchIDs() async throws -> [String] { try await inner.matchIDs() }
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 { try await inner.snapshotV2(matchID: matchID) }
@@ -28,8 +30,9 @@ private actor FaultRepository: SessionRepository {
       guard let observation = update.observation else { return false }
       return failedAction == nil || observation.outcome == failedAction
     }
-    let fault = matches ? mode : nil
-    if fault != nil { mode = nil; failed = true }
+    let cancelsUncertainFinish = request.captureOperationUpdates.contains { $0.expectedState == .needsReconciliation && $0.state == .cancelled }
+    let fault = cancelsUncertainFinish ? cancellationFault : (matches ? mode : nil)
+    if fault != nil { if cancelsUncertainFinish { cancellationFault = nil } else { mode = nil }; failed = true }
     if fault == "before" { throw StoreError.injectedFailure }
     let receipt = try await inner.commitV2(request)
     if fault == "after" { throw StoreError.responseLost }
@@ -58,6 +61,110 @@ private actor GatewayProbe: WorkoutGateway {
   }
   func testActualGatewaySavedAwaitingLinkThenLostSQLiteResponseNeverFinishesAgain() async throws {
     try await exercise(saveFault: "after")
+  }
+
+  func testHeldAuthorizationCancelsUncertainFinishBeforePermissionReturns() async throws {
+    try await exerciseTerminalProof(observationFault: nil, cancellationFault: nil)
+  }
+  func testHeldAuthorizationNegativeObservationFailureReopensSameSQLite() async throws {
+    try await exerciseTerminalProof(observationFault: "before", cancellationFault: nil)
+  }
+  func testHeldAuthorizationNegativeObservationLostResponseReopensSameSQLite() async throws {
+    try await exerciseTerminalProof(observationFault: "after", cancellationFault: nil)
+  }
+  func testHeldAuthorizationCancellationLostResponseReopensDurableProof() async throws {
+    try await exerciseTerminalProof(observationFault: nil, cancellationFault: "after")
+  }
+  private func exerciseTerminalProof(observationFault: String?, cancellationFault: String?) async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("NATIVE008-terminal-" + UUID().uuidString)
+    let sql = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "capture-integration")
+    let fault = FaultRepository(sql); let factory = FakeFactory(); factory.holdAuthorization = true
+    defer { factory.releaseAuthorization() }
+    let gateway = AppleWorkoutGateway(factory: factory, timeout: .milliseconds(10)); let probe = GatewayProbe(gateway); let clock = IntegrationClock()
+    let original = session(fault, probe, clock)
+    let request = try await original.prepareStart(starter: true); let startReceipt = try await original.execute(request)
+    try await wait("actual gateway start timeout must be persisted while authorization hangs") {
+      try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .start && $0.state == .needsReconciliation && $0.observation?.outcome == .unknown }
+    }
+    XCTAssertNotNil(factory.authorizationContinuation); XCTAssertEqual(factory.creations, 0)
+    clock.advance(); let endRequest = try await original.prepare(.end, matchID: request.matchID)
+    let endReceipt = try await original.execute(endRequest)
+    try await wait("finish must already be uncertain before the local start proof is persisted") {
+      try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .finish && $0.state == .needsReconciliation && $0.observation?.outcome == .unknown }
+    }
+    XCTAssertNotNil(factory.authorizationContinuation); XCTAssertEqual(factory.creations, 0)
+    if let observationFault { await fault.inject(observationFault, outcome: .notCreated(.unavailable)) }
+    if let cancellationFault { await fault.injectCancellation(cancellationFault) }
+    _ = try await original.recover()
+    if observationFault != nil || cancellationFault != nil {
+      try await wait("configured observation/cancellation failure must execute") { await fault.failed }
+    }
+    // Reopen the same actual SQLite file. Local gateway ownership is deliberately retained;
+    // a new gateway cannot inherit unpersisted negative proof (separate regression below).
+    let reopenedSQL = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "capture-integration")
+    let reopened = session(reopenedSQL, probe, clock); _ = try await reopened.recover()
+    try await wait("negative start must commit, then uncertain finish must cancel before authorization resolves") {
+      let snapshot = try await reopenedSQL.snapshotV2(matchID: request.matchID)
+      let pending = try await reopenedSQL.pendingCaptureOperations(matchID: request.matchID)
+      return pending.isEmpty && snapshot.captureOperations.contains { $0.operation.action == .start && $0.state == .failed && $0.observation?.outcome == .notCreated(.unavailable) }
+        && snapshot.captureOperations.contains { $0.operation.action == .finish && $0.state == .cancelled && $0.observation == nil }
+    }
+    XCTAssertNotNil(factory.authorizationContinuation, "Permission must remain suspended until cancellation is durable")
+    let finalized = try await reopened.snapshot(matchID: request.matchID)
+    XCTAssertEqual(finalized.capturePhase, .notRecorded(.unavailable)); XCTAssertEqual(finalized.replay.state, .endedPendingSync)
+    XCTAssertEqual(finalized.replay.backendLockState, .held); XCTAssertTrue(finalized.store.captureRevisions.isEmpty)
+    XCTAssertEqual(finalized.store.captureOperations.count, 2); XCTAssertEqual(factory.creations, 0); XCTAssertTrue(factory.driver.calls.isEmpty)
+    XCTAssertEqual(Set(finalized.store.captureOperations.map(\.operation.externalToken)), [request.captureOperationID!])
+    let originalEvents = finalized.store.business.events
+    factory.releaseAuthorization(); for _ in 0..<20 { await Task.yield() }
+    let startAgain = try await reopened.execute(request); let endAgain = try await reopened.execute(endRequest)
+    XCTAssertEqual(startAgain.receipt, startReceipt.receipt); XCTAssertEqual(endAgain.receipt, endReceipt.receipt)
+    let afterLate = try await reopened.snapshot(matchID: request.matchID)
+    XCTAssertEqual(afterLate.store.business.events, originalEvents); XCTAssertEqual(afterLate.capturePhase, .notRecorded(.unavailable))
+    XCTAssertEqual(afterLate.store.captureOperations.count, 2); XCTAssertEqual(factory.creations, 0); XCTAssertTrue(factory.driver.calls.isEmpty)
+    XCTAssertTrue(afterLate.store.captureRevisions.isEmpty)
+    let performed = await probe.performed; let reconciled = await probe.reconciled
+    XCTAssertEqual(performed.filter { $0.action == .start }.count, 1)
+    XCTAssertTrue(reconciled.contains { $0.action == .start && $0.id == request.captureOperationID })
+    XCTAssertEqual(Set((performed + reconciled).map(\.externalToken)), [request.captureOperationID!])
+    // Durable proof survives another connection with an entirely new gateway and no local evidence.
+    let thirdSQL = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "capture-integration")
+    let noEvidenceFactory = FakeFactory(); let noEvidence = session(thirdSQL, AppleWorkoutGateway(factory: noEvidenceFactory), clock)
+    _ = try await noEvidence.recover()
+    let persisted = try await noEvidence.snapshot(matchID: request.matchID)
+    XCTAssertEqual(persisted.capturePhase, .notRecorded(.unavailable)); XCTAssertEqual(noEvidenceFactory.creations, 0)
+    XCTAssertEqual(noEvidenceFactory.recoveryCalls, 0)
+    try await sql.close(); try await reopenedSQL.close(); try await thirdSQL.close()
+  }
+  func testRestartedGatewayWithoutPersistedAbsenceKeepsUnknownFinishUncancelled() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("NATIVE008-no-proof-" + UUID().uuidString)
+    let sql = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "capture-integration")
+    let oldFactory = FakeFactory(); oldFactory.holdAuthorization = true; defer { oldFactory.releaseAuthorization() }
+    let oldProbe = GatewayProbe(AppleWorkoutGateway(factory: oldFactory, timeout: .milliseconds(10))); let clock = IntegrationClock()
+    let old = session(sql, oldProbe, clock); let request = try await old.prepareStart(starter: true); _ = try await old.execute(request)
+    try await wait("unknown start must be durable") {
+      try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .start && $0.observation?.outcome == .unknown }
+    }
+    clock.advance(); _ = try await old.execute(old.prepare(.end, matchID: request.matchID))
+    try await wait("unknown finish must exist before simulated process loss") {
+      try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .finish && $0.state == .needsReconciliation && $0.observation?.outcome == .unknown }
+    }
+    let reopenedSQL = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "capture-integration")
+    let newFactory = FakeFactory(); let probe = GatewayProbe(AppleWorkoutGateway(factory: newFactory, timeout: .milliseconds(10)))
+    let reopened = session(reopenedSQL, probe, clock); _ = try await reopened.recover()
+    try await wait("fresh process must reconcile original operations without absence evidence") { await probe.reconciled.count >= 2 }
+    let unknown = try await reopened.snapshot(matchID: request.matchID)
+    XCTAssertEqual(unknown.capturePhase, .needsReconciliation); XCTAssertEqual(unknown.replay.state, .endedPendingSync); XCTAssertEqual(unknown.replay.backendLockState, .held)
+    XCTAssertTrue(unknown.store.captureOperations.allSatisfy { $0.state == .needsReconciliation })
+    XCTAssertFalse(unknown.store.captureOperations.contains { $0.state == .cancelled || $0.state == .failed })
+    XCTAssertTrue(unknown.store.captureRevisions.isEmpty); XCTAssertEqual(newFactory.creations, 0); XCTAssertTrue(newFactory.driver.calls.isEmpty)
+    let performed = await probe.performed; XCTAssertTrue(performed.isEmpty)
+    oldFactory.releaseAuthorization(); for _ in 0..<20 { await Task.yield() }
+    _ = try await reopened.recover()
+    let stillUnknown = try await reopened.snapshot(matchID: request.matchID)
+    XCTAssertEqual(stillUnknown.capturePhase, .needsReconciliation); XCTAssertFalse(stillUnknown.store.captureOperations.contains { $0.state == .cancelled })
+    XCTAssertEqual(newFactory.creations, 0)
+    try await sql.close(); try await reopenedSQL.close()
   }
   private func exercise(saveFault: String) async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("NATIVE008-integration-" + UUID().uuidString)
