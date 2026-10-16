@@ -64,7 +64,7 @@ final class RecoveryTests: XCTestCase, @unchecked Sendable {
         let store = try MatchStore(url: url)
         _ = try await store.commit(StoreCommit(commandID: "intent", expectedGeneration: 0, descriptor: helper.descriptor(), events: [], packets: []))
         try await store.close()
-        XCTAssertEqual(try inspectInt(url, "PRAGMA user_version"), 2)
+        XCTAssertEqual(try inspectInt(url, "PRAGMA user_version"), 3)
     }
     func inspectInt(_ url: URL, _ sql: String) throws -> Int64 {
         var handle: OpaquePointer?; var statement: OpaquePointer?

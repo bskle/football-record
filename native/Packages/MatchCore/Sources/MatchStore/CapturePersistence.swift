@@ -245,7 +245,7 @@ extension MatchStore {
         }
         try db.execute("INSERT INTO capture_identities VALUES (?,?,?,?,?)", [.text(id), .text(kind), .text(matchID), .blob(raw), .text(Canonical.hash(raw))])
     }
-    private func verifyCaptureRegistrySet(kind: String, matchID: String, ids: [String], table: String) throws {
+    func verifyCaptureRegistrySet(kind: String, matchID: String, ids: [String], table: String) throws {
         let actualIDs = Set(ids)
         for row in try db.rows("SELECT id,payload,checksum FROM capture_identities WHERE kind=? AND match_id=?", [.text(kind), .text(matchID)]) {
             let id = row[0].string ?? "invalid-id", raw = row[1].data ?? Data()
@@ -276,7 +276,7 @@ extension MatchStore {
         try verifyCaptureRegistrySet(kind: "revision", matchID: matchID, ids: result.map(\.id), table: "capture_revisions")
         return result
     }
-    private func appendRevision(_ revision: CaptureRevision, descriptor: MatchDescriptor) throws {
+    func appendRevision(_ revision: CaptureRevision, descriptor: MatchDescriptor) throws {
         let matchID = descriptor.matchID, raw = try Canonical.data(revision)
         guard revision.binding.matchID == matchID, revision.binding.recordingDeviceID == descriptor.recordingDeviceID else {
             throw quarantine(.invalidCaptureRevision, code: "capture-binding-conflict", key: revision.id, raw: raw)
@@ -351,6 +351,17 @@ extension MatchStore {
                     throw quarantine(.invalidOperationTransition, code: "capture-absence-proof-invalid", key: operation.record.operation.id, raw: try Canonical.data(pair.1.record))
                 }
             }
+        }
+    }
+    /// Authenticated full peer snapshots may expose physical evidence contradicting 011's
+    /// negative proof. Retain the complete incoming packet outside the rolled-back transaction.
+    func rejectInboundCaptureAbsenceContradictions(descriptor: MatchDescriptor, revisions: [CaptureRevision], raw: Data) throws {
+        let saved = try loadSavedOperations(matchID: descriptor.matchID, descriptor: descriptor)
+        let cancelled = saved.contains { operation in
+            zip(operation.history, operation.history.dropFirst()).contains { isAbsenceCancellation($0.0.record, $0.1.record) }
+        }
+        if cancelled, let positive = revisions.first(where: { !$0.metadata.segments.isEmpty || $0.metadata.gaps.contains(where: { $0.window.start != nil || $0.window.end != nil }) }) {
+            throw quarantine(.captureConflict, code: "capture-absence-contradiction", key: positive.id, raw: raw)
         }
     }
     private func rejectAbsenceContradictions(_ request: StoreCommitV2, saved: [SavedOperation], descriptor: MatchDescriptor) throws {
@@ -509,7 +520,7 @@ extension MatchStore {
         }
         try db.execute("INSERT INTO business_outbox VALUES (?,?,?,?,?)", [.text(item.id), .text(item.matchID), .blob(raw), .text(Canonical.hash(raw)), .text("unrouted")])
     }
-    private func loadBusinessOutbox(id: String) throws -> BusinessOutboxItem {
+    func loadBusinessOutbox(id: String) throws -> BusinessOutboxItem {
         guard let row = try db.rows("SELECT match_id,payload,checksum,routing_state FROM business_outbox WHERE id=?", [.text(id)]).first else { throw corruptCapture("business_outbox", key: id, raw: Data()) }
         let item = try checkedCapture(BusinessOutboxItem.self, raw: row[1], checksum: row[2], table: "business_outbox", key: id)
         guard item.id == id, item.matchID == row[0].string, row[3].string == "unrouted" else { throw corruptCapture("business_outbox", key: id, raw: row[1].data ?? Data()) }

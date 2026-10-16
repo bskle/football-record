@@ -5,8 +5,13 @@ import MatchCore
 public actor MatchStore {
     let db: SQLite
     let fault: StoreFault?
-    public init(url: URL) throws { db = try SQLite(url: url, fault: nil); fault = nil }
-    init(url: URL, fault: StoreFault) throws { db = try SQLite(url: url, fault: fault); self.fault = fault }
+    let syncEnvironment: PeerEnvironment
+    public init(url: URL, syncEnvironment: PeerEnvironment = .production) throws {
+        try syncEnvironment.validate(); db = try SQLite(url: url, fault: nil); fault = nil; self.syncEnvironment = syncEnvironment
+    }
+    init(url: URL, fault: StoreFault, syncEnvironment: PeerEnvironment = .production) throws {
+        try syncEnvironment.validate(); db = try SQLite(url: url, fault: fault); self.fault = fault; self.syncEnvironment = syncEnvironment
+    }
     public func close() throws { try db.close() }
     /// Discover persisted intents and matches after process restart using only the database URL.
     /// Includes terminal matches; snapshots and pendingPackets derive the recovery work to perform.
