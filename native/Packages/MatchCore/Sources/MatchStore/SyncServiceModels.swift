@@ -29,6 +29,7 @@ public struct SyncDeliveryRecord: Codable, Sendable, Equatable {
     public init(deliveryID: String, messageID: String, matchID: String, sourceDeviceID: String, targetDeviceID: String, kind: SyncMessageKind, fragmentBytes: Data, attemptCount: Int, nextAttemptAt: Date) throws {
         for id in [deliveryID, messageID, matchID, sourceDeviceID, targetDeviceID] { try SyncWire.id(id) }
         guard attemptCount >= 0, sourceDeviceID != targetDeviceID, nextAttemptAt.timeIntervalSinceReferenceDate.isFinite else { throw StoreError.invalidRequest }
+        guard fragmentBytes.count <= SyncFragment.maximumEncodedBytes else { throw StoreError.syncQuotaExceeded }
         let fragment = try JSONDecoder().decode(SyncFragment.self, from: fragmentBytes), b = fragment.body
         guard fragmentBytes == (try fragment.canonicalBytes()), deliveryID == (try fragment.fragmentID),
               messageID == b.messageID, matchID == b.matchID, sourceDeviceID == b.sourceDeviceID,

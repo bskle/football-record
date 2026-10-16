@@ -158,6 +158,11 @@ extension SyncDeliveryTests {
         }
     }
     func testFragmentSizeAndCountLimitsRejectBeforeAssembly() throws {
+        do {
+            _ = try SyncDeliveryRecord(deliveryID: "too-large", messageID: "m", matchID: "match", sourceDeviceID: "watch", targetDeviceID: "phone", kind: .packet, fragmentBytes: Data(count: SyncFragment.maximumEncodedBytes + 1), attemptCount: 0, nextAttemptAt: h.t)
+            XCTFail("public record must bound the frame before decoding")
+        } catch let error as StoreError { XCTAssertEqual(error, .syncQuotaExceeded) }
+        catch { XCTFail("oversize must be rejected before JSON decode: \(error)") }
         let payload = Data(repeating: 1, count: SyncFragment.chunkBytes)
         XCTAssertThrowsError(try SyncFragment.Body(kind: .packet, messageID: "m", sourceDeviceID: "watch", targetDeviceID: "phone", matchID: "match", wholeChecksum: String(repeating: "0", count: 64), totalBytes: 8 * 1024 * 1024 + 1, index: 0, count: 33, payload: payload))
         XCTAssertThrowsError(try SyncFragment.Body(kind: .packet, messageID: "m", sourceDeviceID: "watch", targetDeviceID: "phone", matchID: "match", wholeChecksum: String(repeating: "0", count: 64), totalBytes: SyncFragment.chunkBytes + 1, index: 0, count: 2, payload: payload + Data([1])))
