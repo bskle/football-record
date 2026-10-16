@@ -7,5 +7,5 @@ let package = Package(
     products: [.library(name: "MatchCore", targets: ["MatchCore"]), .library(name: "MatchStore", targets: ["MatchStore"])],
     targets: [.target(name: "MatchCore"), .testTarget(name: "MatchCoreTests", dependencies: ["MatchCore"]),
               .target(name: "MatchStore", dependencies: ["MatchCore"], linkerSettings: [.linkedLibrary("sqlite3")]),
-              .testTarget(name: "MatchStoreTests", dependencies: ["MatchStore", "MatchCore"])]
+              .testTarget(name: "MatchStoreTests", dependencies: ["MatchStore", "MatchCore"], resources: [.copy("Fixtures")])]
 )

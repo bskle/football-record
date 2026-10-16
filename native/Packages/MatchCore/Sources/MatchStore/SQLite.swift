@@ -1,4 +1,5 @@
 import Foundation
+import MatchCore
 import SQLite3
 
 enum SQLValue {
@@ -20,7 +21,7 @@ final class SQLite: @unchecked Sendable {
         do {
             try check(sqlite3_busy_timeout(handle, 5_000))
             let version = try scalar("PRAGMA user_version").number ?? -1
-            guard version == 0 || version == 1 else { throw StoreError.unsupportedSchema(version) }
+            guard version == 0 || version == 1 || version == 2 else { throw StoreError.unsupportedSchema(version) }
             if version == 0 {
                 guard try rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").isEmpty else {
                     throw StoreError.unsupportedSchema(0)
@@ -33,6 +34,16 @@ final class SQLite: @unchecked Sendable {
             }
             // Fail on partial schemas rather than repairing or replacing an unknown database.
             for sql in Self.schemaChecks { _ = try rows(sql) }
+            if version < 2 {
+                try transaction {
+                    for sql in Self.schemaV2 { try execute(sql) }
+                    try migrateLegacyCompletionConfirmations()
+                    if fault == .migrationAfterSchema || fault == .migrationBeforeV2Version { throw StoreError.injectedFailure }
+                    try execute("PRAGMA user_version=2")
+                    if fault == .migrationAfterV2Version { throw StoreError.injectedFailure }
+                }
+            }
+            for sql in Self.schemaChecksV2 { _ = try rows(sql) }
             guard try scalar("PRAGMA quick_check(1)").string == "ok" else {
                 throw StoreError.sqlite(code: SQLITE_CORRUPT, message: "integrity check failed")
             }
@@ -115,6 +126,18 @@ final class SQLite: @unchecked Sendable {
         let status = sqlite3_finalize(statement); finalized = true; try check(status)
         return result
     }
+    private func migrateLegacyCompletionConfirmations() throws {
+        let emptyDigest = try CaptureRevision.digest([])
+        for row in try rows("SELECT match_id,evidence FROM completion") {
+            let id = row[0].string ?? "invalid-id", bytes = row[1].data ?? Data()
+            guard let evidence = try? JSONDecoder().decode(TrustedCompletionEvidence.self, from: bytes),
+                  evidence.matchID == id, !evidence.confirmationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw StoreError.corruptPayload(table: "completion", key: id)
+            }
+            let proof = try Canonical.data(CaptureCompletionConfirmation(evidence: evidence, captureDigest: emptyDigest))
+            try execute("INSERT INTO completion_confirmations VALUES (?,?,?,?)", [.text(id), .text(evidence.confirmationID), .blob(proof), .text(Canonical.hash(proof))])
+        }
+    }
     private func failure(_ code: Int32) -> StoreError {
         .sqlite(code: code, message: handle.map { String(cString: sqlite3_errmsg($0)) } ?? "database unavailable")
     }
@@ -137,4 +160,25 @@ final class SQLite: @unchecked Sendable {
         "SELECT match_id,code,key,raw,severity FROM diagnostics LIMIT 0",
         "SELECT match_id,evidence FROM completion LIMIT 0"
     ]
+    private static let schemaV2 = [
+        "CREATE TABLE capture_identities (id TEXT PRIMARY KEY NOT NULL, kind TEXT NOT NULL, match_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE capture_revisions (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, parent_id TEXT, revision INTEGER NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE capture_operations (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, operation BLOB NOT NULL, checksum TEXT NOT NULL, record BLOB NOT NULL, record_checksum TEXT NOT NULL, history_count INTEGER NOT NULL)",
+        "CREATE TABLE capture_operation_history (operation_id TEXT NOT NULL, ordinal INTEGER NOT NULL, command_id TEXT NOT NULL, record BLOB NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(operation_id,ordinal))",
+        "CREATE TABLE business_outbox (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL, routing_state TEXT NOT NULL)",
+        "CREATE TABLE commands_v2 (command_id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, request BLOB NOT NULL, request_hash TEXT NOT NULL, receipt BLOB NOT NULL)",
+        "CREATE TABLE completion_confirmations (match_id TEXT NOT NULL, confirmation_id TEXT NOT NULL, proof BLOB NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(match_id,confirmation_id))",
+        "CREATE TABLE completion_v2 (match_id TEXT PRIMARY KEY NOT NULL, evidence BLOB NOT NULL, capture_digest TEXT NOT NULL)"
+    ]
+    private static let schemaChecksV2 = [
+        "SELECT id,kind,match_id,payload,checksum FROM capture_identities LIMIT 0",
+        "SELECT id,match_id,parent_id,revision,payload,checksum FROM capture_revisions LIMIT 0",
+        "SELECT id,match_id,operation,checksum,record,record_checksum,history_count FROM capture_operations LIMIT 0",
+        "SELECT operation_id,ordinal,command_id,record,checksum FROM capture_operation_history LIMIT 0",
+        "SELECT id,match_id,payload,checksum,routing_state FROM business_outbox LIMIT 0",
+        "SELECT command_id,match_id,request,request_hash,receipt FROM commands_v2 LIMIT 0",
+        "SELECT match_id,evidence,capture_digest FROM completion_v2 LIMIT 0",
+        "SELECT match_id,confirmation_id,proof,checksum FROM completion_confirmations LIMIT 0"
+    ]
+
 }

@@ -1,6 +1,6 @@
 # M2 会话、采集与事务合同
 
-状态：NATIVE-005 的待双审技术合同；类型是006/007的实现目标，不声称源码已存在。006完成仓储、007完成服务后，以实际可编译接口冻结为008/009共同依赖；变更由主代理先审，不从未提交工作树接线。范围见[M2计划](../../superpowers/plans/2026-10-16-native-m2.md)。
+状态：NATIVE-005 已双审合入；006期间 lookup 与正交 failure 补充已由 `/root` 和 `/root/m2_review` 确认；类型是006/007的实现目标，不声称源码已存在。006完成仓储、007完成服务后，以实际可编译接口冻结为008/009共同依赖；变更由主代理先审，不从未提交工作树接线。范围见[M2计划](../../superpowers/plans/2026-10-16-native-m2.md)。
 
 ## 1. 既有事实与兼容性
 
@@ -26,10 +26,12 @@ M1已有 `CaptureBinding(matchID:recordingDeviceID:)`、CaptureWindow、CaptureS
 | BusinessOutboxItem | `id: String, matchID: String, sourceDeviceID: String, payload: BusinessDeltaV2`；稳定canonical v2 bytes/digest，路由状态持久化，初态unrouted，不能凭传输成功视为ACK |
 | StoreCommitV2 | `commandID: String, expectedGeneration: Int64, descriptor: MatchDescriptor, events: [MatchEvent], captureRevisions: [CaptureRevision], newCaptureOperations: [CaptureOperation], captureOperationUpdates: [CaptureOperationUpdate], businessOutbox: [BusinessOutboxItem]` |
 | CommitReceiptV2 | `commandID: String, matchID: String, generation: Int64, eventIDs: [String], captureRevisionIDs: [String], operationIDs: [String], businessOutboxIDs: [String]`；首次COMMIT结果稳定保存 |
+| CommittedCommandV2 | `request: StoreCommitV2, receipt: CommitReceiptV2`；返回保存的完整 canonical 请求与首次 receipt，命中损坏不能当 nil |
 | StoreSnapshotV2 | `business: StoreSnapshot, captureRevisions: [CaptureRevision], captureOperations: [CaptureOperationRecord]`；business中的completionEvidence必须已按采集digest筛选，调用replay不能绕过失效检查 |
 
 ```swift
 // 新增的公开入口；旧v1入口继续可读写/重试，不改其canonical语义。
+public func committedCommandV2(commandID: String) throws -> CommittedCommandV2?
 public func commitV2(_ request: StoreCommitV2) throws -> CommitReceiptV2
 public func snapshotV2(matchID: String) throws -> StoreSnapshotV2
 public func pendingCaptureOperations(matchID: String) throws -> [CaptureOperationRecord]
@@ -42,6 +44,7 @@ public func saveCompletionProofV2(evidence: TrustedCompletionEvidence, captureDi
 - 全局稳定ID命名空间涵盖revision/segment/gap/operation/outbox；同ID同canonical幂等，不同payload保留原行及新原bytes诊断失败，跨match碰撞同样拒绝。不得按ID覆盖事实。
 - revision根为1/parentID=nil；其后只能引用同binding现有唯一head、revision=parent+1。metadata是全值快照且binding相同，不把缺口“补成”虚假连续采集。孤儿/分叉保留原bytes并标blocking；不挑最后写入者。真实修复通过追加可审事实，不静默清诊断。
 - 一次事务保存descriptor、events、captureRevisions、operations/状态、command receipt和所有对应业务outbox。新增facts/revision必须被相同事务的delta完整覆盖；操作ledger是本机执行意图，不让peer收到后执行。纯操作状态变化不伪造业务event。
+- `committedCommandV2` 不写入或执行 staging；缺命令返nil，命中则核对索引key、request.commandID、receipt.commandID/matchID、canonical request/hash，并与成功重试共用facts/revision/operation历史/outbox完整性验证。
 - v2同command异完整请求报commandConflict；成功命令先复核首次receipt所引用的所有facts/revision/操作请求/outbox原bytes与允许的状态演进，再返回首次receipt，不先做generation CAS。staleGeneration无成功反馈；已成功后generation推进不破首次重试。
 - operation请求永不可变；pending→needsReconciliation须先COMMIT再发side effect。结果已知后写settled/failed；savedAwaitingLink或不确定结果保持needsReconciliation。重启pending可首次perform；needsReconciliation只能先reconcile，不能盲perform。恢复/重试必须验证原binding、关联command及token。
 - 单机没有可信peer时只unrouted；M3以真实已认证路由原子产出稳定packet并标routed，保留原outbox。该后续API不在M2伪实现；路由/ACK不能遗漏capture revisions，checksum不是身份认证。
@@ -57,6 +60,7 @@ public protocol SessionRepository: Sendable {
     func matchIDs() async throws -> [String]
     func databaseNamespace() async -> String
     func snapshotV2(matchID: String) async throws -> StoreSnapshotV2
+    func committedCommandV2(commandID: String) async throws -> CommittedCommandV2?
     func commitV2(_ request: StoreCommitV2) async throws -> CommitReceiptV2
     func pendingCaptureOperations(matchID: String) async throws -> [CaptureOperationRecord]
 }
@@ -82,7 +86,7 @@ DeviceIdentityProvider返回持久稳定的本机ID，重新启动不新造ID；
 | SessionEnvironment | `production, development(databaseNamespace: String)`；构造时通过repository.databaseNamespace校验实际开发DB命名空间与environment匹配且不等于生产，不只信任UI标签 |
 | SessionRequest | `commandID: String, matchID: String, requestedAt: Date, expectedGeneration: Int64, action: SessionAction, eventIDs: [String], captureOperationID: String?`；start还带固定`StartIntent`，在实际实现用同名可选`startIntent: StartIntent?`，其他action必须nil |
 | CapturePhase | `notRequested, pending, recording, paused, savedAwaitingLink, finished, needsReconciliation, notRecorded(CaptureFailure)`；与业务running/paused/ended分别展示 |
-| SessionSnapshot | `store: StoreSnapshotV2, replay: ReplayResult, capturePhase: CapturePhase, lastUndoableQuickEventID: String?`；不含HR/GPS/距离/速度，不是第二份事实库 |
+| SessionSnapshot | `store: StoreSnapshotV2, replay: ReplayResult, capturePhase: CapturePhase, captureFailure: CaptureFailure?, lastUndoableQuickEventID: String?`；不含HR/GPS/距离/速度，不是第二份事实库 |
 | SessionReceipt | `receipt: CommitReceiptV2, snapshot: SessionSnapshot`；只有COMMIT后才能返回；start多阶段的最终业务receipt与原持久意图可按固定子command回查 |
 | RecoverySelection | `none, intentAwaitingPermit(StartIntent), active(SessionSnapshot)`；异常候选抛下列明确错误 |
 
@@ -101,6 +105,8 @@ public actor MatchSession {
 }
 ```
 
+start固定 `commandID == startIntent.id`，eventID、operationID、outboxID由该稳定ID按用途派生；intent/start的expectedGeneration为0/1，使用原requestedAt和starter。execute先lookup保存的完整请求/首次receipt，再判断当前状态；已保存descriptor可重建规范start请求，不用最新sequence/parent/now替换原请求。
+
 prepareStart只分配稳定请求，不写DB；首发/替补确认后execute，取消不创建意图。prepare拒绝start，避免绕过专用准备。execute(start)先以`commandID + "/intent"`持久原StartIntent，再用原intent向provider获取许可；许可匹配后以`commandID + "/start"`保存升级descriptor/start/facts+outbox+采集operation。上述两个子请求的expectedGeneration、IDs、时间一旦生成即固定并可按command回查；重复点击不新建matchID绕锁。失败待许可意图可以恢复，不当作已开赛。
 
 业务提交队列按match串行，inFlight在任何await之前登记；新命令从最新已提交snapshot生成staging。执行侧效应脱离业务队列/SQL事务，允许end先落盘；结果回来的提交再入队并重读最新状态。UI只采用receipt.snapshot或已提交updates；提交失败不采纳staging、不成功触觉。快记跨四按钮统一按原请求时间防1000ms连击，clock回拨/非法时间按核心规则报错，不把UI禁用当唯一guard。
@@ -113,7 +119,7 @@ SessionError明确case：`permitUnavailable, identityUnavailable, wrongRecording
 
 ## 4. 采集观测、跨系统对账与失败语义
 
-WorkoutObservation为Core的非健康可Codable值，字段：`operationID: String, binding: CaptureBinding, externalToken: String, observedAt: Date, outcome: WorkoutOutcome, window: CaptureWindow`。outcome为`running, paused, stopped, linked(workoutID: String), savedAwaitingLink, notCreated(CaptureFailure), unknown`。CaptureFailure为`writeDenied, locationDenied, unavailable, recoveryUnavailable, routeFailed, captureFailed`；没有readDenied猜测。unknown不等于notCreated。window只填实际观测，不能把requestedAt当采集开始证明。
+WorkoutObservation为Core的非健康可Codable值，字段：`operationID: String, binding: CaptureBinding, externalToken: String, observedAt: Date, outcome: WorkoutOutcome, window: CaptureWindow, failure: CaptureFailure? = nil`。outcome为`running, paused, stopped, linked(workoutID: String), savedAwaitingLink, notCreated(CaptureFailure), unknown`。CaptureFailure为`writeDenied, locationDenied, unavailable, recoveryUnavailable, routeFailed, captureFailed`；没有readDenied猜测。unknown不等于notCreated。failure为正交降级字段，nil编码省略；既有Workout的失败保留真实outcome，不能改写为notCreated。route失败仅使原route builder失效，真实running/paused/linked等outcome加routeFailed可settled；不另开Workout。已确认stop但endCollection/finish未证明保存时，stopped+captureFailed保持needsReconciliation及原token。failed只表示动作已确认失败且无未决side effect。SessionSnapshot.captureFailure从已提交观测派生，无关成功观测不自动清除同片段既有route警告。window只填实际观测，不能把requestedAt当采集开始证明。
 
 每个实际Workout片段生命周期唯一的externalToken写入HealthKit metadata，同一原session恢复沿用，确认恢复失败后的新真实片段分配新start operation/token并记录gap；多个Workout不得共享首次全场token。关联查询同时核对source app、原match/device和token；token不是授权或Workout UUID。保存返回真实对象或解锁后查到真实UUID，才追加CaptureSegment。nil,nil表示已保存但锁屏暂取不到对象，savedAwaitingLink保留待对账；空query也可能因锁屏/读取不可知，不能据此新建。SDK recover能得到原session时接原builder，不再次startActivity/beginCollection。系统崩溃自动恢复、用户强退、设备重启分别验收；后两者不保证原session恢复。锁屏/空查询/unknown不证明旧片段不存在。
 
