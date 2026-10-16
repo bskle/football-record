@@ -25,7 +25,15 @@ extension MatchSession {
           attempted.removeAll()
           attemptedFinishes.removeAll()
         }
-        let snapshot = try await store.snapshotV2(matchID: match)
+        // The ordinary empty scan stays outside the queue. Only a terminal hint enters
+        // the locked preflight, which rechecks current facts before any SDK dispatch.
+        let hint = try await store.snapshotV2(matchID: match)
+        if terminal(hint) {
+          while let token = try await planTerminalCleanup(match, excluding: attemptedFinishes) { attemptedFinishes.insert(token) }
+        }
+        let snapshot = terminal(hint) ? try await store.snapshotV2(matchID: match) : hint
+        // Keep original uncertain operations ahead of a newly planned finish. A saved
+        // original token proof may make that finish unnecessary on reopening.
         let pending = snapshot.captureOperations.first {
           ($0.state == .pending || $0.state == .needsReconciliation)
             && !attempted.contains($0.operation.id)
@@ -335,27 +343,39 @@ extension MatchSession {
   {
     await acquire(match)
     defer { release(match) }
-    let s = try await store.snapshotV2(matchID: match)
-    guard terminal(s) else { return nil }
-    for start in s.captureOperations
-    where start.operation.action == .start && !attempted.contains(start.operation.externalToken) {
-      let token = start.operation.externalToken
-      let records = s.captureOperations.filter { $0.operation.externalToken == token }
-      guard !tokenHasSaveProof(s, token: token),
-        !records.contains(where: { $0.state == .pending || $0.state == .needsReconciliation }),
-        let latest = tokenObservation(s, token: token),
-        latest.outcome == .running || latest.outcome == .paused
-      else { continue }
-      let command = token + "/terminal-finish/" + String(s.business.generation)
-      let finish = try CaptureOperation(
-        id: command + "/operation", binding: start.operation.binding, associatedCommandID: command,
-        action: .finish,
-        requestedAt: clock.now(), externalToken: token)
-      _ = try await store.commitV2(
-        makeCommit(
-          command: command, generation: s.business.generation, descriptor: s.business.descriptor,
-          operations: [finish]))
-      publish(try await snapshot(matchID: match))
+    return try await planTerminalCleanupLocked(match, excluding: attempted)
+  }
+  /// Caller owns the same-match queue. No SDK or network await occurs in this planner.
+  func planTerminalCleanupLocked(_ match: String, excluding attempted: Set<String>) async throws -> String? {
+    var s = try await store.snapshotV2(matchID: match)
+    guard terminal(s), s.business.descriptor.recordingDeviceID == (try await identity()) else { return nil }
+    try requireWritable(s, device: s.business.descriptor.recordingDeviceID)
+    let pendingControls = s.captureOperations.filter { $0.state == .pending && $0.operation.action != .finish }
+    if let first = pendingControls.first {
+      let command = first.operation.id + "/terminal-cancel"
+      if let original = try await store.committedCommandV2(commandID: command) { _ = try await store.commitV2(original.request) }
+      else {
+        let updates = try pendingControls.map { try CaptureOperationUpdate(operationID: $0.operation.id, expectedState: .pending, state: .cancelled, observation: nil) }
+        _ = try await store.commitV2(makeCommit(command: command, generation: s.business.generation, descriptor: s.business.descriptor, updates: updates))
+      }
+      s = try await store.snapshotV2(matchID: match); publish(try projected(s))
+    }
+    for start in s.captureOperations where start.operation.action == .start && !attempted.contains(start.operation.externalToken) {
+      let token = start.operation.externalToken, records = s.captureOperations.filter { $0.operation.externalToken == token }
+      guard !tokenHasSaveProof(s, token: token), start.state != .cancelled,
+            !records.contains(where: { $0.operation.action == .finish && ($0.state == .pending || $0.state == .needsReconciliation) }) else { continue }
+      if case .notCreated = start.observation?.outcome, start.state == .failed { continue }
+      let latest = tokenObservation(s, token: token)
+      guard start.state == .needsReconciliation || latest?.outcome == .running || latest?.outcome == .paused else { continue }
+      let failed = records.last { $0.operation.action == .finish && $0.state == .failed }
+      let command = failed.map { $0.operation.id + "/terminal-retry" } ?? token + "/terminal-finish"
+      if let original = try await store.committedCommandV2(commandID: command) { _ = try await store.commitV2(original.request) }
+      else {
+        let date = s.business.events.filter { $0.type == .matchEnded || $0.type == .matchTerminated }.map(\.createdAt).min() ?? start.operation.requestedAt
+        let finish = try CaptureOperation(id: command + "/operation", binding: start.operation.binding, associatedCommandID: command, action: .finish, requestedAt: date, externalToken: token)
+        _ = try await store.commitV2(makeCommit(command: command, generation: s.business.generation, descriptor: s.business.descriptor, operations: [finish]))
+      }
+      publish(try projected(await store.snapshotV2(matchID: match)))
       return token
     }
     return nil

@@ -9,7 +9,7 @@ public enum StoreError: Error, Sendable, Equatable {
     case injectedFailure, responseLost, staleCompletionEvidence
     case captureConflict, invalidCaptureRevision, missingCaptureParent, captureBranch
     case operationConflict, invalidOperationTransition, staleCaptureEvidence
-    case invalidPeerAuthorization, trustUnavailable, ancestryIncomplete, syncConflict, syncQuotaExceeded
+    case invalidPeerAuthorization, trustUnavailable, ancestryIncomplete, syncConflict, syncQuotaExceeded, syncAssemblyExpired, syncTransportUnavailable
 }
 
 enum Canonical {

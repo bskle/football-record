@@ -44,6 +44,22 @@ private actor DebugFailureRepository: SessionRepository {
   let repository: SQLiteSessionRepository
   var failed = false
   init(_ repository: SQLiteSessionRepository) { self.repository = repository }
+  func syncRepositoryIdentity() async -> SyncRepositoryIdentity { await repository.syncRepositoryIdentity() }
+  func unroutedBusinessOutboxV3(matchID: String) async throws -> [BusinessOutboxItem] { try await repository.unroutedBusinessOutboxV3(matchID: matchID) }
+  func routeBusinessOutboxV3(outboxID: String, peer: PeerAuthorization, now: Date) async throws -> RouteReceiptV3 { try await repository.routeBusinessOutboxV3(outboxID: outboxID, peer: peer, now: now) }
+  func pendingPacketsV2(matchID: String) async throws -> [MatchPacketV2] { try await repository.pendingPacketsV2(matchID: matchID) }
+  func receiveV2(_ bytes: Data, peer: PeerAuthorization, expectedMatchID: String, now: Date) async throws -> InboundReceiptV3 { try await repository.receiveV2(bytes, peer: peer, expectedMatchID: expectedMatchID, now: now) }
+  func acknowledgeV2(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws { try await repository.acknowledgeV2(bytes, peer: peer, now: now) }
+  func syncStateV3(matchID: String) async throws -> SyncState { try await repository.syncStateV3(matchID: matchID) }
+  func ensureSyncDeliveriesV3(matchID: String) async throws { try await repository.ensureSyncDeliveriesV3(matchID: matchID) }
+  func dueSyncDeliveriesV3(now: Date, limit: Int) async throws -> [SyncDeliveryRecord] { try await repository.dueSyncDeliveriesV3(now: now, limit: limit) }
+  func recordSyncAttemptV3(deliveryID: String, nextAttemptAt: Date, issue: SyncIssue?, now: Date) async throws { try await repository.recordSyncAttemptV3(deliveryID: deliveryID, nextAttemptAt: nextAttemptAt, issue: issue, now: now) }
+  func validateSyncDeliveryV3(deliveryID: String, peer: PeerAuthorization, now: Date) async throws { try await repository.validateSyncDeliveryV3(deliveryID: deliveryID, peer: peer, now: now) }
+  func reactivateSyncACKsV3() async throws { try await repository.reactivateSyncACKsV3() }
+  func acceptSyncFragmentV3(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws -> FragmentAssemblyResult { try await repository.acceptSyncFragmentV3(bytes, peer: peer, now: now) }
+  func pendingSyncAssembliesV3(peer: PeerAuthorization, now: Date) async throws -> [FragmentAssemblyResult] { try await repository.pendingSyncAssembliesV3(peer: peer, now: now) }
+  func consumeSyncAssemblyV3(messageID: String, wholeChecksum: String) async throws { try await repository.consumeSyncAssemblyV3(messageID: messageID, wholeChecksum: wholeChecksum) }
+  func expireSyncAssembliesV3(now: Date) async throws { try await repository.expireSyncAssembliesV3(now: now) }
   func databaseNamespace() async -> String { await repository.databaseNamespace() }
   func matchIDs() async throws -> [String] { try await repository.matchIDs() }
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 { try await repository.snapshotV2(matchID: matchID) }

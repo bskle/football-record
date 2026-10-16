@@ -26,6 +26,7 @@ struct Identity: DeviceIdentityProvider {
   func localDeviceID() async throws -> String { value }
 }
 actor TestRepository: SessionRepository {
+  let syncIdentity = try! SyncRepositoryIdentity(instanceID: UUID().uuidString, databaseNamespace: "test-development")
   let store: MatchStore
   var holdFaultProjection = false
   var holdTail = false
@@ -42,10 +43,44 @@ actor TestRepository: SessionRepository {
   var observationFault: String?
   var observations = 0
   var observationWaiters: [CheckedContinuation<Void, Never>] = []
+  // Peer-terminal faults are independent of the original observation/tail gates.
+  var inboundFault: String?
+  var failInboundReload = false
+  var lastInboundReceipt: InboundReceiptV3?
+  var cleanupFault: String?
+  var cleanupRequests: [StoreCommitV2] = []
   init(_ store: MatchStore) { self.store = store }
+  func syncRepositoryIdentity() async -> SyncRepositoryIdentity { syncIdentity }
+  func unroutedBusinessOutboxV3(matchID: String) async throws -> [BusinessOutboxItem] { try await store.unroutedBusinessOutboxV3(matchID: matchID) }
+  func routeBusinessOutboxV3(outboxID: String, peer: PeerAuthorization, now: Date) async throws -> RouteReceiptV3 { try await store.routeBusinessOutboxV3(outboxID: outboxID, peer: peer, now: now) }
+  func pendingPacketsV2(matchID: String) async throws -> [MatchPacketV2] { try await store.pendingPacketsV2(matchID: matchID) }
+  func receiveV2(_ bytes: Data, peer: PeerAuthorization, expectedMatchID: String, now: Date) async throws -> InboundReceiptV3 {
+    let receipt = try await store.receiveV2(bytes, peer: peer, expectedMatchID: expectedMatchID, now: now)
+    lastInboundReceipt = receipt
+    let fault = inboundFault
+    inboundFault = nil
+    if fault == "reload" { failInboundReload = true }
+    if fault == "response" { throw StoreError.responseLost }
+    return receipt
+  }
+  func acknowledgeV2(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws { try await store.acknowledgeV2(bytes, peer: peer, now: now) }
+  func syncStateV3(matchID: String) async throws -> SyncState { try await store.syncStateV3(matchID: matchID) }
+  func ensureSyncDeliveriesV3(matchID: String) async throws { try await store.ensureSyncDeliveriesV3(matchID: matchID) }
+  func dueSyncDeliveriesV3(now: Date, limit: Int) async throws -> [SyncDeliveryRecord] { try await store.dueSyncDeliveriesV3(now: now, limit: limit) }
+  func recordSyncAttemptV3(deliveryID: String, nextAttemptAt: Date, issue: SyncIssue?, now: Date) async throws { try await store.recordSyncAttemptV3(deliveryID: deliveryID, nextAttemptAt: nextAttemptAt, issue: issue, now: now) }
+  func validateSyncDeliveryV3(deliveryID: String, peer: PeerAuthorization, now: Date) async throws { try await store.validateSyncDeliveryV3(deliveryID: deliveryID, peer: peer, now: now) }
+  func reactivateSyncACKsV3() async throws { try await store.reactivateSyncACKsV3() }
+  func acceptSyncFragmentV3(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws -> FragmentAssemblyResult { try await store.acceptSyncFragmentV3(bytes, peer: peer, now: now) }
+  func pendingSyncAssembliesV3(peer: PeerAuthorization, now: Date) async throws -> [FragmentAssemblyResult] { try await store.pendingSyncAssembliesV3(peer: peer, now: now) }
+  func consumeSyncAssemblyV3(messageID: String, wholeChecksum: String) async throws { try await store.consumeSyncAssemblyV3(messageID: messageID, wholeChecksum: wholeChecksum) }
+  func expireSyncAssembliesV3(now: Date) async throws { try await store.expireSyncAssembliesV3(now: now) }
   func databaseNamespace() async -> String { "test-development" }
   func matchIDs() async throws -> [String] { try await store.matchIDs() }
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 {
+    if failInboundReload {
+      failInboundReload = false
+      throw StoreError.responseLost
+    }
     let snapshot = try await store.snapshotV2(matchID: matchID)
     if let count = snapshotsAfterObservation {
       snapshotsAfterObservation = count + 1
@@ -76,6 +111,15 @@ actor TestRepository: SessionRepository {
     try await store.committedCommandV2(commandID: commandID)
   }
   func commitV2(_ request: StoreCommitV2) async throws -> CommitReceiptV2 {
+    let isTerminalCleanup = request.newCaptureOperations.contains {
+      $0.action == .finish && $0.associatedCommandID.contains("/terminal-")
+    }
+    let terminalFault = isTerminalCleanup ? cleanupFault : nil
+    if isTerminalCleanup {
+      cleanupRequests.append(request)
+      cleanupFault = nil
+    }
+    if terminalFault == "before" { throw StoreError.injectedFailure }
     if fail {
       fail = false
       throw StoreError.injectedFailure
@@ -103,6 +147,7 @@ actor TestRepository: SessionRepository {
       throw StoreError.injectedFailure
     }
     let r = try await store.commitV2(request)
+    if terminalFault == "after" { throw StoreError.responseLost }
     if isObservation {
       if holdTail { snapshotsAfterObservation = 0 }
       observations += 1
@@ -143,6 +188,8 @@ actor TestRepository: SessionRepository {
     failSuccessor = true
     successorFailed = false
   }
+  func failNextInbound(_ mode: String) { inboundFault = mode }
+  func failNextTerminalCleanup(_ mode: String) { cleanupFault = mode }
   func loseNextStartResponse() { loseSuffix = "/start" }
   func failNextCommit() { fail = true }
   func loseNextResponse() { lose = true }
@@ -233,7 +280,7 @@ struct Harness: Sendable {
   init(permits: any StartPermitProvider = DevelopmentStartPermitProvider()) throws {
     url = FileManager.default.temporaryDirectory.appendingPathComponent(
       "session-" + UUID().uuidString + ".sqlite")
-    repo = TestRepository(try MatchStore(url: url))
+    repo = TestRepository(try MatchStore(url: url, syncEnvironment: .development(databaseNamespace: "test-development")))
     gateway = FakeGateway()
     clock = TestClock()
     ids = TestIDs()

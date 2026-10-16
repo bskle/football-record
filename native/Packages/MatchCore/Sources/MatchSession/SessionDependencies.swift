@@ -2,7 +2,7 @@ import Foundation
 import MatchCore
 import MatchStore
 
-public protocol SessionRepository: Sendable {
+public protocol SessionRepository: SyncRepository {
   func matchIDs() async throws -> [String]
   func databaseNamespace() async -> String
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2
@@ -65,6 +65,7 @@ public struct UnavailableWorkoutGateway: WorkoutGateway {
 public actor SQLiteSessionRepository: SessionRepository {
   public static let productionNamespace = "production"
   private let store: MatchStore
+  private let syncIdentity: SyncRepositoryIdentity
   private let namespace: String
   public let databaseURL: URL
   static func isCanonicalNamespace(_ value: String) -> Bool {
@@ -77,10 +78,11 @@ public actor SQLiteSessionRepository: SessionRepository {
     // APFS may fold case and Unicode. Only canonical ASCII names reach the path factory.
     guard Self.isCanonicalNamespace(databaseNamespace) else { throw SessionError.invalidRequest }
     namespace = databaseNamespace
+    syncIdentity = try SyncRepositoryIdentity(instanceID: UUID().uuidString, databaseNamespace: databaseNamespace)
     let directory = rootDirectory.appendingPathComponent(databaseNamespace, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     databaseURL = directory.appendingPathComponent("matches.sqlite")
-    store = try MatchStore(url: databaseURL)
+    store = try MatchStore(url: databaseURL, syncEnvironment: databaseNamespace == Self.productionNamespace ? .production : .development(databaseNamespace: databaseNamespace))
   }
   public func databaseNamespace() async -> String { namespace }
   public func matchIDs() async throws -> [String] { try await store.matchIDs() }
@@ -96,6 +98,22 @@ public actor SQLiteSessionRepository: SessionRepository {
   public func pendingCaptureOperations(matchID: String) async throws -> [CaptureOperationRecord] {
     try await store.pendingCaptureOperations(matchID: matchID)
   }
+  public func syncRepositoryIdentity() async -> SyncRepositoryIdentity { syncIdentity }
+  public func unroutedBusinessOutboxV3(matchID: String) async throws -> [BusinessOutboxItem] { try await store.unroutedBusinessOutboxV3(matchID: matchID) }
+  public func routeBusinessOutboxV3(outboxID: String, peer: PeerAuthorization, now: Date) async throws -> RouteReceiptV3 { try await store.routeBusinessOutboxV3(outboxID: outboxID, peer: peer, now: now) }
+  public func pendingPacketsV2(matchID: String) async throws -> [MatchPacketV2] { try await store.pendingPacketsV2(matchID: matchID) }
+  public func receiveV2(_ bytes: Data, peer: PeerAuthorization, expectedMatchID: String, now: Date) async throws -> InboundReceiptV3 { try await store.receiveV2(bytes, peer: peer, expectedMatchID: expectedMatchID, now: now) }
+  public func acknowledgeV2(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws { try await store.acknowledgeV2(bytes, peer: peer, now: now) }
+  public func syncStateV3(matchID: String) async throws -> SyncState { try await store.syncStateV3(matchID: matchID) }
+  public func ensureSyncDeliveriesV3(matchID: String) async throws { try await store.ensureSyncDeliveriesV3(matchID: matchID) }
+  public func dueSyncDeliveriesV3(now: Date, limit: Int) async throws -> [SyncDeliveryRecord] { try await store.dueSyncDeliveriesV3(now: now, limit: limit) }
+  public func recordSyncAttemptV3(deliveryID: String, nextAttemptAt: Date, issue: SyncIssue?, now: Date) async throws { try await store.recordSyncAttemptV3(deliveryID: deliveryID, nextAttemptAt: nextAttemptAt, issue: issue, now: now) }
+  public func validateSyncDeliveryV3(deliveryID: String, peer: PeerAuthorization, now: Date) async throws { try await store.validateSyncDeliveryV3(deliveryID: deliveryID, peer: peer, now: now) }
+  public func reactivateSyncACKsV3() async throws { try await store.reactivateSyncACKsV3() }
+  public func acceptSyncFragmentV3(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws -> FragmentAssemblyResult { try await store.acceptSyncFragmentV3(bytes, peer: peer, now: now) }
+  public func pendingSyncAssembliesV3(peer: PeerAuthorization, now: Date) async throws -> [FragmentAssemblyResult] { try await store.pendingSyncAssembliesV3(peer: peer, now: now) }
+  public func consumeSyncAssemblyV3(messageID: String, wholeChecksum: String) async throws { try await store.consumeSyncAssemblyV3(messageID: messageID, wholeChecksum: wholeChecksum) }
+  public func expireSyncAssembliesV3(now: Date) async throws { try await store.expireSyncAssembliesV3(now: now) }
   public func close() async throws { try await store.close() }
 }
 /// One durable installation identity. Missing/corrupt identity with existing matches fails closed.
