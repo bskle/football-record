@@ -353,7 +353,7 @@ extension MatchStore {
         }
     }
     private func legalTransition(from: CaptureOperationRecord, to: CaptureOperationRecord) -> Bool {
-        guard (from.state == .pending && to.state == .needsReconciliation && to.observation == nil) ||
+        guard (from.state == .pending && (to.state == .needsReconciliation || to.state == .cancelled) && to.observation == nil) ||
               (from.state == .needsReconciliation && (to.state == .needsReconciliation || to.state == .settled || to.state == .failed)) else { return false }
         if from.observation?.failure == .routeFailed, to.observation?.failure != .routeFailed { return false }
         if case .savedAwaitingLink = from.observation?.outcome {

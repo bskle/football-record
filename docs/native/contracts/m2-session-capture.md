@@ -19,7 +19,7 @@ M1已有 `CaptureBinding(matchID:recordingDeviceID:)`、CaptureWindow、CaptureS
 | CaptureRevision | `id: String, binding: CaptureBinding, parentID: String?, revision: Int64, observedAt: Date, metadata: CaptureMetadata` |
 | CaptureAction | `start, pause, resume, finish, recover` |
 | CaptureOperation | `id: String, binding: CaptureBinding, associatedCommandID: String, action: CaptureAction, requestedAt: Date, externalToken: String`；token为该实际Workout片段首次start的稳定operationID，同一原session恢复和该片段后续动作沿用；确认恢复失败后新片段使用新start operationID/token，用作HealthKit metadata对账键，不是假Workout UUID |
-| CaptureOperationState | `pending, needsReconciliation, settled, failed` |
+| CaptureOperationState | `pending, needsReconciliation, settled, failed, cancelled` |
 | CaptureOperationRecord | `operation: CaptureOperation, state: CaptureOperationState, observation: WorkoutObservation?`；请求不可改写，状态经CAS转换，观测仅含下述非健康信息 |
 | CaptureOperationUpdate | `operationID: String, expectedState: CaptureOperationState, state: CaptureOperationState, observation: WorkoutObservation?` |
 | BusinessDeltaV2 | `descriptor: MatchDescriptor, events: [MatchEvent], captureRevisions: [CaptureRevision]`；只业务事实/非健康关联，不含本机可执行操作及健康数值 |
@@ -46,7 +46,7 @@ public func saveCompletionProofV2(evidence: TrustedCompletionEvidence, captureDi
 - 一次事务保存descriptor、events、captureRevisions、operations/状态、command receipt和所有对应业务outbox。新增facts/revision必须被相同事务的delta完整覆盖；操作ledger是本机执行意图，不让peer收到后执行。纯操作状态变化不伪造业务event。
 - `committedCommandV2` 不写入或执行 staging；缺命令返nil，命中则核对索引key、request.commandID、receipt.commandID/matchID、canonical request/hash，并与成功重试共用facts/revision/operation历史/outbox完整性验证。
 - v2同command异完整请求报commandConflict；成功命令先复核首次receipt所引用的所有facts/revision/操作请求/outbox原bytes与允许的状态演进，再返回首次receipt，不先做generation CAS。staleGeneration无成功反馈；已成功后generation推进不破首次重试。
-- operation请求永不可变；pending→needsReconciliation须先COMMIT再发side effect。结果已知后写settled/failed；savedAwaitingLink或不确定结果保持needsReconciliation。重启pending可首次perform；needsReconciliation只能先reconcile，不能盲perform。恢复/重试必须验证原binding、关联command及token。
+- operation请求永不可变；仅尚未执行的pending可CAS为cancelled且observation必须nil；cancelled为终态、pending查询排除，needsReconciliation不得取消。终结可取消排队start/recover/resume；finish仅在对应原start已cancelled或明确notCreated时可取消。marker先赢后仍须在gateway前重读终结并对账/收尾，不伪造未创建。pending→needsReconciliation须先COMMIT再发side effect。结果已知后写settled/failed；savedAwaitingLink或不确定结果保持needsReconciliation。重启pending可首次perform；needsReconciliation只能先reconcile，不能盲perform。恢复/重试必须验证原binding、关联command及token。
 - 单机没有可信peer时只unrouted；M3以真实已认证路由原子产出稳定packet并标routed，保留原outbox。该后续API不在M2伪实现；路由/ACK不能遗漏capture revisions，checksum不是身份认证。
 - 现有完成凭据只绑events。006在Store层增加版本化存储proof：`evidence: TrustedCompletionEvidence, captureDigest: String`；digest对排序后的完整revision canonical集合计算，未采集空集合有明确v2域分隔。旧无采集v1凭据按原规则保持；一旦新增采集revision，旧proof失效。snapshot()与snapshotV2()都须在返回前过滤失效proof；旧saveCompletionEvidence入口遇任何capture revision均拒绝以旧格式保存，不能重新装成completed。saveCompletionProofV2同时CAS核验expectedGeneration、当前事件evidence、当前完整captureDigest及now；新proof须由真实完整保存边界确认当前事件与采集digest。M2无此边界，不能从commit/任意ACK造completed。不要通过假event更改核心hash。旧receipt不因此失效。
 - 新增StoreError case：`captureConflict, invalidCaptureRevision, missingCaptureParent, captureBranch, operationConflict, invalidOperationTransition, staleCaptureEvidence`；既有invalidRequest/staleGeneration/unresolvedDiagnostics/corruptPayload继续适用。事务失败回滚；冲突/损坏原bytes和诊断按既有preservingDiagnostics语义保留。
