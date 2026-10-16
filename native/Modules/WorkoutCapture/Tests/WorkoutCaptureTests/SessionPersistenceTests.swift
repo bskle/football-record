@@ -56,6 +56,21 @@ private actor GatewayProbe: WorkoutGateway {
   private func session(_ repo: any SessionRepository, _ gateway: any WorkoutGateway, _ clock: IntegrationClock) -> MatchSession {
     MatchSession(store: repo, deviceIdentity: IntegrationIdentity(), clock: clock, ids: UUIDSessionIDFactory(), permits: DevelopmentStartPermitProvider(), workout: gateway, environment: .development(databaseNamespace: "capture-integration"))
   }
+  /// Recovery observation commits can legitimately race request preparation. Re-prepare only
+  /// after the original immutable command is confirmed absent; uncertain/saved work retries exactly.
+  private func end(_ coordinator: MatchSession, repository: any SessionRepository, matchID: String) async throws -> (SessionRequest, SessionReceipt) {
+    for _ in 0..<30 {
+      let request = try await coordinator.prepare(.end, matchID: matchID)
+      do { return (request, try await coordinator.execute(request)) }
+      catch let error as StoreError where error == .staleGeneration {
+        if try await repository.committedCommandV2(commandID: request.commandID) != nil {
+          return (request, try await coordinator.execute(request))
+        }
+        await Task.yield()
+      }
+    }
+    throw StoreError.staleGeneration
+  }
   func testActualGatewayStartSuccessThenSQLiteFailureReconcilesOriginalToken() async throws {
     try await exercise(saveFault: "before")
   }
@@ -87,8 +102,7 @@ private actor GatewayProbe: WorkoutGateway {
       try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .start && $0.state == .needsReconciliation && $0.observation?.outcome == .unknown }
     }
     XCTAssertNotNil(factory.authorizationContinuation); XCTAssertEqual(factory.creations, 0)
-    clock.advance(); let endRequest = try await original.prepare(.end, matchID: request.matchID)
-    let endReceipt = try await original.execute(endRequest)
+    clock.advance(); let (endRequest, endReceipt) = try await end(original, repository: fault, matchID: request.matchID)
     try await wait("finish must already be uncertain before the local start proof is persisted") {
       try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .finish && $0.state == .needsReconciliation && $0.observation?.outcome == .unknown }
     }
@@ -145,7 +159,7 @@ private actor GatewayProbe: WorkoutGateway {
     try await wait("unknown start must be durable") {
       try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .start && $0.observation?.outcome == .unknown }
     }
-    clock.advance(); _ = try await old.execute(old.prepare(.end, matchID: request.matchID))
+    clock.advance(); _ = try await end(old, repository: sql, matchID: request.matchID)
     try await wait("unknown finish must exist before simulated process loss") {
       try await sql.snapshotV2(matchID: request.matchID).captureOperations.contains { $0.operation.action == .finish && $0.state == .needsReconciliation && $0.observation?.outcome == .unknown }
     }
@@ -188,7 +202,7 @@ private actor GatewayProbe: WorkoutGateway {
     XCTAssertEqual(factory.creations, 1)
     let reconciliations = await probe.reconciled; XCTAssertTrue(reconciliations.contains { $0.id == request.captureOperationID && $0.externalToken == request.captureOperationID })
     await reopenedFault.inject(saveFault, outcome: .savedAwaitingLink)
-    clock.advance(); _ = try await reopened.execute(reopened.prepare(.end, matchID: request.matchID))
+    clock.advance(); _ = try await end(reopened, repository: reopenedFault, matchID: request.matchID)
     try await wait("save observation failure must be injected") { await reopenedFault.failed }
     let afterSave = try await reopenedSQL.snapshotV2(matchID: request.matchID)
     XCTAssertTrue(afterSave.captureRevisions.flatMap(\.metadata.segments).isEmpty)
