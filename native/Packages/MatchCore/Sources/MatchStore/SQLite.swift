@@ -21,29 +21,38 @@ final class SQLite: @unchecked Sendable {
         do {
             try check(sqlite3_busy_timeout(handle, 5_000))
             let version = try scalar("PRAGMA user_version").number ?? -1
-            guard version == 0 || version == 1 || version == 2 else { throw StoreError.unsupportedSchema(version) }
-            if version == 0 {
-                guard try rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").isEmpty else {
-                    throw StoreError.unsupportedSchema(0)
-                }
+            guard version == 0 || version == 1 || version == 2 || version == 3 else { throw StoreError.unsupportedSchema(version) }
+            // Check every existing schema before adding anything; all upgrades share one COMMIT.
+            if version >= 1 { for sql in Self.schemaChecks { _ = try rows(sql) } }
+            if version >= 2 { for sql in Self.schemaChecksV2 { _ = try rows(sql) } }
+            if version == 3 { for sql in Self.schemaChecksV3 { _ = try rows(sql) } }
+            guard try scalar("PRAGMA quick_check(1)").string == "ok" else {
+                throw StoreError.sqlite(code: SQLITE_CORRUPT, message: "integrity check failed")
+            }
+            if version < 3 {
                 try transaction {
-                    for sql in Self.schema { try execute(sql) }
-                    if fault == .migrationAfterSchema { throw StoreError.injectedFailure }
-                    try execute("PRAGMA user_version=1")
+                    if version == 0 {
+                        guard try rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").isEmpty else { throw StoreError.unsupportedSchema(0) }
+                        for sql in Self.schema { try execute(sql) }
+                        if fault == .migrationAfterSchema { throw StoreError.injectedFailure }
+                        try execute("PRAGMA user_version=1")
+                    }
+                    for sql in Self.schemaChecks { _ = try rows(sql) }
+                    if version < 2 {
+                        for sql in Self.schemaV2 { try execute(sql) }
+                        try migrateLegacyCompletionConfirmations()
+                        if fault == .migrationAfterSchema || fault == .migrationBeforeV2Version { throw StoreError.injectedFailure }
+                        try execute("PRAGMA user_version=2")
+                        if fault == .migrationAfterV2Version { throw StoreError.injectedFailure }
+                    }
+                    for sql in Self.schemaChecksV2 { _ = try rows(sql) }
+                    for sql in Self.schemaV3 { try execute(sql) }
+                    if fault == .migrationAfterV3Schema || fault == .migrationBeforeV3Version { throw StoreError.injectedFailure }
+                    try execute("PRAGMA user_version=3")
+                    if fault == .migrationAfterV3Version { throw StoreError.injectedFailure }
                 }
             }
-            // Fail on partial schemas rather than repairing or replacing an unknown database.
-            for sql in Self.schemaChecks { _ = try rows(sql) }
-            if version < 2 {
-                try transaction {
-                    for sql in Self.schemaV2 { try execute(sql) }
-                    try migrateLegacyCompletionConfirmations()
-                    if fault == .migrationAfterSchema || fault == .migrationBeforeV2Version { throw StoreError.injectedFailure }
-                    try execute("PRAGMA user_version=2")
-                    if fault == .migrationAfterV2Version { throw StoreError.injectedFailure }
-                }
-            }
-            for sql in Self.schemaChecksV2 { _ = try rows(sql) }
+            for sql in Self.schemaChecksV3 { _ = try rows(sql) }
             guard try scalar("PRAGMA quick_check(1)").string == "ok" else {
                 throw StoreError.sqlite(code: SQLITE_CORRUPT, message: "integrity check failed")
             }
@@ -181,4 +190,28 @@ final class SQLite: @unchecked Sendable {
         "SELECT match_id,confirmation_id,proof,checksum FROM completion_confirmations LIMIT 0"
     ]
 
+    private static let schemaV3 = [
+        "CREATE TABLE sync_delivery_v3 (delivery_id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, record BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE sync_fragments_v3 (fragment_id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, record BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE sync_context_v3 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE sync_registry_v3 (kind TEXT NOT NULL, id TEXT NOT NULL, match_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(kind,id))",
+        "CREATE TABLE sync_routes_v3 (outbox_id TEXT PRIMARY KEY NOT NULL, packet_id TEXT UNIQUE NOT NULL, idempotency_key TEXT UNIQUE NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL, match_id TEXT NOT NULL, sequence INTEGER NOT NULL, record BLOB NOT NULL, checksum TEXT NOT NULL, UNIQUE(source,target,match_id,sequence))",
+        "CREATE TABLE sync_sequences_v3 (source TEXT NOT NULL, target TEXT NOT NULL, match_id TEXT NOT NULL, next_sequence INTEGER NOT NULL, PRIMARY KEY(source,target,match_id))",
+        "CREATE TABLE sync_inbox_v3 (packet_id TEXT PRIMARY KEY NOT NULL, idempotency_key TEXT UNIQUE NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL, match_id TEXT NOT NULL, sequence INTEGER NOT NULL, record BLOB NOT NULL, checksum TEXT NOT NULL, UNIQUE(source,target,match_id,sequence))",
+        "CREATE TABLE sync_acknowledgements_v3 (packet_id TEXT PRIMARY KEY NOT NULL, ack_id TEXT UNIQUE NOT NULL, match_id TEXT NOT NULL, record BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE sync_ack_controls_v3 (ack_id TEXT PRIMARY KEY NOT NULL, packet_id TEXT UNIQUE NOT NULL, match_id TEXT NOT NULL, raw BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE sync_receive_progress_v3 (source TEXT NOT NULL, target TEXT NOT NULL, match_id TEXT NOT NULL, record BLOB NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(source,target,match_id))"
+    ]
+    private static let schemaChecksV3 = [
+        "SELECT delivery_id,match_id,record,checksum FROM sync_delivery_v3 LIMIT 0",
+        "SELECT fragment_id,match_id,record,checksum FROM sync_fragments_v3 LIMIT 0",
+        "SELECT singleton,payload,checksum FROM sync_context_v3 LIMIT 0",
+        "SELECT kind,id,match_id,payload,checksum FROM sync_registry_v3 LIMIT 0",
+        "SELECT outbox_id,packet_id,idempotency_key,source,target,match_id,sequence,record,checksum FROM sync_routes_v3 LIMIT 0",
+        "SELECT source,target,match_id,next_sequence FROM sync_sequences_v3 LIMIT 0",
+        "SELECT packet_id,idempotency_key,source,target,match_id,sequence,record,checksum FROM sync_inbox_v3 LIMIT 0",
+        "SELECT packet_id,ack_id,match_id,record,checksum FROM sync_acknowledgements_v3 LIMIT 0",
+        "SELECT ack_id,packet_id,match_id,raw,checksum FROM sync_ack_controls_v3 LIMIT 0",
+        "SELECT source,target,match_id,record,checksum FROM sync_receive_progress_v3 LIMIT 0"
+    ]
 }
