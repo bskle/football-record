@@ -6,12 +6,13 @@
 
 - 正式中文名为“球历”，英文名为 `football-record`；Xcode 工程技术名保留 `FootballRecord`。
 - 2026-10-15 规划启动时“尚未创建分支、worktree、标签”的快照已被 bootstrap 取代。永久分支为 `dev`、`release`、`main`；`main` / `release` 均保留浏览器原型基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`，annotated tag 为 `prototype-baseline-20261015`。尚无原生活动候选或发布。
-- M1 本地基础已双审集成，历史组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项 XCTest 与两端 MatchStore SDK / 两个 App 无签名构建证据保留。旧任务卡与 [GIT-002](docs/native/tasks/GIT-002.md) 只记录当时状态；当前治理台账为 [GIT-003](docs/native/tasks/GIT-003.md)。
-- M2 的 NATIVE-006 采集事务 / v2 仓储、007 共享会话、011 已证明未创建采集的收尾修复、009 双端记录 UI 均经两位非作者审阅合入 `dev`。登记时核对 `dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`（已验证产品组合；后续纯文档合并会推进 Git HEAD），实际合并复验 158 项宿主测试、6 项 SDK 产品编译、2 个 App 无签名构建及每端 1 项 XCUI 通过。009 另有 iOS 27 / watchOS 27 各完整 7 项 XCUI、390pt / 45mm 界面和 375pt 深色最大字体定点视觉证据。App 已接入 Core / Store / Session / Presentation 的原生记录页面，使用 `UnavailableWorkoutGateway`；最低 iOS 17 / watchOS 10 仅编译，未实际运行最低系统，真人 VoiceOver 朗读及触觉手感未验。
-- NATIVE-008 WorkoutCapture 最终 head `6e86e8f1ac647b02b8f1ef407226a10398c5d998` 已编译、双审：40 项模块 + 144 项核心宿主测试、双模拟器 / 双设备 SDK 无签名编译；证据来自 fake driver 与真实 SQLite 跨层测试，未实际运行 HealthKit，尚未入 `dev`。NATIVE-010 已从上述最新 `dev` 建独立 `test/m2-device-integration` 树，普通合入已审 008，正在准备真实 gateway、最小能力配置与操作指引；最终包未冻结，签名 / 安装 / 授权 / GPS / 后台 / 锁屏 / 恢复均待真机。008 / 010 相关真机门槛通过后才入 `dev`，不晋级 `release` / `main`。
+- M1 本地基础已双审集成，历史组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项 XCTest 与四项构建证据保留。旧任务卡、[GIT-002](docs/native/tasks/GIT-002.md) 和 [GIT-003](docs/native/tasks/GIT-003.md) 保留各自时点证据；本轮规划快照见 [NATIVE-013](docs/native/tasks/NATIVE-013.md)。
+- M2 的006/007/011/009及012恢复只读/原请求可重试修复已双审合入 `dev`。本次登记 `dev=origin/dev=505449279d6461436a051b5e6bc43324d805e3e0`，实际merge通过166项宿主测试（44 Core + 64 Store + 36 Session + 22 Presentation）、6项最低SDK产品和2个无签名App；后续纯文档合并会推进HEAD。App主线仍用`UnavailableWorkoutGateway`；009历史双端完整7项XCUI/视觉证据保留，最低iOS17/watch10只编译，真人VoiceOver及触觉未验。
+- 008最终`6e86e8f1ac647b02b8f1ef407226a10398c5d998`已编译双审；010最终`cdbafb7822ca2371a3d1eaa6da8b95e54da78f2f`（source `834cac5`）本机可完成部分已双审，105 input / 157 evidence已核。212是旧Core/Workout184 + 当前Presentation22/Integration6的分层累计，不是一次全212；两模拟器/两设备SDK无签名App与两端各3项UI通过。签名/安装/授权/GPS/后台/锁屏/恢复仍待真机，008/010不入dev、不晋级release/main。
+- 用户已明确“先跳过需要我协助部分，往下推，后续再做相关测试”。继续[M3子计划](docs/superpowers/plans/2026-10-16-native-m3.md)的无设备工作；013本轮规划，014仓储→015服务→016设备适配/017状态UI→018临时整包。规划不等于产品实现已开始；本人设备/账号/环境验收延期保留，016/018待真机前不入dev。M3依赖M1、可与M2适配并行。
 - 用户已授权按计划推进及同步 GitHub，并以“公开就公开暂时没事”接受 public 仓库，覆盖先前 private 意向。`origin = https://github.com/bskle/football-record.git`；`gh` 登录、HTTPS 与 `PUBLIC` / `ADMIN` 已核对，远端只有三条永久分支，默认 `main`。PR、CI 与服务端保护规则尚未配置，本地双审持续执行；代码同步不等于原生发布。
-- NATIVE-005 / 006 / 007 / 011 的受管 worktree 已实际归档、临时分支已用 `git branch -d` 安全删除。旧 NATIVE-002 / 003 / 004 / GIT-002 与新 009 归档请求仍 queued、实际 active，分支保留；必要 ignored 证据已另存，不盲重试、不强删或绕过工具。008 / 010 仍有设备验收依赖，正常保留。
-- Xcode 27.0 / Swift 6.4 可用，用户暂不能连接真机。执行 [M2 子计划](docs/superpowers/plans/2026-10-16-native-m2.md)；生产开赛许可留 M4，Debug 使用独立数据库并持续标注“开发模拟锁”，不算生产锁 / E2E。本地普通结束保持 `endedPendingSync`，不释放后台锁或制造 `completed`。
+- 005/006/007/011/012/GIT-003已实际归档并安全`git branch -d`；旧002/003/004/GIT-002及009共五树仍queued且实际active，分支保留，必要ignored证据已另存，不盲重试、不强删或绕过工具。008/010有设备验收依赖，正常保留。
+- Xcode27.0 / Swift6.4可用，最低iOS17/watch10不升级。M4的Apple登录、生产可信peer、开赛锁与CloudKit尚未实施；生产provider保持unavailable。Debug使用独立数据库、稳定身份fixture及“开发模拟锁 / 开发配对”标识，不算生产锁/E2E。本地普通结束保持`endedPendingSync`，peer ACK不释放后台锁、不制造`completed`。
 
 ## 角色与派工
 

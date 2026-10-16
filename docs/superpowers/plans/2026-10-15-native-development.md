@@ -16,7 +16,7 @@
 2. [开发准备检查](../../development-readiness.md) 是风险清单。用户已说明 Xcode 就绪，本轮只读核对为 Xcode 27.0（27A266a）与 iOS/watchOS 27 SDK；最低系统仍为 iOS 17 / watchOS 10。当前工具对设备枚举的权限限制不代表模拟器或真机缺失，不再将旧许可问题列为阻塞。
 3. 已有五份 `docs/superpowers/plans/` 计划与 `docs/frontend-implementation-plan.md` 均为浏览器原型计划；此前没有覆盖原生工程、真实采集、持久化、账号和锁的原生总计划。
 4. 历史规划启动快照只有 `main` 且无 remote。2026-10-15 已执行 bootstrap：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留浏览器基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`；规划治理、工程基础、公开仓库治理与事件引擎已双审集成。2026-10-16 仓储以 `9e4ee11e723f6dd46fccce35b93a9c625c7f0d42`、采集片段合同以 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 双审合入 `dev`。`origin = https://github.com/bskle/football-record.git`；用户已接受 public，覆盖先前 private 意向。主代理已核对 `gh` 登录、HTTPS 认证及 `PUBLIC` / `ADMIN`，首次原子推送三条长期分支与原型标签成功；后续 M2 的 006 / 007 / 011 / 009 已双审集成，登记时上海 2026-10-16 快照 `dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`（已验证产品组合），默认分支为 `main`，`main` / `release` 仍为原型基线且无原生候选。当前事实见 [GIT-003](../../native/tasks/GIT-003.md)，M1 快照见 [GIT-002](../../native/tasks/GIT-002.md)，[GIT-001](../../native/tasks/GIT-001.md) 与 [NATIVE-000](../../native/tasks/NATIVE-000.md) 保留各自初始记录。代码同步不代表原生发布，PR、CI 与服务端保护规则尚未配置；按已有授权推进，不新增重复审批。
-5. 正式中文名为球历、英文名为 `football-record`；工程名保留 `FootballRecord`。用户暂不能连接真机；不阻塞 M1 共享测试与无签名 SDK 构建，M2 起的真实采集验收仍待设备与签名。
+5. 正式中文名为球历、英文名为 `football-record`；工程名保留 `FootballRecord`。用户明确“先跳过需要我协助部分，往下推，后续再做相关测试”；M2/M3本人设备/账号/环境验收延期保留，不能标通过或解除设备实现合入门槛。当前`dev=origin/dev=505449279d6461436a051b5e6bc43324d805e3e0`，006/007/011/009/012均已双审，实际merge166宿主/6SDK/2App通过；第4项与GIT-003保留早先快照。008已编译双审；010最终`cdbafb7822ca2371a3d1eaa6da8b95e54da78f2f`本机部分已双审，分层累计212不是一次全212，仍待签名/采集/恢复真机。最新规划快照见[NATIVE-013](../../native/tasks/NATIVE-013.md)。
 6. 保留 `prototype/`、`打开足球记录.html`、现有 Node 测试和截图作为浏览器基线。原型 mock 的 41 项检查通过，只能证明原型行为；不能代替原生构建、真实联网锁、HealthKit、CloudKit 或真机验收。
 
 ### 阶段进度（2026-10-16，上海）
@@ -26,8 +26,8 @@
 | 浏览器原型 | 已在已记录范围验收 | 保留交互基线 |
 | 原生母计划与工作流 | bootstrap 文档已双审并合入 `dev`（`2d4616355221af0969e07e9b1f45852449cbb98e`） | 后续变更绑定实际 head 与目标重新审阅验证 |
 | M1 工程/事件/本地可靠性 | 本地基础交付完成，NATIVE-001 至 004 已双审集成；组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试与四项 SDK / App 构建通过（[仓储证据](../../native/validation/NATIVE-003.md)、[采集合同证据](../../native/validation/NATIVE-004.md)、[组合台账](../../native/tasks/GIT-002.md)） | M1 历史证据保留；M2 元数据落盘、共享会话和记录页面已接入，真实采集仍待设备；M3 接入实际设备传输 |
-| M2 采集/恢复与原生 UI | [M2 子计划](2026-10-16-native-m2.md) 的 006 / 007 / 011 / 009 已双审合入；已验证产品组合 158 项宿主测试、6 SDK、2 App 和两端各 1 项 XCUI 通过，已有记录页面 | 008 已编译 / 双审未入 dev；010 独立树准备设备包，真机采集 / 恢复门槛保留 |
-| M3 设备同步 | 未开始 | M2 v2未路由outbox与真实peer路由合同；设备联调需真机 |
+| M2 采集/恢复与原生 UI | 006/007/011/009/012已双审合入；当前实际merge166宿主/6SDK/2App通过，含恢复只读修复 | 008已编译双审；010本机整包已双审，真实签名/采集/恢复门槛保留，两者不入dev |
+| M3 设备同步 | [M3子计划](2026-10-16-native-m3.md)/[合同](../../native/contracts/m3-durable-sync.md)处于013规划，产品实现未开始 | 014仓储→015服务→016设备适配/017UI→018临时整包；本人协助测试延期，016/018保留真机门槛 |
 | M4 账号/锁/私有云/设备生命周期 | 未开始 | 真实签名能力与服务环境 |
 | M5 纠错/历史/分析；M6 发布/三场实战 | 均未开始 | 前序交付与逐项验收 |
 
@@ -124,16 +124,16 @@
 
 ### M3：离线记录与 Watch/iPhone 持久化同步
 
-**依赖：** M1；与 M2 适配可并行开发，跨设备验收需要 M2 真机包。
+**依赖：** M1；与M2适配可并行开发，跨设备验收需要M2真机包。执行[M3子计划](2026-10-16-native-m3.md)和[冻结合同](../../native/contracts/m3-durable-sync.md)：014/015同Core包串行，016/017在015已验证后按独立文件并行，018从最新已验dev普通合入已审016与010候选形成临时设备包。用户已授权先跳过本人协助项继续推进，相关实测延期而非通过。
 
 - [ ] 选择 WCSession 即时/后台文件等通道，应用协议统一包含 matchID、来源、revision、包序、checksum 与幂等键；传输成功不能替代接收端落盘确认。
-- [ ] 发送端 outbox 重试、接收端事务合并与 ACK；重传、乱序、重复、分包、断连与重启不重复计分；发送端收到持久化 ACK 后才清理已确认待传数据。
+- [ ] 发送端outbox重试、接收端事务合并与ACK；重传、乱序、重复、分包、断连与重启不重复计分；持久ACK只确认显式映射包并从待传查询排除，原outbox/canonical包/命令receipt保留供原请求重试。
 - [ ] 区分“本地已保存、待传手机、待云同步、待后台终结”；离线正常结束保持 endedPendingSync，异常结束保持 incomplete 和待同步事实。
 - [ ] 终结状态不可被旧包回滚：迟到 Watch 数据保留在原 matchID，不重新激活、不自动 completed、不改变 recordingDeviceID。
 
 **自动与真机验收：** 故障注入覆盖发送后失联、接收落盘后 ACK 丢失、乱序/重复/校验失败与两端重启；真机断开配对通信后记录与结束，重新连接只出现一份事件。已确认删除的事件不能被旧包复活。
 
-**交付：** 协议文档、双设备断连/恢复记录、可靠 outbox 与同步状态 UI。
+**交付：** 协议文档、可靠outbox与同步状态UI、后续双设备断连/恢复记录。014/015纯协议与017 unavailable生产装配经双审及适用自动/模拟器验证可入dev；016/018真机门槛前留分支，不提前合dev/release/main。transferFile不支持Simulator，生产trusted peer留M4且当前unavailable；peer ACK不等于completed、后台终结或放锁。
 
 ### M4：账号、原子比赛锁、CloudKit、异常结束与设备生命周期
 
