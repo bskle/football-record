@@ -11,7 +11,7 @@ private func captureDate(_ value: Date) throws {
     guard value.timeIntervalSinceReferenceDate.isFinite else { throw CaptureValueError.nonFiniteDate }
 }
 public enum CaptureAction: String, Codable, Sendable { case start, pause, resume, finish, recover }
-public enum CaptureOperationState: String, Codable, Sendable { case pending, needsReconciliation, settled, failed }
+public enum CaptureOperationState: String, Codable, Sendable { case pending, needsReconciliation, settled, failed, cancelled }
 public enum CaptureFailure: String, Codable, Sendable {
     case writeDenied, locationDenied, unavailable, recoveryUnavailable, routeFailed, captureFailed
 }
@@ -130,7 +130,7 @@ public struct CaptureOperationRecord: Codable, Sendable, Equatable {
         }
         if case .notCreated = observation?.outcome, operation.action != .start { throw CaptureValueError.invalidObservation }
         switch (state, observation?.outcome) {
-        case (.pending, nil), (.needsReconciliation, nil), (.needsReconciliation, .some(.unknown)),
+        case (.pending, nil), (.cancelled, nil), (.needsReconciliation, nil), (.needsReconciliation, .some(.unknown)),
              (.needsReconciliation, .some(.savedAwaitingLink)), (.failed, .some(.notCreated)): break
         case (.needsReconciliation, .some(.stopped)):
             guard observation?.failure == .captureFailed else { throw CaptureValueError.invalidObservation }
