@@ -15,7 +15,7 @@
 1. 优先执行用户最新明确决定；其次为 [产品方案](../../0-产品方案.md) 中的不变量、V1 范围及日期补充；交互以 [原型说明](../../../prototype/README.md)、[UI 规范](../../ui-ux-spec.md) 与最新已验收原型为依据。过期的三页 Watch、五按钮/二级弹窗等旧描述不覆盖已确认的双页与四按钮交互。
 2. [开发准备检查](../../development-readiness.md) 是风险清单。用户已说明 Xcode 就绪，本轮只读核对为 Xcode 27.0（27A266a）与 iOS/watchOS 27 SDK；最低系统仍为 iOS 17 / watchOS 10。当前工具对设备枚举的权限限制不代表模拟器或真机缺失，不再将旧许可问题列为阻塞。
 3. 已有五份 `docs/superpowers/plans/` 计划与 `docs/frontend-implementation-plan.md` 均为浏览器原型计划；此前没有覆盖原生工程、真实采集、持久化、账号和锁的原生总计划。
-4. 历史规划启动快照只有 `main` 且无 remote。2026-10-15 已执行 bootstrap：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留浏览器基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`；规划治理、工程基础、公开仓库治理与事件引擎已双审集成。2026-10-16 仓储以 `9e4ee11e723f6dd46fccce35b93a9c625c7f0d42`、采集片段合同以 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 双审合入 `dev`。`origin = https://github.com/bskle/football-record.git`；用户已接受 public，覆盖先前 private 意向。主代理已核对 `gh` 登录、HTTPS 认证及 `PUBLIC` / `ADMIN`，首次原子推送三条长期分支与原型标签成功；后续 M2 的 006 / 007 / 011 / 009 已双审集成，当前上海 2026-10-16 快照 `dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`，默认分支为 `main`，`main` / `release` 仍为原型基线且无原生候选。当前事实见 [GIT-003](../../native/tasks/GIT-003.md)，M1 快照见 [GIT-002](../../native/tasks/GIT-002.md)，[GIT-001](../../native/tasks/GIT-001.md) 与 [NATIVE-000](../../native/tasks/NATIVE-000.md) 保留各自初始记录。代码同步不代表原生发布，PR、CI 与服务端保护规则尚未配置；按已有授权推进，不新增重复审批。
+4. 历史规划启动快照只有 `main` 且无 remote。2026-10-15 已执行 bootstrap：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留浏览器基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`；规划治理、工程基础、公开仓库治理与事件引擎已双审集成。2026-10-16 仓储以 `9e4ee11e723f6dd46fccce35b93a9c625c7f0d42`、采集片段合同以 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 双审合入 `dev`。`origin = https://github.com/bskle/football-record.git`；用户已接受 public，覆盖先前 private 意向。主代理已核对 `gh` 登录、HTTPS 认证及 `PUBLIC` / `ADMIN`，首次原子推送三条长期分支与原型标签成功；后续 M2 的 006 / 007 / 011 / 009 已双审集成，登记时上海 2026-10-16 快照 `dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`（已验证产品组合），默认分支为 `main`，`main` / `release` 仍为原型基线且无原生候选。当前事实见 [GIT-003](../../native/tasks/GIT-003.md)，M1 快照见 [GIT-002](../../native/tasks/GIT-002.md)，[GIT-001](../../native/tasks/GIT-001.md) 与 [NATIVE-000](../../native/tasks/NATIVE-000.md) 保留各自初始记录。代码同步不代表原生发布，PR、CI 与服务端保护规则尚未配置；按已有授权推进，不新增重复审批。
 5. 正式中文名为球历、英文名为 `football-record`；工程名保留 `FootballRecord`。用户暂不能连接真机；不阻塞 M1 共享测试与无签名 SDK 构建，M2 起的真实采集验收仍待设备与签名。
 6. 保留 `prototype/`、`打开足球记录.html`、现有 Node 测试和截图作为浏览器基线。原型 mock 的 41 项检查通过，只能证明原型行为；不能代替原生构建、真实联网锁、HealthKit、CloudKit 或真机验收。
 
@@ -26,7 +26,7 @@
 | 浏览器原型 | 已在已记录范围验收 | 保留交互基线 |
 | 原生母计划与工作流 | bootstrap 文档已双审并合入 `dev`（`2d4616355221af0969e07e9b1f45852449cbb98e`） | 后续变更绑定实际 head 与目标重新审阅验证 |
 | M1 工程/事件/本地可靠性 | 本地基础交付完成，NATIVE-001 至 004 已双审集成；组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试与四项 SDK / App 构建通过（[仓储证据](../../native/validation/NATIVE-003.md)、[采集合同证据](../../native/validation/NATIVE-004.md)、[组合台账](../../native/tasks/GIT-002.md)） | M1 历史证据保留；M2 元数据落盘、共享会话和记录页面已接入，真实采集仍待设备；M3 接入实际设备传输 |
-| M2 采集/恢复与原生 UI | [M2 子计划](2026-10-16-native-m2.md) 的 006 / 007 / 011 / 009 已双审合入；当前 merge 158 项宿主测试、6 SDK、2 App 和两端各 1 项 XCUI 通过，已有记录页面 | 008 已编译 / 双审未入 dev；010 独立树准备设备包，真机采集 / 恢复门槛保留 |
+| M2 采集/恢复与原生 UI | [M2 子计划](2026-10-16-native-m2.md) 的 006 / 007 / 011 / 009 已双审合入；已验证产品组合 158 项宿主测试、6 SDK、2 App 和两端各 1 项 XCUI 通过，已有记录页面 | 008 已编译 / 双审未入 dev；010 独立树准备设备包，真机采集 / 恢复门槛保留 |
 | M3 设备同步 | 未开始 | M2 v2未路由outbox与真实peer路由合同；设备联调需真机 |
 | M4 账号/锁/私有云/设备生命周期 | 未开始 | 真实签名能力与服务环境 |
 | M5 纠错/历史/分析；M6 发布/三场实战 | 均未开始 | 前序交付与逐项验收 |
@@ -199,7 +199,7 @@
 | Apple 账号/Developer Team、Bundle ID、签名和 CloudKit 容器/能力；工程代理指导用户准备 | M2 真机与 M4 身份/云联调前 | M1、共享测试、模拟器界面、协议实现；免费 Personal Team 不等于 CloudKit/TestFlight 能力已就绪 |
 | 用户已有 iPhone + Watch，目前暂不能连接；后续确认配对、开发者模式、安装与可用实测时间 | M2 真机采集前 | 核心/仓储、UI 与故障注入；设备枚举受工具权限限制时不推断没有设备 |
 | 最小后台实际运行环境、部署凭据与服务配置 | M4 真实联网锁前 | 供应商无关接口、原子性测试、账号 UI、同步实现；不能开放正式离线开赛 |
-| `origin` 为用户已接受的 public 仓库；远端仅三条长期分支，`dev` 已核对到 M2 记录 UI 实际合并 `2e1f9c42f4398a50b66765a0f37f90ced95a7554`，原型 tag 保留；分发方式未配置 | 后续代码同步与原生发布分别核对 | 按授权在双审与实际合并验证后继续同步；旧 private 意向已覆盖。代码同步不代替保护、CI、签名、真机验收或分发配置 |
+| `origin` 为用户已接受的 public 仓库；远端仅三条长期分支，登记时 `dev` 已核对到 M2 记录 UI 实际合并 `2e1f9c42f4398a50b66765a0f37f90ced95a7554`，原型 tag 保留；分发方式未配置 | 后续代码同步与原生发布分别核对 | 按授权在双审与实际合并验证后继续同步；旧 private 意向已覆盖。代码同步不代替保护、CI、签名、真机验收或分发配置 |
 
 以上是按阶段需要的实际配置，不是新增产品决策。本轮母计划无必须用户回答后才能完成的阻塞问题；到达对应关口仍无法获取配置时，由主代理只提出当时必需的问题。
 

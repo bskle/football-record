@@ -8,7 +8,7 @@
 
 历史执行快照（2026-10-16，GIT-002 定稿前）：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留上述浏览器基线；规划治理、工程基础、事件引擎、SQLite 仓储与采集片段合同均经两位非作者审阅进入 `dev`。最新组合 SHA 为 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`，70 项测试及四项无签名构建通过；具体任务 head 与合并见 GIT-002。`origin = https://github.com/bskle/football-record.git`；用户已明确接受 public，覆盖先前 private 意向。主代理已核对 GitHub CLI 登录及 `PUBLIC` / `ADMIN`，首次原子推送三条长期分支与原型标签成功，随后远端 `dev` 已同步并核对为上述组合 SHA；默认分支为 `main`。正式名称为球历 / `football-record`。旧任务卡保留当时记录，后续以实际 Git 和任务台账为准。
 
-当前执行事实（2026-10-16，GIT-003）：`dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`；006 采集事务、007 共享会话、011 未创建采集收尾与 009 双端记录 UI 均已双审合入。主代理在实际 merge 复验 158 项宿主测试、6 项 SDK 产品、2 个 App 无签名构建及两端各 1 项 XCUI；009 完整模拟器证据为两端各 7 项。008 最终已审 head `6e86e8f1ac647b02b8f1ef407226a10398c5d998` 尚未入 `dev`；010 仅在临时树普通合入它并准备接线，真机门槛保留。005 / 006 / 007 / 011 已实际归档并安全删分支；旧 002 / 003 / 004 / GIT-002 与 009 仍 queued / active，分支保留，不把请求当清理成功。
+登记时执行事实（2026-10-16，GIT-003）：`dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`，此为已验证产品组合，后续纯文档合并会推进分支 HEAD；006 采集事务、007 共享会话、011 未创建采集收尾与 009 双端记录 UI 均已双审合入。主代理在实际 merge 复验 158 项宿主测试、6 项 SDK 产品、2 个 App 无签名构建及两端各 1 项 XCUI；009 完整模拟器证据为两端各 7 项。008 最终已审 head `6e86e8f1ac647b02b8f1ef407226a10398c5d998` 尚未入 `dev`；010 仅在临时树普通合入它并准备接线，真机门槛保留。005 / 006 / 007 / 011 已实际归档并安全删分支；旧 002 / 003 / 004 / GIT-002 与 009 仍 queued / active，分支保留，不把请求当清理成功。
 
 当前 `main` 是浏览器原型基线，还不是已发布的 iPhone / Apple Watch 产品。建立分支不代表原生实现、构建、真机验证或发布已经完成。
 
@@ -174,7 +174,7 @@ Limitations: <未验证项及原因；无则写无>
 
 ## 11. 本地执行边界与未来远程保护
 
-当前 `remote.mode = configured-write-authorized`：`origin = https://github.com/bskle/football-record.git` 为用户已接受的 public 仓库。用户最新“公开就公开暂时没事”覆盖此前 private 意向；无需等待可见性改为 private。主代理已在可访问系统 keyring 与网络的上下文核对 `gh auth status`（已登录、HTTPS）及 `gh repo view`（`PUBLIC` / `ADMIN`），并成功执行 `gh auth setup-git --hostname github.com`。受限 sandbox 无法访问系统凭据或网络时的认证失败不能覆盖这次有效核对。2026-10-15 已按授权以 `git push --atomic -u origin main dev release refs/tags/prototype-baseline-20261015` 完成首次同步并核对远端引用；截至 2026-10-16 本快照，远端 `dev` 已同步并核对到 M2 记录 UI 实际合并 `2e1f9c42f4398a50b66765a0f37f90ced95a7554`，远端仅三条长期分支，默认分支为 `main`。不自动推送其他临时分支或标签。代码同步不代表签名、真机验收、TestFlight / App Store 分发或原生发布完成；PR、CI 与服务端保护规则尚未配置。
+当前 `remote.mode = configured-write-authorized`：`origin = https://github.com/bskle/football-record.git` 为用户已接受的 public 仓库。用户最新“公开就公开暂时没事”覆盖此前 private 意向；无需等待可见性改为 private。主代理已在可访问系统 keyring 与网络的上下文核对 `gh auth status`（已登录、HTTPS）及 `gh repo view`（`PUBLIC` / `ADMIN`），并成功执行 `gh auth setup-git --hostname github.com`。受限 sandbox 无法访问系统凭据或网络时的认证失败不能覆盖这次有效核对。2026-10-15 已按授权以 `git push --atomic -u origin main dev release refs/tags/prototype-baseline-20261015` 完成首次同步并核对远端引用；截至 2026-10-16 本次登记快照，远端 `dev` 已同步并核对到 M2 记录 UI 实际合并 `2e1f9c42f4398a50b66765a0f37f90ced95a7554`，远端仅三条长期分支，默认分支为 `main`。不自动推送其他临时分支或标签。代码同步不代表签名、真机验收、TestFlight / App Store 分发或原生发布完成；PR、CI 与服务端保护规则尚未配置。
 
 首次推送前核对实际 remote、待推引用及预期 SHA，推送后核对远端结果；后续交付仍须重新识别 upstream、默认分支、保护规则与写权限。当前已核对的登录及管理员权限不证明保护或 CI 已配置。三条长期分支应保护禁止直接推送、删除和历史改写；`dev` 要求双审与相关自动检查，`release` 还要求版本候选验收，`main` 要求发布证据并遵守服务端既有审批规则。真机验证无法自动化的部分以绑定 SHA 的记录作为必需审阅证据。provider 不支持某项强制规则时写明限制，由主代理在流程中执行，不能宣称服务端已经强制。
 
