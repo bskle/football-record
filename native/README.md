@@ -55,3 +55,10 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHON
 Debug UI 参数 `--ui-scenario sync-pending|sync-retry|sync-saved|sync-terminal` 使用两个实际隔离的本机 SQLite 和稳定 identity 文件；`--ui-dataset` 相同则重开同一组。持续显示开发模拟锁/开发配对；这是本机 fake transport 协议演练，不能证明真实 WatchConnectivity 通信。原 `other-device` 是同库只读观察情景，不能作为双库证据。
 
 UI 验证仍使用实际已存在 simulator UDID；可通过 `NATIVE_UI_TEST_FILTER=FootballRecord-iOS-UITests/NativeRecordingUITests/testPersistentSyncPendingRetryAndPeerSaved`（Watch 对应 target）执行定点复验。最低 iOS17/watchOS10 仅编译，当前 iOS27/watchOS27 模拟器不替代最低系统运行、真人 VoiceOver、触觉或真机验收。
+
+
+### M3 临时设备整包
+
+NATIVE-018 在独立候选树将真实 WorkoutCapture / DeviceSync 与同一个 SQLiteSessionRepository、MatchSession、MatchSyncService 装配。每次切换环境都先停止旧 model、事件监听和指标监听，再关闭 facade、释放旧上下文；不缓存已 shutdown 的 model。设备验收安全扫描复用活动 facade；离线扫描只短开短关。
+
+Debug 真实设备入口显示本机持久 UUID；双方显式配对配置使用 `--sync-peer-config` JSON，详见 `docs/native/device-setup.md`。未配置、身份或配置变化、WC 配对失效均停止可信传输，本机合法记录仍可保存。传输初始化异常保留原文件并降级 unavailable。生产 trust/start permit 仍 unavailable；开发 account/pair/epoch 不是 Apple 登录。Simulator 上的受控驱动和协议演练不证明真实 WatchConnectivity；真实签名、授权和户外采集继续延期。

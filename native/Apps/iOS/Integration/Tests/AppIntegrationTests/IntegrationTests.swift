@@ -28,14 +28,14 @@ import WorkoutCapture
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     let repo = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: DeviceDatasetGate.namespace)
     let gate = DeviceDatasetGate(rootDirectory: root)
-    let initiallySafe = try await gate.isSafeToLeave(); XCTAssertTrue(initiallySafe)
+    let initiallySafe = try await gate.isSafeToLeave(activeRepository: repo); XCTAssertTrue(initiallySafe)
     let session = MatchSession(store: repo, deviceIdentity: TestIdentity(), clock: SystemSessionClock(), ids: UUIDSessionIDFactory(), permits: DevelopmentStartPermitProvider(), workout: UnavailableWorkoutGateway(), environment: .development(databaseNamespace: DeviceDatasetGate.namespace))
     let request = try await session.prepareStart(starter: true)
     _ = try await session.execute(request)
-    let activeSafe = try await gate.isSafeToLeave(); XCTAssertFalse(activeSafe)
+    let activeSafe = try await gate.isSafeToLeave(activeRepository: repo); XCTAssertFalse(activeSafe)
     let end = try await session.prepare(.end, matchID: request.matchID)
     _ = try await session.execute(end)
-    let endedSafe = try await gate.isSafeToLeave(); XCTAssertFalse(endedSafe, "Ended with held backend lock is not safe to abandon")
+    let endedSafe = try await gate.isSafeToLeave(activeRepository: repo); XCTAssertFalse(endedSafe, "Ended with held backend lock is not safe to abandon")
   }
   func testCaptureUncertaintyAndPendingLinkAlwaysBlockSwitching() {
     XCTAssertFalse(IntegrationSafety.permitsLeaving(lockReleased: true, active: false, capture: .needsReconciliation, pendingOperations: false))

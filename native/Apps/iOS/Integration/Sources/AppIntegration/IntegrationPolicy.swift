@@ -42,10 +42,20 @@ public struct DeviceDatasetGate: Sendable {
   public static let namespace = "ui-simulation-device-acceptance-v1"
   private let rootDirectory: URL?
   public init(rootDirectory: URL? = nil) { self.rootDirectory = rootDirectory }
-  public func isSafeToLeave() async throws -> Bool {
+  public func isSafeToLeave(activeRepository: SQLiteSessionRepository? = nil) async throws -> Bool {
+    if let activeRepository {
+      guard await activeRepository.databaseNamespace() == Self.namespace else { throw SessionError.invalidRequest }
+      return try await inspect(activeRepository)
+    }
     let root = try rootDirectory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("football-record", isDirectory: true)
     let repo = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: Self.namespace)
     do {
+      let safe = try await inspect(repo)
+      try await repo.close()
+      return safe
+    } catch { try? await repo.close(); throw error }
+  }
+  private func inspect(_ repo: SQLiteSessionRepository) async throws -> Bool {
       var safe = true
       for id in try await repo.matchIDs() {
         let s = try await repo.snapshotV2(matchID: id)
@@ -64,8 +74,6 @@ public struct DeviceDatasetGate: Sendable {
         let capture: CapturePhase = knownClosed ? .finished : .needsReconciliation
         if !IntegrationSafety.permitsLeaving(lockReleased: s.business.descriptor.backendLockState == .releasedConfirmed, active: [.notStarted, .running, .paused].contains(replay.state), capture: capture, pendingOperations: pending) || !replay.diagnostics.isEmpty { safe = false }
       }
-      try await repo.close()
       return safe
-    } catch { try? await repo.close(); throw error }
   }
 }

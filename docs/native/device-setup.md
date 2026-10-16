@@ -57,3 +57,20 @@ iPhone在“设置→开发环境”选择；Watch在初始页或比赛主页向
 | 物理触觉、VoiceOver朗读、最低系统运行 | pending；模拟器AX和SDK编译不能代替 |
 
 真实Workout一旦不确定，先保留原记录和token，禁止自动另起；没有真实设备证据就不标记上述行完成。
+
+
+## M3 Debug 双端显式配对（NATIVE-018）
+
+此步骤等设备方便连接时再做，不影响当前本机开发。设备验收环境固定数据库命名空间 `ui-simulation-device-acceptance-v1`，与生产、纯界面演练分离。先分别运行 iPhone / Watch 的 Debug 设备验收入口，打开“开发环境”，抄下各自“本机持久身份” UUID。它来自本安装数据库旁的 `device.identity`，禁止拿随机 UUID 代替已有身份。
+
+在两个 target 的 Scheme → Run → Arguments 中加入 `--device-acceptance`，再加入一对参数 `--sync-peer-config` 和下列完整 JSON 字符串（作为一个参数）：
+
+```json
+{"localDeviceID":"本机实际UUID","remoteDeviceID":"另一端实际UUID","accountSubject":"development-football-record","pairingID":"明确约定的同一开发pair","trustEpoch":"明确约定的同一开发epoch"}
+```
+
+两个安装的 local / remote 必须互换，accountSubject / pairingID / trustEpoch 必须完全相同。此 account 是人工配置的开发标签，不是生产账号或 Apple 登录认证。第一次有效配置会保存在本安装相同 namespace 下的 `development-peer.json`，以后重启可省略 JSON；每次授权仍重读本机 identity、配置与持久失效记录。未配置仅保存本机，不从 WC 状态、来包或对端 sandbox 猜身份。双方 UUID 与绑定一经使用不得更换；配置、身份、配对或 companion 变化会 fail closed，保留原记录/待发数据与失效锁存。不要删文件、重装、换 epoch 以绕过；须保留现场后安排恢复方案。
+
+界面持续显示“开发模拟锁”和“开发配对”状态。真正 WC 激活才进入 connectionDidActivate，普通前台唤醒和重试不重置 ACK 的八次预算。传输文件持久化通知不是业务 ACK；只有真实业务 ACK 与完整持久计数才能显示对端已保存。对端确认不完成比赛或释放后台锁，普通结束仍是 endedPendingSync。
+
+Simulator 可以验证界面、隔离 SQLite、受控驱动、状态及生命周期；Apple 的 transferFile 不支持 Simulator，不能据此判定真实双端通信。签名安装、HK/定位授权、真机 WC、离线补传、锁屏/后台、系统恢复、真人 VoiceOver 与触觉仍按前文真机清单延期验收。最低 iOS17/watchOS10 保留编译门槛，当前 iOS27/watchOS27 Simulator 运行不等于最低系统已运行。

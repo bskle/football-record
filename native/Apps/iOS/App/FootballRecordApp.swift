@@ -13,7 +13,7 @@ private struct RecordingRoot: View {
     var body: some View {
         Group {
             if let model = assembly.model {
-                PhoneMatchView(model: model, enterDevelopment: { Task { await assembly.newUISimulation() } }, openEnvironment: { environments = true }, environmentTitle: assembly.mode.title).id(ObjectIdentifier(model)).disabled(assembly.switching || assembly.initializing)
+                PhoneMatchView(model: model, enterDevelopment: { Task { await assembly.newUISimulation() } }, openEnvironment: { environments = true }, environmentTitle: assembly.mode.title, devicePairStatus: assembly.peerStatus).id(ObjectIdentifier(model)).disabled(assembly.switching || assembly.initializing)
             } else if let message = assembly.message {
                 VStack { Text(message); Button("重试载入") { Task { await assembly.initialize() } } }.padding()
             } else { ProgressView("正在载入记录") }

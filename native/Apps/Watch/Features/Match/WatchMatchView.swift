@@ -9,6 +9,7 @@ struct WatchMatchView: View {
   let enterDevelopment: () -> Void
   let openEnvironment: () -> Void
   let environmentTitle: String
+  let devicePairStatus: String?
   @State private var choosingStart = false
   @State private var controls = false
   @State private var page = 0
@@ -28,6 +29,7 @@ struct WatchMatchView: View {
           VStack(spacing: 12) {
             Text("球历").font(.title2.bold())
             if model.development { DevelopmentMarker() }
+            if let devicePairStatus { Text(devicePairStatus).font(.caption2).accessibilityIdentifier("device-pair-marker") }
             Text("用事实留下每一次上场").font(.caption).foregroundStyle(.secondary)
             Button("开始比赛") { choosingStart = true }.frame(minHeight: 44).tint(MatchColors.accent).accessibilityIdentifier("start-match").disabled(model.busy || model.pendingRequest != nil || model.readOnly)
             RecordingIssueView(model: model)
@@ -47,6 +49,7 @@ struct WatchMatchView: View {
   }
   @ViewBuilder private func overview(_ p: MatchProjection) -> some View {
     VStack(spacing: 3) {
+      if let devicePairStatus { Text(devicePairStatus).font(.caption2).accessibilityIdentifier("device-pair-marker") }
       HStack { if model.development { DevelopmentMarker(compact: true) }; Spacer(); Text(p.status).font(.system(size: 9, weight: .semibold)).foregroundStyle(MatchColors.accent).accessibilityIdentifier("match-status") }
       HStack(alignment: .firstTextBaseline) {
         Text("我方").font(.system(size: 10)).foregroundStyle(.secondary)
