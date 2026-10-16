@@ -15,12 +15,12 @@ import MatchSession
     var recoveryAttempted = false
     var existenceObserved = false
     var negativeStartProof = false
-    var canProveNoCreation: Bool {
-      terminal && freshStartOperationID == context.externalToken && !creationAttempted && !recoveryAttempted
+    var hasLocalUnstartedStart: Bool {
+      freshStartOperationID == context.externalToken && !creationAttempted && !recoveryAttempted
         && !existenceObserved && driver == nil && state.start == nil && state.end == nil
     }
     func terminalStartResult() -> DriverState {
-      guard canProveNoCreation else { return DriverState(outcome: .unknown, start: state.start, end: state.end) }
+      guard terminal && hasLocalUnstartedStart else { return DriverState(outcome: .unknown, start: state.start, end: state.end) }
       negativeStartProof = true
       return DriverState(outcome: .notCreated(.unavailable), failure: .unavailable)
     }
@@ -48,7 +48,10 @@ import MatchSession
     if let prior = operations[operation.id], prior != operation { return observation(operation, state: DriverState(outcome: .unknown)) }
     if operation.action == .start, operations[operation.id] == nil { entry.freshStartOperationID = operation.id }
     operations[operation.id] = operation
-    if operation.action == .finish { entry.terminal = true }
+    if operation.action == .finish {
+      entry.terminal = true
+      if entry.hasLocalUnstartedStart { entry.merge(entry.terminalStartResult()) }
+    }
     if let driver = entry.driver { entry.merge(driver.currentState()) }
     if entry.state.saved { return observation(operation, state: entry.state) }
     let task: Task<DriverState, Never>
@@ -73,8 +76,15 @@ import MatchSession
     if let prior = operations[operation.id], prior != operation { return observation(operation, state: DriverState(outcome: .unknown)) }
     operations[operation.id] = operation
     if entry.negativeStartProof { return observation(operation, state: DriverState(outcome: .notCreated(.unavailable), failure: .unavailable)) }
-    entry.recoveryAttempted = true
-    if operation.action == .finish { entry.terminal = true }
+    if operation.action == .finish {
+      entry.terminal = true
+      if entry.hasLocalUnstartedStart { entry.merge(entry.terminalStartResult()) }
+    }
+    if entry.hasLocalUnstartedStart {
+      // A still-pending local authorization owns this token; an external recover adds no evidence.
+      // Terminal locking above proves no constructor/start can subsequently run, even if the sheet never returns.
+      return observation(operation, state: entry.state)
+    }
     if case .linked = entry.state.outcome { return observation(operation, state: entry.state) }
     if let driver = entry.driver { entry.merge(driver.currentState()) }
     if entry.terminal, entry.driver != nil, !entry.state.saved {
@@ -87,6 +97,7 @@ import MatchSession
     if !entry.state.saved, entry.driver != nil, entry.state.outcome != .unknown {
       return observation(operation, state: entry.state)
     }
+    entry.recoveryAttempted = true
     let factory = factory; let context = entry.context
     let lookup = await withDeadline(timeout) { await factory.recover(context: context) }
     switch lookup {

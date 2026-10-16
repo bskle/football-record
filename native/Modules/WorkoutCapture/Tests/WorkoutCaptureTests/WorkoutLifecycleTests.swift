@@ -30,6 +30,7 @@ import MatchCore
   var authorization = HealthAuthorization(available: true, write: .allowed, location: .allowed)
   var lookup = RecoveryLookup.unknown
   var creations = 0
+  var recoveryCalls = 0
   var holdAuthorization = false
   var authorizationStarted = false
   var authorizationContinuation: CheckedContinuation<HealthAuthorization, Never>?
@@ -40,7 +41,7 @@ import MatchCore
   }
   func releaseAuthorization() { holdAuthorization = false; authorizationContinuation?.resume(returning: authorization); authorizationContinuation = nil }
   func makeDriver(context: WorkoutContext) throws -> any WorkoutDriver { creations += 1; return driver }
-  func recover(context: WorkoutContext) async -> RecoveryLookup { lookup }
+  func recover(context: WorkoutContext) async -> RecoveryLookup { recoveryCalls += 1; return lookup }
 }
 @MainActor final class WorkoutLifecycleTests: XCTestCase {
   func operation(_ action: CaptureAction, id: String? = nil, token: String = "start") throws -> CaptureOperation {
@@ -178,6 +179,19 @@ import MatchCore
     _ = await g.perform(try operation(.finish)); f.driver.suspendedStart?.resume(returning: DriverState(outcome: .unknown)); f.driver.suspendedStart = nil
     for _ in 0..<10 { await Task.yield() }
     let result = await g.reconcile(start); XCTAssertNotEqual(result.outcome, .notCreated(.unavailable)); XCTAssertEqual(f.creations, 1)
+  }
+
+  func testActualSessionOrderCanReconcileBeforeAndAfterEndWhileAuthorizationStillHangs() async throws {
+    let f = FakeFactory(); f.holdAuthorization = true; let g = AppleWorkoutGateway(factory: f, timeout: .milliseconds(5))
+    let start = try operation(.start); let finish = try operation(.finish)
+    let initial = await g.perform(start); XCTAssertEqual(initial.outcome, .unknown)
+    let beforeEnd = await g.reconcile(start); XCTAssertEqual(beforeEnd.outcome, .unknown); XCTAssertEqual(f.recoveryCalls, 0)
+    _ = await g.perform(finish)
+    let proven = await g.reconcile(start); XCTAssertEqual(proven.outcome, .notCreated(.unavailable))
+    let cleanup = await g.reconcile(finish); XCTAssertEqual(cleanup.outcome, .unknown)
+    XCTAssertEqual(f.recoveryCalls, 0); XCTAssertEqual(f.creations, 0); XCTAssertNotNil(f.authorizationContinuation)
+    f.releaseAuthorization(); for _ in 0..<10 { await Task.yield() }
+    let late = await g.reconcile(start); XCTAssertEqual(late.outcome, .notCreated(.unavailable)); XCTAssertEqual(f.creations, 0)
   }
 
 }
