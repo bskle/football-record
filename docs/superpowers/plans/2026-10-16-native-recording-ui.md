@@ -9,9 +9,11 @@
 - [x] 实现实际共享 MatchPresentation 包，直接调用已冻结 MatchSession，健康值独立可选内存通道。
 - [x] 唯一工程作者装配 iPhone 四标签、Watch 两页四快记、首发/替补、持续撤销与控制/结束确认。正式许可 unavailable，Debug 演练用真实独立数据库及持续“开发模拟锁”。
 - [x] 显式注册所有源/产品；新增两端 XCUI target 与共享 scheme Testables；保持 iOS17/watch10、无 HealthKit entitlement。
-- [x] 保留 Core/Store/Session 131 测试、4 SDK 与双 App 验证，加入 Presentation 宿主测试及双 SDK。
-- [ ] 实际模拟器 XCTest 启动/点击/滑页/截图，验证按钮 >=44pt、四快记、guard/undo、首发取消、暂停/bench、失败、结束取消与待同步。检查 iPhone 深浅色/窄屏/大字体和 Watch 缺失状态。
-- [ ] 保存输入 hash、设备/runtime/命令、日志、xcresult 附件与截图至工作树外，记录实际事实与最低系统/真机未验。
+- [x] 保留Core/Store/Session回归、4 SDK与双App验证，加入Presentation宿主测试及双SDK；011同步后实际144+14=158项。
+- [x] 实际模拟器 XCTest 启动/点击/滑页/截图，验证按钮 >=44pt、四快记、guard/undo、首发取消、暂停/bench、失败、结束取消与待同步。检查 iPhone 深浅色/窄屏/大字体和 Watch 缺失状态。
+- [x] 保存输入 hash、设备/runtime/命令、日志、xcresult 附件与截图至工作树外，记录实际事实与最低系统/真机未验。
 - [ ] 独立源提交、双审修复与验证记录提交后交主代理合并；作者不得推进长期分支或清理工作树。
 
 提交组：`docs: plan native recording interface`、`feat: present committed match sessions`、`feat: add native match recording screens`、`test: exercise native recording on simulators`、`docs: record native interface validation`。以实际逻辑边界拆分。
+
+最终源码冻结为普通同步提交 `117c4c42744a96fd5fa695671accee7a843d08df`，已接收验证dev `f26d60de81fb5afa90e2f16044a09675d71ee834`；158宿主、六SDK、双App与两端各七XCUI全过。主代理确认源码根审/规格增量审PASS；最终文档审阅和集成由主代理完成，末项不预写合并成功。

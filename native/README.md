@@ -25,7 +25,7 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHON
 
 两端 scheme 均含 XCUI target。UI 脚本实际 launch/tap/swipe、核对按钮 frame/已保存显示变化并导出 xcresult 截图与可访问性树。`ONLY_ACTIVE_ARCH=YES` 限定实际测试设备架构。测试启动参数仅在 Debug 生效，dataset、失败注入和固定测试 clock 不进入生产入口。纯宿主或 SDK 构建不替代实际 UI 启动，更不证明 HealthKit、GPS、后台或触觉手感。
 
-基础已集成事实及证据见 [NATIVE-006](../docs/native/validation/NATIVE-006.md)、[NATIVE-007](../docs/native/validation/NATIVE-007.md)；本任务实际源码 SHA、测试数、runtime、截图、最低系统和真机限制见 [NATIVE-009](../docs/native/validation/NATIVE-009.md)。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试仅是当时证据，不是当前测试数或原生 UI 验收。
+基础已集成事实及证据见 [NATIVE-006](../docs/native/validation/NATIVE-006.md)、[NATIVE-007](../docs/native/validation/NATIVE-007.md) 与 [NATIVE-011](../docs/native/validation/NATIVE-011.md)。009最终组合源码 `117c4c42744a96fd5fa695671accee7a843d08df` 已通过158项宿主测试、六项最低部署SDK编译、双App构建及Watch/iPhone各七项实际XCUI；准确输入、runtime、截图及最低系统/真机限制见 [NATIVE-009](../docs/native/validation/NATIVE-009.md)。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试仅是当时证据，不是当前测试数或原生 UI 验收。
 
 ## 事实、事务和展示边界
 
@@ -33,7 +33,7 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHON
 
 `LiveMatchRecorder` 只 staging。`MatchSession` 串行编排请求，`MatchStore` 用系统 SQLite WAL / synchronous=FULL 事务保存事实、采集操作、首次 receipt 与 outbox。UI 只接受已提交 snapshot/receipt，成功触觉只由首次确认 receipt 触发；失败不采纳 staging，不用旧点击快照覆盖已到达的更新。响应不明保留原完整 request 原样重试；只有明确 stale 且持久 command 查无提交，才刷新后分配新 command。
 
-006 已实现 additive v1→v2 迁移和采集元数据落盘，保留 v1 canonical 请求、包和 receipt 兼容。`CaptureRevision` 保留同场/同设备下真实 Workout 关联和已知或未知窗口、缺口；未得到实际 Workout UUID 不造 segment。持久 `CaptureOperation` 在事务外执行/对账，未知保留 `needsReconciliation`，保存待解锁保留 `savedAwaitingLink`，不盲建第二个 Workout。正常结束不制造 `completed`；完整保存凭据同时绑定当前业务事实与完整采集 digest。
+006 已实现 additive v1→v2 迁移和采集元数据落盘，保留 v1 canonical 请求、包和 receipt 兼容。`CaptureRevision` 保留同场/同设备下真实 Workout 关联和已知或未知窗口、缺口；未得到实际 Workout UUID 不造 segment。持久 `CaptureOperation` 在事务外执行/对账，未知保留 `needsReconciliation`，保存待解锁保留 `savedAwaitingLink`，不盲建第二个 Workout。011增加严格的未创建证明：同token原start持久notCreated、无正向观测/真实窗口或片段并通过完整历史校验时，才允许取消未决finish；迟到矛盾原始观测保留并阻断该证明。一般unknown仍继续对账。正常结束不制造 `completed`；完整保存凭据同时绑定当前业务事实与完整采集 digest。
 
 没有可信 peer 时业务变更保留 `unrouted` outbox，不制造手机目标或把传输成功当持久 ACK。旧包/ACK API保留完整性校验；实际同账号认证、配对、传输和可信 ACK 来源仍待 M3。checksum 仅校验完整性。生产许可、账号、后台唯一锁与云仍待 M4。
 
