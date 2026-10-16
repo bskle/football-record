@@ -2,9 +2,9 @@
 
 当前检查日期：2026-10-16（上海；原检查为 2026-10-14）。历史证据日期不改写。bootstrap 见 [NATIVE-000](native/tasks/NATIVE-000.md)，首次同步见 [GIT-001](native/tasks/GIT-001.md)，M1 快照见 [GIT-002](native/tasks/GIT-002.md)，当前治理见 [GIT-003](native/tasks/GIT-003.md)。
 
-结论：M1 本地基础与 M2 的采集事务（006）、共享会话（007）、未创建采集收尾修复（011）、双端记录 UI（009）已双审集成。登记时核对 `dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`，该已验证产品组合的实际 merge 复验为 44 Core + 64 Store + 36 Session + 14 Presentation = 158 项宿主测试、6 项 SDK 产品编译、2 个 App 无签名构建及每端 1 项 XCUI 通过。App 已接入 Core / Store / Session / Presentation 的记录页面，009 使用 `UnavailableWorkoutGateway`；浏览器原型保留。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试及四项构建仍是当时证据，见 [工程](native/validation/NATIVE-001.md)、[事件引擎](native/validation/NATIVE-002.md)、[仓储](native/validation/NATIVE-003.md)、[采集合同](native/validation/NATIVE-004.md)。
+结论：M1本地基础与M2的006/007/011/009/012均已双审集成。本次登记`dev=origin/dev=505449279d6461436a051b5e6bc43324d805e3e0`，实际merge通过166项宿主测试（44 Core + 64 Store + 36 Session + 22 Presentation）、6项最低SDK产品和2个无签名App，含012恢复只读/原请求重试修复。009既有双端完整7项XCUI与视觉证据保留，主线仍用`UnavailableWorkoutGateway`。历史M1组合`f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`的70项测试及四项构建是当时证据，见[工程](native/validation/NATIVE-001.md)、[事件引擎](native/validation/NATIVE-002.md)、[仓储](native/validation/NATIVE-003.md)、[采集合同](native/validation/NATIVE-004.md)。
 
-008 真实适配已编译、最终双审通过并保留任务分支；010 正在独立临时树准备真实 gateway / 能力配置 / 操作指引。用户暂不能连接真机，相关签名、安装、HealthKit、GPS、后台、锁屏和恢复均未验收，008 / 010 尚未入 `dev`。执行顺序与设备门槛见 [M2 子计划](superpowers/plans/2026-10-16-native-m2.md)。2026-10-15 实查 Xcode 27.0（27A266a）/ Swift 6.4 可用；正式名称为球历 / `football-record`。
+008最终`6e86e8f1ac647b02b8f1ef407226a10398c5d998`已编译双审；010最终`cdbafb7822ca2371a3d1eaa6da8b95e54da78f2f`（source `834cac5`）本机可完成部分已双审，105 input / 157 evidence已核。212是旧Core/Workout184 + 当前Presentation22/Integration6分层累计，不是一次全212；两sim/两device SDK无签名App与两端各3项UI通过。签名、安装、HealthKit、GPS、后台、锁屏和恢复仍待真机，008/010未入dev。用户明确“先跳过需要我协助部分，往下推，后续再做相关测试”；按[M3子计划](superpowers/plans/2026-10-16-native-m3.md)推进无设备工作，013仍为规划，014—018尚未创建，016/018真机门槛延期保留。当前规划快照见[NATIVE-013](native/tasks/NATIVE-013.md)。Xcode27.0 / Swift6.4可用；最低iOS17/watch10不升级。
 
 ## 开发依据
 
@@ -35,12 +35,12 @@
 
 | 项目 | 检查结果 | 处理阶段 |
 |---|---|---|
-| 原生工程 | 006 / 007 / 011 / 009 已双审合入当前 `dev`；158 项宿主测试、6 项 SDK 产品、2 个 App 及两端各 1 项 XCUI 实际合并复验通过，已有原生记录入口 | 009 尚用 unavailable 采集 gateway；008 / 010 真机采集门槛保留，M3 接实际设备传输 |
+| 原生工程 | 006/007/011/009/012已双审集成，当前实际merge166宿主/6SDK/2App通过 | 主线unavailable采集gateway；014/015纯同步、017状态UI先行，真实采集/传输留设备包 |
 | Xcode / 运行环境 | Xcode 27.0（27A266a）/ Swift 6.4；上述产品组合自动验证与 iOS 27 / watchOS 27 模拟器复验通过；最低 iOS 17 / watchOS 10 已编译 | 未实际运行最低系统；无签名 SDK 构建不替代真机能力验收。历史 Desktop FinderInfo / codesign 失败及隔离重跑保留于 GIT-002 |
-| 签名与 CloudKit | 仅配置 `com.example.footballrecord` / `.watchapp` 本地 Bundle ID 占位，未注册；本人 Team / profile / 实际能力签名与 CloudKit 容器均未验收 | 010 正在独立树准备最小 HealthKit / 定位 / 后台配置及具体指引，不能据此宣称签名或安装通过；CloudKit 留 M4 |
+| 签名与 CloudKit | 仅配置本地 Bundle ID 占位，未注册；本人Team/profile/能力签名与CloudKit容器未验收 | 010可审配置/指引本机部分完成；安装/授权待本人，CloudKit留M4 |
 | 唯一比赛锁后台 | 原方案定义了职责，尚无接口实现及运行环境 | 确定工程接口与供应商，开始比赛链路联调前部署 |
-| 真机行为 | 用户暂不能连接真机；真实心率、GPS、后台 / 锁屏、崩溃恢复和跨设备可靠同步尚未验证 | 006 / 007 / 011 / 009 已完成适用自动 / 模拟器验证；008 已编译双审留分支，010 最终包尚在准备，相关配对 iPhone / Watch 实测通过后才入 dev |
-| Git 与远端 | 三条长期分支与原型 tag 已同步；登记时远端 `dev` 已核对为 M2 记录 UI 实际合并 `2e1f9c42f4398a50b66765a0f37f90ced95a7554`，`main` / `release` 仍为原型基线，默认分支为 `main`；`PUBLIC` / `ADMIN` 已核对 | 继续按任务双审及实际合并验证推进；旧 private 意向已被覆盖。代码同步不等于原生分发，PR、CI 与服务端保护规则尚未配置 |
+| 真机行为 | 本人设备协助延期；真实采集/后台/锁屏/恢复及配对同步未验 | 008/010保留待真机；016/018同样不提前入dev。WC transferFile不支持Simulator，fake/SDK/两sim UI不替代真通信 |
+| Git 与远端 | 三永久分支；dev同步505449279d6461436a051b5e6bc43324d805e3e0；main/release原型基线，无原生候选；PUBLIC/ADMIN已核 | 已授权同步，PR/CI/server保护未配置；双审及实际merge复验继续，代码同步不等于发布 |
 
 供应商和后续模块拆分由开发者按方案决定；[NATIVE-001 子计划](superpowers/plans/2026-10-15-native-foundation.md) 已固定单个共享 SwiftPM 包的工程边界，NATIVE-003 已实现系统 SQLite 事务库并完成故障与重开测试。系统杀进程、物理断电和真机存储压力尚未实测。正式名称已确定为球历 / `football-record`；图标、未来付费边界、热图和 PC 路线不再次阻止开工。
 
@@ -60,14 +60,16 @@
 - [WatchConnectivity 官方真机示例](https://developer.apple.com/documentation/watchconnectivity/transferring-data-with-watch-connectivity)
 - [CloudKit 配置](https://developer.apple.com/documentation/cloudkit/enabling-cloudkit-in-your-app)
 
-## M2 当前执行边界（GIT-003）
+## M2 历史证据与当前 M3 执行边界
 
-[会话采集合约](native/contracts/m2-session-capture.md) 固定先保存后反馈、采集持久操作对账、v1→v2兼容和单机未路由outbox；不能以随机peer绕过M1包约束。006 / 007 已合并验证，008 / 009 按冻结接口并行完成适用交付；011 的严格未创建证明修复已集成。009 现已合并并把 Apps / 工程所有权串行交给 010，010 仍在独立树准备设备包。
+当前事实以上文/NATIVE-013为准；009截图等保留为历史组合证据。[M3合同](native/contracts/m3-durable-sync.md)固定不可变完整快照、原outbox/receipt保留、持久ACK与同Session接收桥。M4前生产permit/trusted peer unavailable，Debug两隔离DB及稳定身份fixture持续标“开发模拟锁 / 开发配对”，只证明协议。peer ACK不等于云已同步/后台终结，不制造completed或释放锁。005/006/007/011/012/GIT-003已归档安全删分支；002/003/004/GIT-002/009共五旧树queued且实际active，保留不盲重试；008/010有设备依赖保留。
+
+[会话采集合约](native/contracts/m2-session-capture.md)固定先保存后反馈、采集持久对账、v1→v2兼容和单机未路由outbox，012补齐恢复fail-closed与原请求重试。010本机整包已双审，真实设备项延期保留；未来017/018串行接手Apps/工程所有权。
 
 | 证据层级 | 当前状态 | 通过门槛 |
 |---|---|---|
-| 已编译 | 已验证产品组合：158 宿主测试、6 SDK、2 App；008：40 模块 + 144 核心宿主测试及两端模拟器 / 设备 SDK 编译，最终双审通过 | 008 证据仅 fake driver + 真实 SQLite 跨层，无实际 HealthKit；010 最终整包仍在准备 |
-| 已模拟器 | 009：390pt iOS 27 与 45mm watchOS 27 各完整 7 项 XCUI，另有 375pt 深色最大字体定点视觉；实际 merge 每端 1 项 XCUI 复验 | 记录于 [009 验证](native/validation/NATIVE-009.md)；最低系统 runtime、真人 VoiceOver 朗读及触觉手感未验 |
+| 已编译 | 当前dev实际merge166宿主/6SDK/2App；008/010分层自动证据如上，010两sim/两device SDK App通过 | fake driver / SQLite不证明实际HealthKit；分层累计不当单次总数 |
+| 已模拟器 | 009历史双端各7项XCUI与视觉见[009验证](native/validation/NATIVE-009.md)；010当前两端各3UI通过 | 最低runtime、真人VoiceOver及触觉未验；Simulator不支持WC transferFile真实通信 |
 | 待真机 | 用户暂不能连机，真实授权/后台/采集/恢复均未验 | 010逐场景设备/OS/SHA/时间/结果；此前008/010设备实现不入dev |
 
 生产开赛 provider 在 M4 前 unavailable；Debug 使用独立 DB / 专用入口并持续标注“开发模拟锁”，不能算真实锁或完整 E2E。本地普通结束保持 `endedPendingSync`，不释放后台锁、不制造 `completed`。iPhone17使用手动HKWorkoutBuilder+CoreLocation，Watch10使用live session；权限拒绝不撤销已存比赛，无样本不填0。完整赛后编辑/生涯/路线分析仍留M5，本轮不改产品范围。
