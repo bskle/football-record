@@ -293,4 +293,28 @@ final class CaptureReconciliationTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(calls.map(\.action), [.start, .pause])
   }
 
+  func testEndCommittedDuringFailedDriverProjectionStillWakesReconciliation() async throws {
+    let h = try Harness()
+    await h.gateway.configure(suspend: true)
+    await h.repo.failNextObservation("before")
+    await h.repo.holdProjectionAfterObservationFailure()
+    let r = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(r)
+    await h.gateway.waitForPerform(1)
+    await h.gateway.release()
+    await h.repo.waitForHeldTail()
+    h.clock.advance(10)
+    let ended = try await h.session.execute(h.session.prepare(.end, matchID: r.matchID))
+    XCTAssertEqual(ended.snapshot.replay.state, .endedPendingSync)
+    await h.repo.releaseTail()
+    try await eventually("end committed during failed driver's projection must wake reconciliation")
+    { await h.gateway.reconciled.count >= 1 }
+    try await eventually("original token must finish after reconciliation") {
+      await h.gateway.performed.count >= 2
+    }
+    let calls = await h.gateway.performed
+    XCTAssertEqual(calls.map(\.action), [.start, .finish])
+    XCTAssertEqual(Set(calls.map(\.externalToken)).count, 1)
+  }
+
 }

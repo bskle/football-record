@@ -10,7 +10,12 @@ extension MatchSession {
     Task { await self.driveCapture(match) }
   }
   func driveCapture(_ match: String) async {
-    defer { captureDrivers.remove(match) }
+    defer {
+      captureDrivers.remove(match)
+      // Error reporting also awaits a snapshot. Hand off work committed during that
+      // await before retiring, exactly as the normal empty-scan path does.
+      if captureWakeups.remove(match) != nil { scheduleCapture(match) }
+    }
     var attempted = Set<String>()
     var attemptedFinishes = Set<String>()
     do {

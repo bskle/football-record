@@ -27,6 +27,7 @@ struct Identity: DeviceIdentityProvider {
 }
 actor TestRepository: SessionRepository {
   let store: MatchStore
+  var holdFaultProjection = false
   var holdTail = false
   var snapshotsAfterObservation: Int?
   var tailRead = false
@@ -91,6 +92,11 @@ actor TestRepository: SessionRepository {
     let fault = isObservation ? observationFault : nil
     if isObservation { observationFault = nil }
     if fault == "before" {
+      if holdFaultProjection {
+        holdFaultProjection = false
+        holdTail = true
+        snapshotsAfterObservation = 1
+      }
       observations += 1
       observationWaiters.forEach { $0.resume() }
       observationWaiters = []
@@ -116,6 +122,10 @@ actor TestRepository: SessionRepository {
   }
   func pendingCaptureOperations(matchID: String) async throws -> [CaptureOperationRecord] {
     try await store.pendingCaptureOperations(matchID: matchID)
+  }
+  func holdProjectionAfterObservationFailure() {
+    holdFaultProjection = true
+    tailRead = false
   }
   func failNextObservation(_ mode: String) {
     observationFault = mode
