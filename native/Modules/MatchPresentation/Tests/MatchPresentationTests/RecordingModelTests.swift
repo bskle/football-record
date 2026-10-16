@@ -7,10 +7,15 @@ import MatchStore
 actor FaultRepository: SessionRepository {
   let underlying: SQLiteSessionRepository
   var nextFault: String?
+  var failRead = false
   init(_ r: SQLiteSessionRepository) { underlying = r }
   func fault(_ name: String) { nextFault = name }
+  func failNextRead() { failRead = true }
   func databaseNamespace() async -> String { await underlying.databaseNamespace() }
-  func matchIDs() async throws -> [String] { try await underlying.matchIDs() }
+  func matchIDs() async throws -> [String] {
+    if failRead { failRead = false; throw StoreError.injectedFailure }
+    return try await underlying.matchIDs()
+  }
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 { try await underlying.snapshotV2(matchID: matchID) }
   func committedCommandV2(commandID: String) async throws -> CommittedCommandV2? { try await underlying.committedCommandV2(commandID: commandID) }
   func pendingCaptureOperations(matchID: String) async throws -> [CaptureOperationRecord] { try await underlying.pendingCaptureOperations(matchID: matchID) }
@@ -142,7 +147,7 @@ extension RecordingModelTests {
     let f = try Fixture(); let started = try await f.start()
     let other = MatchSession(store: f.repository, deviceIdentity: OtherIdentity(), clock: f.clock, ids: UUIDSessionIDFactory(), permits: DevelopmentStartPermitProvider(), workout: UnavailableWorkoutGateway(), environment: .development(databaseNamespace: "presentation-test"))
     let m = RecordingModel(session: other, repository: f.repository, development: true)
-    await m.load(); XCTAssertTrue(m.readOnly); XCTAssertFalse(m.canRecord)
+    await m.load(); await m.load(); XCTAssertTrue(m.readOnly); XCTAssertFalse(m.canRecord)
     XCTAssertEqual(m.snapshot?.replay.matchID, started.replay.matchID)
     await m.perform(.quick(.myGoal)); XCTAssertEqual(m.snapshot?.replay.score.forTeam, 0)
     XCTAssertTrue(m.issue?.contains("另一台设备") == true)

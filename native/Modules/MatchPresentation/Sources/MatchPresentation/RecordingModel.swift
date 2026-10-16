@@ -39,6 +39,7 @@ extension MatchSession: SessionCommanding {}
     guard !busy else { return }; busy = true; defer { busy = false }
     do {
       try await refreshHistory()
+      var recoveredIssue: String? = readOnly ? nil : issue
       switch try await session.recover() {
       case .none:
         // An ended match with an unreleased lock still owns this installation's record screen.
@@ -47,9 +48,17 @@ extension MatchSession: SessionCommanding {}
       case .intentAwaitingPermit(let intent):
         let value = try await session.snapshot(matchID: intent.matchID)
         accept(value)
-        pendingRequest = try .start(intent: intent, starter: value.store.business.descriptor.starter)
-        issue = "开赛服务尚未就绪，开赛请求已保留。"
+        if pendingRequest == nil {
+          pendingRequest = try .start(intent: intent, starter: value.store.business.descriptor.starter)
+        }
+        recoveredIssue = "开赛服务尚未就绪，开赛请求已保留。"
       }
+      if pendingRequest != nil, recoveredIssue == nil {
+        recoveredIssue = Self.message(StoreError.responseLost)
+      }
+      // Only a complete successful recovery may clear a previous recovery failure.
+      readOnly = false
+      issue = recoveredIssue
     } catch {
       issue = Self.message(error)
       readOnly = true
