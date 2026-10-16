@@ -317,4 +317,119 @@ final class CaptureReconciliationTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(Set(calls.map(\.externalToken)).count, 1)
   }
 
+  func testLinkedRecoveryFailureAtomicallyKeepsRealWorkoutGapAndReplacementToken() async throws {
+    let h = try Harness()
+    let original = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(original)
+    try await h.waitCaptureSettled(original.matchID)
+    let gateway = FakeGateway()
+    await gateway.script(.recover, [.linked(workoutID: "real-old-workout")])
+    await gateway.configure(failure: .recoveryUnavailable)
+    let recovered = MatchSession(
+      store: h.repo, deviceIdentity: Identity(value: "watch"), clock: h.clock, ids: h.ids,
+      permits: DevelopmentStartPermitProvider(), workout: gateway,
+      environment: .development(databaseNamespace: "test-development"))
+    _ = try await recovered.recover()
+    try await eventually(
+      "linked recovery failure must persist old association and replacement intent"
+    ) {
+      let s = try await h.repo.snapshotV2(matchID: original.matchID)
+      return s.captureOperations.filter { $0.operation.action == .start }.count == 2
+    }
+    let s = try await h.repo.snapshotV2(matchID: original.matchID)
+    XCTAssertEqual(
+      s.captureRevisions.last?.metadata.segments.map(\.workoutID), ["real-old-workout"])
+    XCTAssertEqual(s.captureRevisions.last?.metadata.gaps.count, 1)
+    let starts = s.captureOperations.filter { $0.operation.action == .start }
+    XCTAssertEqual(Set(starts.map { $0.operation.externalToken }).count, 2)
+    XCTAssertTrue(
+      starts.allSatisfy {
+        $0.operation.binding.matchID == original.matchID
+          && $0.operation.binding.recordingDeviceID == "watch"
+      })
+  }
+  func testPausedRecoveryFailureDefersNewWorkoutUntilBusinessResume() async throws {
+    let h = try Harness()
+    let original = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(original)
+    try await h.waitCaptureSettled(original.matchID)
+    h.clock.advance(10)
+    _ = try await h.session.execute(h.session.prepare(.pause, matchID: original.matchID))
+    try await h.waitCaptureSettled(original.matchID)
+    let gateway = FakeGateway()
+    await gateway.script(.recover, [.stopped])
+    await gateway.configure(failure: .recoveryUnavailable)
+    let recovered = MatchSession(
+      store: h.repo, deviceIdentity: Identity(value: "watch"), clock: h.clock, ids: h.ids,
+      permits: DevelopmentStartPermitProvider(), workout: gateway,
+      environment: .development(databaseNamespace: "test-development"))
+    _ = try await recovered.recover()
+    try await eventually("confirmed failure must leave a durable replacement intent") {
+      let s = try await h.repo.snapshotV2(matchID: original.matchID)
+      return s.captureOperations.filter { $0.operation.action == .start }.count == 2
+    }
+    try await Task.sleep(for: .milliseconds(30))
+    let calls = await gateway.performed
+    XCTAssertFalse(calls.contains { $0.action == .start })
+    let paused = try await recovered.snapshot(matchID: original.matchID)
+    XCTAssertEqual(paused.replay.state, .paused)
+    XCTAssertEqual(paused.store.captureOperations.last?.state, .pending)
+    h.clock.advance(20)
+    let resume = try await recovered.prepare(.resume, matchID: original.matchID)
+    XCTAssertNil(resume.captureOperationID)
+    let running = try await recovered.execute(resume)
+    XCTAssertEqual(running.snapshot.replay.state, .running)
+    try await eventually("business resume must dispatch only the new start") {
+      await gateway.performed.contains { $0.action == .start }
+    }
+    let after = await gateway.performed
+    XCTAssertEqual(after.map(\.action), [.recover, .start])
+    XCTAssertNotEqual(after.last?.externalToken, original.captureOperationID)
+  }
+
+  func testPauseResumeBeforeFirstWorkoutDispatchDoesNotReplayOldCaptureControls() async throws {
+    let h = try Harness()
+    await h.repo.loseNextStartResponse()
+    let r = try await h.session.prepareStart(starter: true)
+    do { _ = try await h.session.execute(r) } catch {}
+    h.clock.advance(1)
+    let pause = try await h.session.prepare(.pause, matchID: r.matchID)
+    XCTAssertNil(pause.captureOperationID)
+    _ = try await h.session.execute(pause)
+    let before = await h.gateway.performed
+    XCTAssertTrue(before.isEmpty)
+    h.clock.advance(1)
+    let resume = try await h.session.prepare(.resume, matchID: r.matchID)
+    XCTAssertNil(resume.captureOperationID)
+    _ = try await h.session.execute(resume)
+    try await h.waitCaptureSettled(r.matchID)
+    let calls = await h.gateway.performed
+    XCTAssertEqual(calls.map(\.action), [.start])
+    let value = try await h.session.snapshot(matchID: r.matchID)
+    XCTAssertEqual(value.replay.state, .running)
+    XCTAssertEqual(value.capturePhase, .recording)
+  }
+  func testLateStartIgnoresSupersededPendingPauseAndRedundantResume() async throws {
+    let h = try Harness()
+    await h.gateway.configure(suspend: true)
+    let r = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(r)
+    await h.gateway.waitForPerform(1)
+    h.clock.advance(1)
+    _ = try await h.session.execute(h.session.prepare(.pause, matchID: r.matchID))
+    h.clock.advance(1)
+    _ = try await h.session.execute(h.session.prepare(.resume, matchID: r.matchID))
+    await h.gateway.release()
+    try await h.waitCaptureSettled(r.matchID)
+    let calls = await h.gateway.performed
+    XCTAssertEqual(calls.map(\.action), [.start])
+    let value = try await h.session.snapshot(matchID: r.matchID)
+    XCTAssertEqual(value.replay.state, .running)
+    XCTAssertEqual(value.capturePhase, .recording)
+    XCTAssertTrue(
+      value.store.captureOperations.filter {
+        $0.operation.action == .pause || $0.operation.action == .resume
+      }.allSatisfy { $0.state == .cancelled })
+  }
+
 }

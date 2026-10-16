@@ -94,7 +94,15 @@ public actor MatchSession {
   func terminal(_ s: StoreSnapshotV2) -> Bool {
     s.business.events.contains { $0.type == .matchEnded || $0.type == .matchTerminated }
   }
-  func captureAction(_ action: SessionAction) -> CaptureAction? {
+  func captureAction(_ action: SessionAction, snapshot: StoreSnapshotV2) -> CaptureAction? {
+    // No physical instance exists while its start is still pending. Its first dispatch
+    // follows the latest business pause/resume state instead of replaying old controls.
+    if currentStart(snapshot)?.state == .pending {
+      switch action {
+      case .pause, .resume: return nil
+      default: break
+      }
+    }
     switch action {
     case .start: return .start
     case .pause: return .pause
@@ -130,7 +138,7 @@ public actor MatchSession {
       commandID: command, matchID: matchID, requestedAt: clock.now(),
       expectedGeneration: s.business.generation,
       action: action, eventIDs: [command + "/event"],
-      captureOperationID: captureAction(action) != nil && currentStart(s) != nil
+      captureOperationID: captureAction(action, snapshot: s) != nil && currentStart(s) != nil
         ? command + "/capture" : nil)
   }
   public func execute(_ request: SessionRequest) async throws -> SessionReceipt {
@@ -197,7 +205,7 @@ public actor MatchSession {
     case .start: throw SessionError.invalidRequest
     }
     var operations: [CaptureOperation] = []
-    if let action = captureAction(request.action), let start = currentStart(s) {
+    if let action = captureAction(request.action, snapshot: s), let start = currentStart(s) {
       guard let id = request.captureOperationID else { throw SessionError.invalidRequest }
       operations = [
         try CaptureOperation(

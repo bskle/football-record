@@ -20,7 +20,11 @@ extension MatchSession {
     var attemptedFinishes = Set<String>()
     do {
       while true {
-        captureWakeups.remove(match)
+        if captureWakeups.remove(match) != nil {
+          // A deferred pending start must be reconsidered after a new resume fact.
+          attempted.removeAll()
+          attemptedFinishes.removeAll()
+        }
         let snapshot = try await store.snapshotV2(matchID: match)
         let pending = snapshot.captureOperations.first {
           ($0.state == .pending || $0.state == .needsReconciliation)
@@ -51,7 +55,11 @@ extension MatchSession {
         } else {
           // New business work may have committed during the asynchronous empty scan.
           // Consume that wakeup before retiring the only driver for this match.
-          if captureWakeups.remove(match) != nil { continue }
+          if captureWakeups.remove(match) != nil {
+            attempted.removeAll()
+            attemptedFinishes.removeAll()
+            continue
+          }
           break
         }
       }
@@ -83,8 +91,22 @@ extension MatchSession {
       } else {
         neverCreated = start?.state == .cancelled
       }
+      let business = try s.business.replay(now: clock.now()).state
+      let controls = operation.action == .pause || operation.action == .resume
+      let tokenRecords = s.captureOperations.filter {
+        $0.operation.externalToken == operation.externalToken
+      }
+      let lifecycle = tokenRecords.compactMap(\.observation).last?.outcome
+      let obsolete =
+        (operation.action == .pause && business != .paused)
+        || (operation.action == .resume && business != .running)
+      let redundant =
+        controls && !tokenRecords.contains(where: { $0.state == .needsReconciliation })
+        && ((operation.action == .pause && lifecycle == .paused)
+          || (operation.action == .resume && lifecycle == .running))
       if (terminal(s) && operation.action != .finish)
         || (operation.action == .finish && neverCreated)
+        || (controls && (neverCreated || start?.state == .pending || obsolete || redundant))
       {
         let update = try CaptureOperationUpdate(
           operationID: operation.id, expectedState: .pending, state: .cancelled, observation: nil)
@@ -93,6 +115,10 @@ extension MatchSession {
           descriptor: s.business.descriptor, updates: [update])
         _ = try await store.commitV2(commit)
         publish(try await snapshot(matchID: match))
+        return nil
+      }
+      if operation.action == .start, business == .paused {
+        // A replacement/first Workout stays unstarted until a real resume fact commits.
         return nil
       }
       let marker = try CaptureOperationUpdate(
@@ -195,49 +221,50 @@ extension MatchSession {
     let update = try CaptureOperationUpdate(
       operationID: operation.id, expectedState: .needsReconciliation, state: state,
       observation: normalized)
-    var revisions: [CaptureRevision] = []
-    var successors: [CaptureOperation] = []
-    if case .linked(let workoutID) = normalized.outcome {
-      let head = s.captureRevisions.max { $0.revision < $1.revision }
-      var segments = head?.metadata.segments ?? []
-      if !segments.contains(where: { $0.workoutID == workoutID }) {
-        let segment = try CaptureSegment(
-          id: operation.externalToken + "/segment", binding: operation.binding,
-          workoutID: workoutID, window: normalized.window)
-        segments.append(segment)
-        revisions = [
-          try CaptureRevision(
-            id: command + "/revision", binding: operation.binding, parentID: head?.id,
-            revision: (head?.revision ?? 0) + 1,
-            observedAt: normalized.observedAt,
-            metadata: CaptureMetadata(
-              binding: operation.binding, segments: segments, gaps: head?.metadata.gaps ?? []))
-        ]
-      }
-    }
-    if !terminal(s), operation.action == .recover, normalized.failure == .recoveryUnavailable,
-      normalized.outcome == .stopped
+    let head = s.captureRevisions.max { $0.revision < $1.revision }
+    var segments = head?.metadata.segments ?? []
+    var gaps = head?.metadata.gaps ?? []
+    var changed = false
+    if case .linked(let workoutID) = normalized.outcome,
+      !segments.contains(where: { $0.workoutID == workoutID })
     {
-      let restart = operation.id + "/restart"
-      let head = s.captureRevisions.max { $0.revision < $1.revision }
-      var gaps = head?.metadata.gaps ?? []
+      segments.append(
+        try CaptureSegment(
+          id: operation.externalToken + "/segment", binding: operation.binding,
+          workoutID: workoutID, window: normalized.window))
+      changed = true
+    }
+    let oldInstanceClosed: Bool
+    switch normalized.outcome {
+    case .linked: oldInstanceClosed = true
+    case .stopped: oldInstanceClosed = normalized.failure == .recoveryUnavailable
+    default: oldInstanceClosed = false
+    }
+    var successors: [CaptureOperation] = []
+    let restart = operation.id + "/restart"
+    if !terminal(s), operation.action == .recover, oldInstanceClosed {
+      // A returned UUID is retained while the same transaction records the genuine gap
+      // and replacement token. Paused business state defers that pending start's dispatch.
       gaps.append(
         try CaptureGap(
           id: restart + "/gap", binding: operation.binding,
           window: CaptureWindow(start: normalized.window.end, end: nil)))
-      revisions = [
-        try CaptureRevision(
-          id: restart + "/revision", binding: operation.binding, parentID: head?.id,
-          revision: (head?.revision ?? 0) + 1, observedAt: normalized.observedAt,
-          metadata: CaptureMetadata(
-            binding: operation.binding, segments: head?.metadata.segments ?? [], gaps: gaps))
-      ]
+      changed = true
       successors = [
         try CaptureOperation(
           id: restart + "/start", binding: operation.binding, associatedCommandID: command,
           action: .start, requestedAt: clock.now(), externalToken: restart + "/start")
       ]
     }
+    let revisions: [CaptureRevision] =
+      changed
+      ? [
+        try CaptureRevision(
+          id: successors.isEmpty ? command + "/revision" : restart + "/revision",
+          binding: operation.binding, parentID: head?.id, revision: (head?.revision ?? 0) + 1,
+          observedAt: normalized.observedAt,
+          metadata: CaptureMetadata(binding: operation.binding, segments: segments, gaps: gaps))
+      ] : []
     // The failure observation, gap and replacement intent share one COMMIT. A failed
     // response cannot strand a terminal recover record without its durable successor.
     let commit = try makeCommit(
