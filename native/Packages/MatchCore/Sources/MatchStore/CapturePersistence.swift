@@ -9,6 +9,10 @@ extension MatchStore {
             return try db.transaction {
                 guard let row = try db.rows("SELECT request,request_hash,receipt,match_id FROM commands_v2 WHERE command_id=?", [.text(commandID)]).first else { return nil }
                 diagnosticMatchID = row[3].string ?? commandID
+                if let parsed = try? JSONDecoder().decode(StoreCommitV2.self, from: row[0].data ?? Data()),
+                   !parsed.descriptor.matchID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    diagnosticMatchID = parsed.descriptor.matchID
+                }
                 return try verifiedCommandV2(commandID: commandID, row: row)
             }
         } catch {
@@ -77,11 +81,13 @@ extension MatchStore {
     public func pendingBusinessOutbox(matchID: String) throws -> [BusinessOutboxItem] {
         try preservingDiagnostics(matchID: matchID) {
             try db.transaction {
-                try db.rows("SELECT id FROM business_outbox WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
+                let items = try db.rows("SELECT id FROM business_outbox WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
                     let item = try loadBusinessOutbox(id: $0[0].string ?? "invalid-id")
                     guard item.matchID == matchID else { throw corruptCapture("business_outbox", key: item.id, raw: try Canonical.data(item)) }
                     return item
                 }
+                try verifyCaptureRegistrySet(kind: "outbox", matchID: matchID, ids: items.map(\.id), table: "business_outbox")
+                return items
             }
         }
     }
@@ -99,7 +105,7 @@ extension MatchStore {
                       MatchReplay.replay(descriptor: snapshot.descriptor, events: snapshot.events, now: now, completionEvidence: evidence).state == .completed else {
                     throw StoreError.staleCompletionEvidence
                 }
-                try rememberCompletionConfirmation(evidence: evidence, digest: captureDigest, hasCapture: !revisions.isEmpty)
+                try rememberCaptureCompletionConfirmation(evidence: evidence, digest: captureDigest, hasCapture: !revisions.isEmpty)
                 try db.execute("INSERT INTO completion_v2 VALUES (?,?,?) ON CONFLICT(match_id) DO UPDATE SET evidence=excluded.evidence,capture_digest=excluded.capture_digest",
                     [.text(evidence.matchID), .blob(try Canonical.data(evidence)), .text(captureDigest)])
                 try fail(.beforeCommit)
@@ -114,33 +120,34 @@ extension MatchStore {
             let evidence = try decode(TrustedCompletionEvidence.self, row[0], table: "completion_v2", key: descriptor.matchID)
             guard evidence.matchID == descriptor.matchID else { throw corruptCapture("completion_v2", key: descriptor.matchID, raw: row[0].data ?? Data()) }
             let digest = row[1].string ?? ""
-            let confirmation = try loadCompletionConfirmation(matchID: descriptor.matchID, confirmationID: evidence.confirmationID)
+            let confirmation = try loadCaptureCompletionConfirmation(matchID: descriptor.matchID, confirmationID: evidence.confirmationID)
             guard confirmation.evidence == evidence, confirmation.captureDigest == digest else {
                 throw corruptCapture("completion_v2", key: descriptor.matchID, raw: row[0].data ?? Data())
             }
             return digest == (try CaptureRevision.digest(revisions)) ? evidence : nil
         }
-        return revisions.isEmpty ? legacy : nil
+        guard revisions.isEmpty, let legacy else { return nil }
+        let confirmation = try loadCaptureCompletionConfirmation(matchID: descriptor.matchID, confirmationID: legacy.confirmationID)
+        guard confirmation.evidence == legacy, confirmation.captureDigest == (try CaptureRevision.digest([])) else {
+            throw corruptCapture("completion", key: descriptor.matchID, raw: try Canonical.data(legacy))
+        }
+        return legacy
     }
 
-    private struct CompletionConfirmation: Codable, Equatable {
-        let evidence: TrustedCompletionEvidence
-        let captureDigest: String
-    }
-    private func loadCompletionConfirmation(matchID: String, confirmationID: String) throws -> CompletionConfirmation {
+    private func loadCaptureCompletionConfirmation(matchID: String, confirmationID: String) throws -> CaptureCompletionConfirmation {
         guard let row = try db.rows("SELECT proof,checksum FROM completion_confirmations WHERE match_id=? AND confirmation_id=?", [.text(matchID), .text(confirmationID)]).first else {
             throw corruptCapture("completion_confirmations", key: confirmationID, raw: Data())
         }
-        let proof = try checkedCapture(CompletionConfirmation.self, raw: row[0], checksum: row[1], table: "completion_confirmations", key: confirmationID)
+        let proof = try checkedCapture(CaptureCompletionConfirmation.self, raw: row[0], checksum: row[1], table: "completion_confirmations", key: confirmationID)
         guard proof.evidence.matchID == matchID, proof.evidence.confirmationID == confirmationID else {
             throw corruptCapture("completion_confirmations", key: confirmationID, raw: row[0].data ?? Data())
         }
         return proof
     }
-    private func rememberCompletionConfirmation(evidence: TrustedCompletionEvidence, digest: String, hasCapture: Bool) throws {
-        let proof = CompletionConfirmation(evidence: evidence, captureDigest: digest)
+    func rememberCaptureCompletionConfirmation(evidence: TrustedCompletionEvidence, digest: String, hasCapture: Bool) throws {
+        let proof = CaptureCompletionConfirmation(evidence: evidence, captureDigest: digest)
         if !(try db.rows("SELECT confirmation_id FROM completion_confirmations WHERE match_id=? AND confirmation_id=?", [.text(evidence.matchID), .text(evidence.confirmationID)])).isEmpty {
-            guard try loadCompletionConfirmation(matchID: evidence.matchID, confirmationID: evidence.confirmationID) == proof else { throw StoreError.staleCaptureEvidence }
+            guard try loadCaptureCompletionConfirmation(matchID: evidence.matchID, confirmationID: evidence.confirmationID) == proof else { throw StoreError.staleCaptureEvidence }
             return
         }
         if hasCapture, let row = try db.rows("SELECT evidence FROM completion WHERE match_id=?", [.text(evidence.matchID)]).first {
@@ -227,6 +234,14 @@ extension MatchStore {
         }
         try db.execute("INSERT INTO capture_identities VALUES (?,?,?,?,?)", [.text(id), .text(kind), .text(matchID), .blob(raw), .text(Canonical.hash(raw))])
     }
+    private func verifyCaptureRegistrySet(kind: String, matchID: String, ids: [String], table: String) throws {
+        let actualIDs = Set(ids)
+        for row in try db.rows("SELECT id,payload,checksum FROM capture_identities WHERE kind=? AND match_id=?", [.text(kind), .text(matchID)]) {
+            let id = row[0].string ?? "invalid-id", raw = row[1].data ?? Data()
+            guard row[2].string == Canonical.hash(raw) else { throw corruptCapture("capture_identities", key: id, raw: raw) }
+            guard actualIDs.contains(id) else { throw corruptCapture(table, key: id, raw: raw) }
+        }
+    }
     private func verifyCaptureID(_ id: String, kind: String, matchID: String, raw: Data) throws {
         guard let row = try db.rows("SELECT kind,match_id,payload,checksum FROM capture_identities WHERE id=?", [.text(id)]).first,
               row[0].string == kind, row[1].string == matchID, row[2].data == raw,
@@ -247,6 +262,7 @@ extension MatchStore {
             for gap in revision.metadata.gaps { try verifyCaptureID(gap.id, kind: "gap", matchID: matchID, raw: Canonical.data(gap)) }
             result.append(revision)
         }
+        try verifyCaptureRegistrySet(kind: "revision", matchID: matchID, ids: result.map(\.id), table: "capture_revisions")
         return result
     }
     private func appendRevision(_ revision: CaptureRevision, descriptor: MatchDescriptor) throws {
@@ -254,13 +270,13 @@ extension MatchStore {
         guard revision.binding.matchID == matchID, revision.binding.recordingDeviceID == descriptor.recordingDeviceID else {
             throw quarantine(.invalidCaptureRevision, code: "capture-binding-conflict", key: revision.id, raw: raw)
         }
-        try registerCaptureID(revision.id, kind: "revision", matchID: matchID, raw: raw)
-        for segment in revision.metadata.segments { try registerCaptureID(segment.id, kind: "segment", matchID: matchID, raw: Canonical.data(segment)) }
-        for gap in revision.metadata.gaps { try registerCaptureID(gap.id, kind: "gap", matchID: matchID, raw: Canonical.data(gap)) }
         let revisions = try loadCaptureRevisions(descriptor: descriptor)
         if let existing = revisions.first(where: { $0.id == revision.id }) {
             guard existing == revision else { throw quarantine(.captureConflict, code: "capture-revision-conflict", key: revision.id, raw: raw) }; return
         }
+        try registerCaptureID(revision.id, kind: "revision", matchID: matchID, raw: raw)
+        for segment in revision.metadata.segments { try registerCaptureID(segment.id, kind: "segment", matchID: matchID, raw: Canonical.data(segment)) }
+        for gap in revision.metadata.gaps { try registerCaptureID(gap.id, kind: "gap", matchID: matchID, raw: Canonical.data(gap)) }
         if let parentID = revision.parentID {
             guard revisions.contains(where: { $0.id == parentID }) else { throw quarantine(.missingCaptureParent, code: "capture-parent-missing", key: revision.id, raw: raw) }
             guard let head = revisions.last, head.id == parentID, head.revision < Int64.max,
@@ -273,9 +289,11 @@ extension MatchStore {
     private struct HistoryItem { let commandID: String; let record: CaptureOperationRecord }
     private struct SavedOperation { let record: CaptureOperationRecord; let history: [HistoryItem] }
     private func loadOperations(matchID: String, descriptor: MatchDescriptor) throws -> [CaptureOperationRecord] {
-        try db.rows("SELECT id FROM capture_operations WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
+        let operations = try db.rows("SELECT id FROM capture_operations WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
             try loadOperation(id: $0[0].string ?? "invalid-id", descriptor: descriptor).record
         }
+        try verifyCaptureRegistrySet(kind: "operation", matchID: matchID, ids: operations.map { $0.operation.id }, table: "capture_operations")
+        return operations
     }
     private func loadOperation(id: String, descriptor: MatchDescriptor, uncommittedCommandID: String? = nil) throws -> SavedOperation {
         guard let row = try db.rows("SELECT match_id,operation,checksum,record,record_checksum,history_count FROM capture_operations WHERE id=?", [.text(id)]).first else {

@@ -125,7 +125,7 @@ final class CaptureTransactionTests: XCTestCase, @unchecked Sendable {
   let actual16 = try await s.snapshot(matchID:"match").completionEvidence; XCTAssertNil(actual16); try await s.close()
  }
  func testReadOnlyLookupReturnsOriginalRequestAndRejectsCorruptIndexHashAndReceipt() async throws {
-  for damage in ["none","request","hash","receipt","index"] {
+  for damage in ["none","request","hash","receipt","index","match-index"] {
    let url=h.path(); try await h.prepare(url); let s=try MatchStore(url:url); let d=h.descriptor()
    let c=try request("c0",generation:1,descriptor:d,operations:[operation()]); let receipt=try await s.commitV2(c)
    _=try await s.commitV2(request("later",generation:2,descriptor:d)); try await s.close()
@@ -133,6 +133,7 @@ final class CaptureTransactionTests: XCTestCase, @unchecked Sendable {
    if damage=="request" { try raw.execute("UPDATE commands_v2 SET request=x'626164' WHERE command_id='c0'") }
    if damage=="hash" { try raw.execute("UPDATE commands_v2 SET request_hash='bad' WHERE command_id='c0'") }
    if damage=="receipt" { try raw.execute("UPDATE commands_v2 SET receipt=x'626164' WHERE command_id='c0'") }
+   if damage=="match-index" { try raw.execute("UPDATE commands_v2 SET match_id='other' WHERE command_id='c0'") }
    if damage=="index" { try raw.execute("UPDATE commands_v2 SET command_id='renamed' WHERE command_id='c0'") }
    try raw.close(); let reopened=try MatchStore(url:url)
    let missing=try await reopened.committedCommandV2(commandID:"absent"); XCTAssertNil(missing)
@@ -235,7 +236,7 @@ final class CaptureTransactionTests: XCTestCase, @unchecked Sendable {
   do { try await s.saveCompletionProofV2(evidence:proof,captureDigest:CaptureRevision.digest([revision()]),expectedGeneration:4,now:h.t.addingTimeInterval(20)); XCTFail("old event evidence") } catch let error as StoreError { XCTAssertEqual(error,.staleCompletionEvidence) }
   let snapshot=try await s.snapshot(matchID:"match"); XCTAssertNil(snapshot.completionEvidence); try await s.close()
  }
- func testRouteWarningAndStoppedUncertainSaveStayPendingWithoutLosingToken() async throws {
+ func testStoppedUncertainSaveStaysPendingWithoutLosingToken() async throws {
   let url=h.path(); try await h.prepare(url); let s=try MatchStore(url:url); let d=h.descriptor()
   _=try await s.commitV2(request("c0",generation:1,descriptor:d,operations:[operation()]))
   let pending=try CaptureOperationUpdate(operationID:"op1",expectedState:.pending,state:.needsReconciliation,observation:nil)
@@ -248,7 +249,82 @@ final class CaptureTransactionTests: XCTestCase, @unchecked Sendable {
   XCTAssertEqual(operations.first?.operation.externalToken,"op1"); XCTAssertEqual(operations.first?.observation?.outcome,.stopped); XCTAssertEqual(operations.first?.observation?.failure,.captureFailed)
   let madeUp=try CaptureOperationUpdate(operationID:"op1",expectedState:.needsReconciliation,state:.failed,observation:observation(.notCreated(.captureFailed)))
   do { _=try await reopened.commitV2(request("bad",generation:4,descriptor:d,updates:[madeUp])); XCTFail("stopped Workout exists") } catch let error as StoreError { XCTAssertEqual(error,.invalidOperationTransition) }
+  let cleared=try CaptureOperationUpdate(operationID:"op1",expectedState:.needsReconciliation,state:.settled,observation:observation(.stopped))
+  do { _=try await reopened.commitV2(request("clear-failure",generation:4,descriptor:d,updates:[cleared])); XCTFail("unproven save cannot settle by clearing failure") } catch let error as StoreError { XCTAssertEqual(error,.invalidOperationTransition) }
   try await reopened.close()
+ }
+
+ func testLegacyConfirmationHistorySurvivesReplacementAndMigration() async throws {
+  for migrated in [false,true] {
+   let url=migrated ? try LegacyCompatibilityTests().database():h.path()
+   if !migrated { try await h.prepare(url) }
+   let s=try MatchStore(url:url); let d:MatchDescriptor; let events:[MatchEvent]; let generation:Int64; let first:TrustedCompletionEvidence
+   if migrated {
+    let snap=try await s.snapshot(matchID:"match"); d=snap.descriptor; events=snap.events; generation=snap.generation; first=try XCTUnwrap(snap.completionEvidence)
+   } else {
+    let facts=try h.facts(); d=facts.0; var recorder=LiveMatchRecorder(descriptor:d,events:facts.1)
+    try recorder.transition(.matchEnded,eventID:"end",sourceDeviceID:"watch",now:h.t.addingTimeInterval(10)); events=recorder.events
+    _=try await s.commitV2(request("ended",generation:1,descriptor:d,events:events,outboxID:"end-delta")); generation=2
+    first=try TrustedCompletionEvidence.acceptedByCompleteSaveBoundary(descriptor:d,events:events,confirmationID:"C1",now:h.t.addingTimeInterval(20))
+    try await s.saveCompletionEvidence(first,expectedGeneration:generation,now:h.t.addingTimeInterval(20))
+   }
+   let second=try TrustedCompletionEvidence.acceptedByCompleteSaveBoundary(descriptor:d,events:events,confirmationID:"C2",now:h.t.addingTimeInterval(20))
+   try await s.saveCompletionEvidence(second,expectedGeneration:generation,now:h.t.addingTimeInterval(20))
+   _=try await s.commitV2(request("r1-command",generation:generation,descriptor:d,revisions:[revision()],outboxID:"r1-delta"))
+   do { try await s.saveCompletionProofV2(evidence:first,captureDigest:CaptureRevision.digest([revision()]),expectedGeneration:generation+1,now:h.t.addingTimeInterval(20)); XCTFail("replaced legacy confirmation remains bound to empty capture") } catch let error as StoreError { XCTAssertEqual(error,.staleCaptureEvidence) }
+   try await s.close()
+  }
+ }
+ func testLegacySaveCannotRebindV2ConfirmationToDifferentTimeline() async throws {
+  let url=h.path(); try await h.prepare(url); let s=try MatchStore(url:url); let(d,e)=try h.facts(); var recorder=LiveMatchRecorder(descriptor:d,events:e)
+  try recorder.transition(.matchEnded,eventID:"end",sourceDeviceID:"watch",now:h.t.addingTimeInterval(10))
+  _=try await s.commitV2(request("end",generation:1,descriptor:d,events:recorder.events,outboxID:"end-delta"))
+  let proof=try TrustedCompletionEvidence.acceptedByCompleteSaveBoundary(descriptor:d,events:recorder.events,confirmationID:"same-confirmation",now:h.t.addingTimeInterval(20))
+  try await s.saveCompletionProofV2(evidence:proof,captureDigest:CaptureRevision.digest([]),expectedGeneration:2,now:h.t.addingTimeInterval(20))
+  let correction=try PostMatchEditor.revise(eventID:"goal",newEventID:"delete-goal",descriptor:d,events:recorder.events,delete:true,sourceDeviceID:"watch",now:h.t.addingTimeInterval(20))
+  _=try await s.commitV2(request("correct",generation:2,descriptor:d,events:[correction],outboxID:"correct-delta"))
+  let changed=try TrustedCompletionEvidence.acceptedByCompleteSaveBoundary(descriptor:d,events:recorder.events+[correction],confirmationID:"same-confirmation",now:h.t.addingTimeInterval(20))
+  do { try await s.saveCompletionEvidence(changed,expectedGeneration:3,now:h.t.addingTimeInterval(20)); XCTFail("legacy cannot overwrite bound v2 confirmation") } catch let error as StoreError { XCTAssertEqual(error,.staleCaptureEvidence) }
+  try await s.close()
+ }
+ func testRecoveryScansRejectDeletedRevisionOperationAndOutboxRows() async throws {
+  for kind in ["revision","operation","outbox"] {
+   let url=h.path(); try await h.prepare(url); let s=try MatchStore(url:url); let(d,e)=try h.facts(); var recorder=LiveMatchRecorder(descriptor:d,events:e)
+   try recorder.transition(.matchEnded,eventID:"end",sourceDeviceID:"watch",now:h.t.addingTimeInterval(10))
+   _=try await s.commitV2(request("ended",generation:1,descriptor:d,events:recorder.events,outboxID:"end-delta"))
+   let proof=try TrustedCompletionEvidence.acceptedByCompleteSaveBoundary(descriptor:d,events:recorder.events,confirmationID:"legacy",now:h.t.addingTimeInterval(20))
+   try await s.saveCompletionEvidence(proof,expectedGeneration:2,now:h.t.addingTimeInterval(20))
+   let op=try operation(command:"captured")
+   _=try await s.commitV2(request("captured",generation:2,descriptor:d,revisions:[revision()],operations:[op],outboxID:"capture-delta"))
+   try await s.close(); let raw=try SQLite(url:url,fault:nil)
+   let table=kind=="revision" ? "capture_revisions":kind=="operation" ? "capture_operations":"business_outbox"
+   try raw.execute("DELETE FROM "+table); try raw.close(); let reopened=try MatchStore(url:url)
+   do {
+    if kind=="revision" { _=try await reopened.snapshot(matchID:"match") }
+    else if kind=="operation" { _=try await reopened.pendingCaptureOperations(matchID:"match") }
+    else { _=try await reopened.pendingBusinessOutbox(matchID:"match") }
+    XCTFail("missing rows cannot look empty")
+   } catch {}
+   let diagnostics=try await reopened.diagnostics(matchID:"match"); XCTAssertTrue(diagnostics.contains { !$0.rawBytes.isEmpty && $0.severity == .blocking }); try await reopened.close()
+  }
+ }
+ func testActionOutcomeMismatchCannotSettleOrClearPendingOperation() async throws {
+  for (action,outcome) in [(CaptureAction.finish,WorkoutOutcome.running),(.pause,.running),(.resume,.paused)] {
+   let url=h.path(); try await h.prepare(url); let s=try MatchStore(url:url); let d=h.descriptor()
+   _=try await s.commitV2(request("c0",generation:1,descriptor:d,operations:[operation()]))
+   let preparing=try CaptureOperationUpdate(operationID:"op1",expectedState:.pending,state:.needsReconciliation,observation:nil)
+   _=try await s.commitV2(request("c1",generation:2,descriptor:d,updates:[preparing]))
+   let started=try CaptureOperationUpdate(operationID:"op1",expectedState:.needsReconciliation,state:.settled,observation:observation(.running))
+   _=try await s.commitV2(request("c2",generation:3,descriptor:d,updates:[started]))
+   let follow=try CaptureOperation(id:"action",binding:binding(),associatedCommandID:"follow",action:action,requestedAt:h.t,externalToken:"op1")
+   _=try await s.commitV2(request("follow",generation:4,descriptor:d,operations:[follow]))
+   let prepare=try CaptureOperationUpdate(operationID:"action",expectedState:.pending,state:.needsReconciliation,observation:nil)
+   _=try await s.commitV2(request("perform",generation:5,descriptor:d,updates:[prepare]))
+   let observation=try WorkoutObservation(operationID:"action",binding:binding(),externalToken:"op1",observedAt:h.t,outcome:outcome,window:CaptureWindow(start:nil,end:nil))
+   let bad=try CaptureOperationUpdate(operationID:"action",expectedState:.needsReconciliation,state:.settled,observation:observation)
+   do { _=try await s.commitV2(request("bad",generation:6,descriptor:d,updates:[bad])); XCTFail("action did not succeed") } catch let error as StoreError { XCTAssertEqual(error,.invalidOperationTransition) }
+   let pending=try await s.pendingCaptureOperations(matchID:"match"); XCTAssertEqual(pending.map { $0.operation.id },["action"]); try await s.close()
+  }
  }
 
 }

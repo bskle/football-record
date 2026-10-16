@@ -25,6 +25,7 @@ public actor MatchStore {
                 guard !snapshot.diagnostics.contains(where: { $0.severity == .blocking }) else { throw StoreError.unresolvedDiagnostics }
                 guard MatchReplay.replay(descriptor: snapshot.descriptor, events: snapshot.events, now: now,
                     completionEvidence: evidence).state == .completed else { throw StoreError.staleCompletionEvidence }
+                try rememberCaptureCompletionConfirmation(evidence: evidence, digest: CaptureRevision.digest([]), hasCapture: false)
                 try db.execute("DELETE FROM completion_v2 WHERE match_id=?", [.text(evidence.matchID)])
                 try db.execute("INSERT INTO completion VALUES (?,?) ON CONFLICT(match_id) DO UPDATE SET evidence=excluded.evidence",
                     [.text(evidence.matchID), .blob(try Canonical.data(evidence))])

@@ -1,4 +1,5 @@
 import Foundation
+import MatchCore
 import SQLite3
 
 enum SQLValue {
@@ -36,6 +37,7 @@ final class SQLite: @unchecked Sendable {
             if version < 2 {
                 try transaction {
                     for sql in Self.schemaV2 { try execute(sql) }
+                    try migrateLegacyCompletionConfirmations()
                     if fault == .migrationAfterSchema || fault == .migrationBeforeV2Version { throw StoreError.injectedFailure }
                     try execute("PRAGMA user_version=2")
                     if fault == .migrationAfterV2Version { throw StoreError.injectedFailure }
@@ -123,6 +125,18 @@ final class SQLite: @unchecked Sendable {
         }
         let status = sqlite3_finalize(statement); finalized = true; try check(status)
         return result
+    }
+    private func migrateLegacyCompletionConfirmations() throws {
+        let emptyDigest = try CaptureRevision.digest([])
+        for row in try rows("SELECT match_id,evidence FROM completion") {
+            let id = row[0].string ?? "invalid-id", bytes = row[1].data ?? Data()
+            guard let evidence = try? JSONDecoder().decode(TrustedCompletionEvidence.self, from: bytes),
+                  evidence.matchID == id, !evidence.confirmationID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw StoreError.corruptPayload(table: "completion", key: id)
+            }
+            let proof = try Canonical.data(CaptureCompletionConfirmation(evidence: evidence, captureDigest: emptyDigest))
+            try execute("INSERT INTO completion_confirmations VALUES (?,?,?,?)", [.text(id), .text(evidence.confirmationID), .blob(proof), .text(Canonical.hash(proof))])
+        }
     }
     private func failure(_ code: Int32) -> StoreError {
         .sqlite(code: code, message: handle.map { String(cString: sqlite3_errmsg($0)) } ?? "database unavailable")

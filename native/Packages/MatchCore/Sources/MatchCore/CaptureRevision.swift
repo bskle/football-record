@@ -141,6 +141,14 @@ public struct CaptureOperationRecord: Codable, Sendable, Equatable {
             if case .stopped = observation?.outcome, observation?.failure == .captureFailed { throw CaptureValueError.invalidObservation }
         default: throw CaptureValueError.invalidObservation
         }
+        if state == .settled {
+            switch (operation.action, observation?.outcome) {
+            case (_, .some(.linked)), (.start, .some(.running)), (.start, .some(.paused)),
+                 (.pause, .some(.paused)), (.resume, .some(.running)),
+                 (.recover, .some(.running)), (.recover, .some(.paused)): break
+            default: throw CaptureValueError.invalidObservation
+            }
+        }
         self.operation = operation
         self.state = state
         self.observation = observation
@@ -176,4 +184,3 @@ public struct CaptureOperationUpdate: Codable, Sendable, Equatable {
                       observation: c.decodeIfPresent(WorkoutObservation.self, forKey: .observation))
     }
 }
-

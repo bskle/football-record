@@ -146,3 +146,9 @@ public struct CommittedCommandV2: Codable, Sendable, Equatable {
         try self.init(request: c.decode(StoreCommitV2.self, forKey: .request), receipt: c.decode(CommitReceiptV2.self, forKey: .receipt))
     }
 }
+
+/// Immutable binding used by both legacy and capture-aware complete-save boundaries.
+struct CaptureCompletionConfirmation: Codable, Equatable {
+    let evidence: TrustedCompletionEvidence
+    let captureDigest: String
+}
