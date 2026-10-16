@@ -125,12 +125,18 @@ final class CaptureTransactionTests: XCTestCase, @unchecked Sendable {
   let actual16 = try await s.snapshot(matchID:"match").completionEvidence; XCTAssertNil(actual16); try await s.close()
  }
  func testReadOnlyLookupReturnsOriginalRequestAndRejectsCorruptIndexHashAndReceipt() async throws {
-  for damage in ["none","request","hash","receipt","index","match-index"] {
+  for damage in ["none","request","hash","receipt","index","match-index","request-match"] {
    let url=h.path(); try await h.prepare(url); let s=try MatchStore(url:url); let d=h.descriptor()
    let c=try request("c0",generation:1,descriptor:d,operations:[operation()]); let receipt=try await s.commitV2(c)
    _=try await s.commitV2(request("later",generation:2,descriptor:d)); try await s.close()
    let raw=try SQLite(url:url,fault:nil)
    if damage=="request" { try raw.execute("UPDATE commands_v2 SET request=x'626164' WHERE command_id='c0'") }
+   if damage=="request-match" {
+    var object=try XCTUnwrap(JSONSerialization.jsonObject(with:Canonical.data(c)) as? [String:Any])
+    var descriptor=try XCTUnwrap(object["descriptor"] as? [String:Any]); var intent=try XCTUnwrap(descriptor["startIntent"] as? [String:Any])
+    intent["matchID"]="forged"; descriptor["startIntent"]=intent; object["descriptor"]=descriptor
+    try raw.execute("UPDATE commands_v2 SET request=? WHERE command_id='c0'",[.blob(try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys]))])
+   }
    if damage=="hash" { try raw.execute("UPDATE commands_v2 SET request_hash='bad' WHERE command_id='c0'") }
    if damage=="receipt" { try raw.execute("UPDATE commands_v2 SET receipt=x'626164' WHERE command_id='c0'") }
    if damage=="match-index" { try raw.execute("UPDATE commands_v2 SET match_id='other' WHERE command_id='c0'") }
@@ -251,6 +257,9 @@ final class CaptureTransactionTests: XCTestCase, @unchecked Sendable {
   do { _=try await reopened.commitV2(request("bad",generation:4,descriptor:d,updates:[madeUp])); XCTFail("stopped Workout exists") } catch let error as StoreError { XCTAssertEqual(error,.invalidOperationTransition) }
   let cleared=try CaptureOperationUpdate(operationID:"op1",expectedState:.needsReconciliation,state:.settled,observation:observation(.stopped))
   do { _=try await reopened.commitV2(request("clear-failure",generation:4,descriptor:d,updates:[cleared])); XCTFail("unproven save cannot settle by clearing failure") } catch let error as StoreError { XCTAssertEqual(error,.invalidOperationTransition) }
+  let changedFailure=try WorkoutObservation(operationID:"op1",binding:binding(),externalToken:"op1",observedAt:h.t,outcome:.stopped,window:window,failure:.routeFailed)
+  let failed=try CaptureOperationUpdate(operationID:"op1",expectedState:.needsReconciliation,state:.failed,observation:changedFailure)
+  do { _=try await reopened.commitV2(request("replace-failure",generation:4,descriptor:d,updates:[failed])); XCTFail("changing failure cannot prove saved") } catch let error as StoreError { XCTAssertEqual(error,.invalidOperationTransition) }
   try await reopened.close()
  }
 

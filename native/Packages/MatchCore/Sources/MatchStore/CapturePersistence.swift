@@ -9,7 +9,9 @@ extension MatchStore {
             return try db.transaction {
                 guard let row = try db.rows("SELECT request,request_hash,receipt,match_id FROM commands_v2 WHERE command_id=?", [.text(commandID)]).first else { return nil }
                 diagnosticMatchID = row[3].string ?? commandID
-                if let parsed = try? JSONDecoder().decode(StoreCommitV2.self, from: row[0].data ?? Data()),
+                if let bytes = row[0].data, row[1].string == Canonical.hash(bytes),
+                   let parsed = try? JSONDecoder().decode(StoreCommitV2.self, from: bytes),
+                   (try? Canonical.data(parsed)) == bytes,
                    !parsed.descriptor.matchID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     diagnosticMatchID = parsed.descriptor.matchID
                 }
@@ -362,7 +364,9 @@ extension MatchStore {
         }
         if case .stopped = from.observation?.outcome, from.observation?.failure == .captureFailed {
             switch to.observation?.outcome {
-            case .some(.stopped), .some(.savedAwaitingLink), .some(.linked): break
+            case .some(.stopped):
+                guard to.state == .needsReconciliation, to.observation?.failure == .captureFailed else { return false }
+            case .some(.savedAwaitingLink), .some(.linked): break
             default: return false
             }
         }
