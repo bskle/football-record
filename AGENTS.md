@@ -5,11 +5,13 @@
 ## 当前执行状态（2026-10-16，上海）
 
 - 正式中文名为“球历”，英文名为 `football-record`；Xcode 工程技术名保留 `FootballRecord`。
-- 2026-10-15 规划启动快照曾为“尚未创建分支、worktree、标签”；该快照已被本次 bootstrap 事实取代。`dev`、`release`、`main` 均已从 `59edac891ee3a1cbb79a30b396ad1902d0907a62` 建立或保留，原型 annotated tag 为 `prototype-baseline-20261015`；`main` 仍是浏览器原型基线，`release` 没有活动候选。
-- M1 本地基础交付完成：NATIVE-001 工程、NATIVE-002 共享事件引擎、NATIVE-003 SQLite 事务仓储 / outbox 与 NATIVE-004 采集片段值合同均经两位非作者审阅合入 `dev`。组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 已验证 70 项 XCTest 零失败、两端 MatchStore SDK 与两个 App 无签名构建通过。采集元数据仅为合同，落盘及真实采集接线留 M2；App 仍为开发预览壳，没有用户记录页面。当前治理快照见 [GIT-002 台账](docs/native/tasks/GIT-002.md)，旧任务卡保留当时状态。
-- 用户已授权按现有计划推进，并以“公开就公开暂时没事”接受当前 public 仓库，覆盖先前 private 意向。`origin = https://github.com/bskle/football-record.git`；主代理已核对 `gh` 登录、HTTPS 认证与仓库 `PUBLIC` / `ADMIN` 权限。GIT-001 合并后已首次原子推送三条长期分支与原型标签；截至本快照，远端 `dev` 已核对为上述组合 SHA，`main` / `release` 仍为原型基线，默认分支为 `main`。代码同步不等于原生发布，PR、CI 与服务端保护规则尚未配置。
-- NATIVE-002 / 003 / 004 已请求原生 worktree 归档，但工具仍返回 queued 且实际列表仍 active，三个临时分支均保留；不把请求当作清理成功，不强删或手动绕过。证据已保存到工作树外，代码均已进入 `dev`；GIT-002 文档树待双审集成后按同一规则处理。
-- Xcode 27.0 / Swift 6.4 可用；用户暂不能连接真机。M2 已进入技术计划，见 [M2 子计划](docs/superpowers/plans/2026-10-16-native-m2.md) 与 [NATIVE-005](docs/native/tasks/NATIVE-005.md)：先 006 采集事务、007 共享会话，再并行 008 真实采集适配与 009 UI/唯一工程装配；010 为临时设备集成任务，不增加长期分支。无设备不阻止仓储、服务和无设备影响 UI；真实采集先形成已编译/双审包，相关真机验收通过后才入 `dev`。生产许可仍待 M4，开发 fixture 隔离且不算真实锁/E2E。
+- 2026-10-15 规划启动时“尚未创建分支、worktree、标签”的快照已被 bootstrap 取代。永久分支为 `dev`、`release`、`main`；`main` / `release` 均保留浏览器原型基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`，annotated tag 为 `prototype-baseline-20261015`。尚无原生活动候选或发布。
+- M1 本地基础已双审集成，历史组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项 XCTest 与两端 MatchStore SDK / 两个 App 无签名构建证据保留。旧任务卡与 [GIT-002](docs/native/tasks/GIT-002.md) 只记录当时状态；当前治理台账为 [GIT-003](docs/native/tasks/GIT-003.md)。
+- M2 的 NATIVE-006 采集事务 / v2 仓储、007 共享会话、011 已证明未创建采集的收尾修复、009 双端记录 UI 均经两位非作者审阅合入 `dev`。当前 `dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`，实际合并复验 158 项宿主测试、6 项 SDK 产品编译、2 个 App 无签名构建及每端 1 项 XCUI 通过。009 另有 iOS 27 / watchOS 27 各完整 7 项 XCUI、390pt / 45mm 界面和 375pt 深色最大字体定点视觉证据。App 已接入 Core / Store / Session / Presentation 的原生记录页面，使用 `UnavailableWorkoutGateway`；最低 iOS 17 / watchOS 10 仅编译，未实际运行最低系统，真人 VoiceOver 朗读及触觉手感未验。
+- NATIVE-008 WorkoutCapture 最终 head `6e86e8f1ac647b02b8f1ef407226a10398c5d998` 已编译、双审：40 项模块 + 144 项核心宿主测试、双模拟器 / 双设备 SDK 无签名编译；证据来自 fake driver 与真实 SQLite 跨层测试，未实际运行 HealthKit，尚未入 `dev`。NATIVE-010 已从上述最新 `dev` 建独立 `test/m2-device-integration` 树，普通合入已审 008，正在准备真实 gateway、最小能力配置与操作指引；最终包未冻结，签名 / 安装 / 授权 / GPS / 后台 / 锁屏 / 恢复均待真机。008 / 010 相关真机门槛通过后才入 `dev`，不晋级 `release` / `main`。
+- 用户已授权按计划推进及同步 GitHub，并以“公开就公开暂时没事”接受 public 仓库，覆盖先前 private 意向。`origin = https://github.com/bskle/football-record.git`；`gh` 登录、HTTPS 与 `PUBLIC` / `ADMIN` 已核对，远端只有三条永久分支，默认 `main`。PR、CI 与服务端保护规则尚未配置，本地双审持续执行；代码同步不等于原生发布。
+- NATIVE-005 / 006 / 007 / 011 的受管 worktree 已实际归档、临时分支已用 `git branch -d` 安全删除。旧 NATIVE-002 / 003 / 004 / GIT-002 与新 009 归档请求仍 queued、实际 active，分支保留；必要 ignored 证据已另存，不盲重试、不强删或绕过工具。008 / 010 仍有设备验收依赖，正常保留。
+- Xcode 27.0 / Swift 6.4 可用，用户暂不能连接真机。执行 [M2 子计划](docs/superpowers/plans/2026-10-16-native-m2.md)；生产开赛许可留 M4，Debug 使用独立数据库并持续标注“开发模拟锁”，不算生产锁 / E2E。本地普通结束保持 `endedPendingSync`，不释放后台锁或制造 `completed`。
 
 ## 角色与派工
 
