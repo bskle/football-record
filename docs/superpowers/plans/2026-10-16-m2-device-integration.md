@@ -34,8 +34,10 @@
 
 ## 4. 验证、指南与交付
 
-- [ ] 执行新增红绿、完整198既有host+实际新增数、八SDK及双sim/generic实际设备App构建；最终检查plist/entitlement。
+- [ ] 执行新增红绿、完整198既有host+实际新增数、十SDK及双sim/generic实际设备App构建；最终检查plist/entitlement。
 - [ ] 两端各运行新增UI smoke/重启用例，保存xcresult、PNG、AX与输入hash；只用三个既有任务自有sim，不改用户pairs/下载runtime/删除设备。
 - [ ] 写 `docs/native/device-setup.md`：无设备可完成范围、候选路径、Xcode打开、本人账号/未知Team、自动签名、两唯一BundleID相容、配对/信任/DeveloperMode。引用已核Apple primary当前免费普通HK/background支持，不要求先付费；profile/sign/install仍待设备。
 - [ ] 设备矩阵逐项pending：账号/签名/安装、写入/拒绝/定位、锁屏保存和解锁关联、路线/后台、恢复/强退/重启、等待授权时结束及迟到回调、物理触觉。不把fake/SDK/simulator算设备通过。
 - [ ] 按计划/源/最终docs分Conventional Commits；全部输入/日志/xcresult保存工作树外NATIVE010。交两名非作者审阅，报告clean后停止。候选保留本地，真机gate前不merge/push长期分支、不归档。
+
+执行快照：计划e5120e1，源4a90bc5；6项装配宿主红绿完成。4a90冻结组合204宿主/十SDK/双sim及双generic实际设备App无签名构建通过，Watch新增3项通过；Phone纯UI/原库重开两项通过，真实模式unsigned在HKSource失败，同源Xcode正常Simulator ad-hoc定点通过。f3facc3窄修Phone说明，93e17b8固定sim签名脚本；待已审012普通同步后一次做受影响回归，不重复未变化全矩阵。创建base2e1不改；latest目标7ae65db8f662c4afcdd053f63da6462bbed57262仅治理更新。
