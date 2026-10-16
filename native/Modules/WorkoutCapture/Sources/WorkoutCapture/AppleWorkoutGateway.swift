@@ -10,8 +10,27 @@ import MatchSession
     var terminal = false
     var finishTask: Task<DriverState, Never>?
     var finishCompleted = false
+    var freshStartOperationID: String?
+    var creationAttempted = false
+    var recoveryAttempted = false
+    var existenceObserved = false
+    var negativeStartProof = false
+    var canProveNoCreation: Bool {
+      terminal && freshStartOperationID == context.externalToken && !creationAttempted && !recoveryAttempted
+        && !existenceObserved && driver == nil && state.start == nil && state.end == nil
+    }
+    func terminalStartResult() -> DriverState {
+      guard canProveNoCreation else { return DriverState(outcome: .unknown, start: state.start, end: state.end) }
+      negativeStartProof = true
+      return DriverState(outcome: .notCreated(.unavailable), failure: .unavailable)
+    }
     init(_ context: WorkoutContext) { self.context = context }
     func merge(_ next: DriverState) {
+      switch next.outcome {
+      case .running, .paused, .stopped, .linked, .savedAwaitingLink: existenceObserved = true
+      default: break
+      }
+      if next.start != nil || next.end != nil { existenceObserved = true }
       state = state.merging(next)
     }
   }
@@ -25,6 +44,7 @@ import MatchSession
   public func perform(_ operation: CaptureOperation) async -> WorkoutObservation {
     guard let entry = entry(for: operation) else { return observation(operation, state: DriverState(outcome: .unknown)) }
     if let prior = operations[operation.id], prior != operation { return observation(operation, state: DriverState(outcome: .unknown)) }
+    if operation.action == .start, operations[operation.id] == nil { entry.freshStartOperationID = operation.id }
     operations[operation.id] = operation
     if operation.action == .finish { entry.terminal = true }
     if let driver = entry.driver { entry.merge(driver.currentState()) }
@@ -50,6 +70,8 @@ import MatchSession
     guard let entry = entry(for: operation) else { return observation(operation, state: DriverState(outcome: .unknown)) }
     if let prior = operations[operation.id], prior != operation { return observation(operation, state: DriverState(outcome: .unknown)) }
     operations[operation.id] = operation
+    if operation.action == .start, entry.negativeStartProof { return observation(operation, state: entry.state) }
+    entry.recoveryAttempted = true
     if operation.action == .finish { entry.terminal = true }
     if case .linked = entry.state.outcome { return observation(operation, state: entry.state) }
     if let driver = entry.driver { entry.merge(driver.currentState()) }
@@ -89,13 +111,15 @@ import MatchSession
     if entry.state.saved { return entry.state }
     switch op.action {
     case .start:
-      guard entry.driver == nil, !entry.terminal else { return entry.state }
+      guard entry.driver == nil else { return entry.state }
+      guard !entry.terminal else { return entry.terminalStartResult() }
       let authorization = await factory.requestAuthorization()
-      guard !entry.terminal else { return entry.state }
+      guard !entry.terminal else { return entry.terminalStartResult() }
       guard authorization.available else { return DriverState(outcome: .notCreated(.unavailable), failure: .unavailable) }
       guard authorization.write == .allowed else {
         return authorization.write == .denied ? DriverState(outcome: .notCreated(.writeDenied), failure: .writeDenied) : DriverState(outcome: .notCreated(.unavailable), failure: .unavailable)
       }
+      entry.creationAttempted = true
       do { entry.driver = try factory.makeDriver(context: entry.context) }
       catch { return DriverState(outcome: .notCreated(.unavailable), failure: .unavailable) }
       var state = await entry.driver!.start()
@@ -136,6 +160,8 @@ import MatchSession
     return result
   }
   private func observation(_ op: CaptureOperation, state: DriverState) -> WorkoutObservation {
+    var state = state
+    if case .notCreated = state.outcome, op.action != .start { state.outcome = .unknown }
     let start = state.start.flatMap { $0.timeIntervalSinceReferenceDate.isFinite ? $0 : nil }
     var end = state.end.flatMap { $0.timeIntervalSinceReferenceDate.isFinite ? $0 : nil }
     if let start, let boundary = end, boundary < start { end = nil }

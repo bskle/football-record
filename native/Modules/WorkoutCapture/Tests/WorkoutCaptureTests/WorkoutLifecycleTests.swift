@@ -30,7 +30,15 @@ import MatchCore
   var authorization = HealthAuthorization(available: true, write: .allowed, location: .allowed)
   var lookup = RecoveryLookup.unknown
   var creations = 0
-  func requestAuthorization() async -> HealthAuthorization { authorization }
+  var holdAuthorization = false
+  var authorizationStarted = false
+  var authorizationContinuation: CheckedContinuation<HealthAuthorization, Never>?
+  func requestAuthorization() async -> HealthAuthorization {
+    authorizationStarted = true
+    if holdAuthorization { return await withCheckedContinuation { authorizationContinuation = $0 } }
+    return authorization
+  }
+  func releaseAuthorization() { holdAuthorization = false; authorizationContinuation?.resume(returning: authorization); authorizationContinuation = nil }
   func makeDriver(context: WorkoutContext) throws -> any WorkoutDriver { creations += 1; return driver }
   func recover(context: WorkoutContext) async -> RecoveryLookup { lookup }
 }
@@ -132,6 +140,42 @@ import MatchCore
     let saved = await g.perform(try operation(.finish, id: "finish-second"))
     XCTAssertEqual(saved.outcome, .linked(workoutID: "REAL-UUID")); XCTAssertEqual(f.creations, 1)
     XCTAssertEqual(f.driver.calls.filter { $0 == "stopped" }.count, 2); XCTAssertEqual(f.driver.calls.filter { $0 == "save" }.count, 1)
+  }
+
+  func testEndDuringFreshAuthorizationProvesOnlyOriginalStartNeverCreated() async throws {
+    let f = FakeFactory(); f.holdAuthorization = true; let g = AppleWorkoutGateway(factory: f)
+    let start = try operation(.start); let finish = try operation(.finish)
+    let starting = Task { await g.perform(start) }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while !f.authorizationStarted && ContinuousClock.now < deadline { await Task.yield() }
+    XCTAssertTrue(f.authorizationStarted)
+    let ending = await g.perform(finish); XCTAssertEqual(ending.outcome, .unknown)
+    f.releaseAuthorization(); let endedStart = await starting.value
+    XCTAssertEqual(endedStart.outcome, .notCreated(.unavailable)); XCTAssertEqual(f.creations, 0)
+    let original = await g.reconcile(start); XCTAssertEqual(original.outcome, .notCreated(.unavailable))
+    let notStart = await g.reconcile(finish); XCTAssertEqual(notStart.outcome, .unknown); XCTAssertEqual(f.creations, 0)
+  }
+  func testTimedOutFreshAuthorizationStillNeverCreatesAfterTerminal() async throws {
+    let f = FakeFactory(); f.holdAuthorization = true; let g = AppleWorkoutGateway(factory: f, timeout: .milliseconds(5))
+    let start = try operation(.start); let first = await g.perform(start); XCTAssertEqual(first.outcome, .unknown)
+    _ = await g.perform(try operation(.finish)); f.releaseAuthorization()
+    for _ in 0..<10 { await Task.yield() }
+    let original = await g.reconcile(start); XCTAssertEqual(original.outcome, .notCreated(.unavailable)); XCTAssertEqual(f.creations, 0)
+  }
+  func testRestartOrPriorRecoveryCannotProveFreshNegativeCreation() async throws {
+    let f = FakeFactory(); let g = AppleWorkoutGateway(factory: f)
+    let start = try operation(.start); _ = await g.reconcile(start); _ = await g.perform(try operation(.finish))
+    let result = await g.perform(start); XCTAssertEqual(result.outcome, .unknown); XCTAssertEqual(f.creations, 0)
+    let restarted = AppleWorkoutGateway(factory: f); let afterRestart = await restarted.reconcile(start)
+    XCTAssertEqual(afterRestart.outcome, .unknown)
+  }
+  func testConstructedDriverCannotTurnUncertainStartIntoNegativeProof() async throws {
+    let f = FakeFactory(); f.driver.hangStart = true
+    let g = AppleWorkoutGateway(factory: f, timeout: .milliseconds(5)); let start = try operation(.start)
+    let first = await g.perform(start); XCTAssertEqual(first.outcome, .unknown); XCTAssertEqual(f.creations, 1)
+    _ = await g.perform(try operation(.finish)); f.driver.suspendedStart?.resume(returning: DriverState(outcome: .unknown)); f.driver.suspendedStart = nil
+    for _ in 0..<10 { await Task.yield() }
+    let result = await g.reconcile(start); XCTAssertNotEqual(result.outcome, .notCreated(.unavailable)); XCTAssertEqual(f.creations, 1)
   }
 
 }
