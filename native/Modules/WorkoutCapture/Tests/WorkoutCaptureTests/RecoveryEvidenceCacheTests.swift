@@ -38,4 +38,18 @@ import MatchCore
     cache.rememberActive(driver, context: c)
     guard case .saved = cache.lookup(c) else { return XCTFail("old session overrode save") }
   }
+  func testCachedActiveNilNilStillQueriesUntilRealUUIDAndPreservesAwaitingOnEmptyQuery() async throws {
+    let cache = RecoveryEvidenceCache(); let c = try context(); let driver = FakeDriver()
+    cache.rememberActive(driver, context: c); driver.state = DriverState(outcome: .savedAwaitingLink)
+    var queries = 0
+    let empty = await cache.resolveSaved(c) { queries += 1; return nil }
+    guard case .saved(let awaiting) = empty else { return XCTFail("empty query must retain save proof") }
+    XCTAssertEqual(awaiting.outcome, .savedAwaitingLink); XCTAssertEqual(queries, 1)
+    let found = await cache.resolveSaved(c) { queries += 1; return DriverState(outcome: .linked(workoutID: "UNLOCKED-REAL")) }
+    guard case .saved(let linked) = found else { return XCTFail("real query UUID missing") }
+    XCTAssertEqual(linked.outcome, .linked(workoutID: "UNLOCKED-REAL")); XCTAssertEqual(queries, 2)
+    _ = await cache.resolveSaved(c) { queries += 1; return nil }; XCTAssertEqual(queries, 2)
+    XCTAssertTrue(driver.calls.isEmpty)
+  }
+
 }

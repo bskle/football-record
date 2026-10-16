@@ -8,6 +8,13 @@ import Foundation
     if case .active(let driver) = entry.1, driver.currentState().saved { return .saved(driver.currentState()) }
     return entry.1
   }
+  func resolveSaved(_ context: WorkoutContext, query: @MainActor () async -> DriverState?) async -> RecoveryLookup? {
+    guard case .saved(let proof) = lookup(context) else { return nil }
+    if case .linked = proof.outcome { return .saved(proof) }
+    if let actual = await query() { rememberSaved(actual, context: context) }
+    // Empty or locked query cannot erase the first nil,nil saved proof.
+    return lookup(context)
+  }
   func rememberSaved(_ value: DriverState, context: WorkoutContext) {
     guard value.saved else { return }
     if let old = records[context.externalToken] {

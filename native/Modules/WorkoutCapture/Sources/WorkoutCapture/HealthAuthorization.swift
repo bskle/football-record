@@ -58,7 +58,7 @@ import MatchCore
     #endif
   }
   public func recover(context: WorkoutContext) async -> RecoveryLookup {
-    if case .saved(let proof) = evidence.lookup(context) { return .saved(proof) }
+    if let saved = await evidence.resolveSaved(context, query: { [self] in await lookupSaved(context) }) { return saved }
     #if os(watchOS)
     if case .active(let driver) = evidence.lookup(context) {
       if driver.currentState().saved { return .saved(driver.currentState()) }
@@ -83,15 +83,19 @@ import MatchCore
     if let result = await withDeadline(timeout, operation: { await task.value }), let driver = result,
        driver.currentState().outcome == .running || driver.currentState().outcome == .paused { return .active(driver) }
     #endif
-    if let saved = await querySavedWorkout(store: store, sourceBundleID: sourceBundleID, context: context, timeout: timeout, actual: { [weak self] result in
-      self?.evidence.rememberSaved(result, context: context)
-    }) { return .saved(saved) }
+    if let saved = await lookupSaved(context) { return .saved(saved) }
     #if os(watchOS)
     if case .active(let driver) = evidence.lookup(context) { return .active(driver) }
     #endif
     // iOS17 has no original manual-builder recovery API. An empty/hidden query cannot prove it was never saved.
     return .unknown
   }
+  private func lookupSaved(_ context: WorkoutContext) async -> DriverState? {
+    await querySavedWorkout(store: store, sourceBundleID: sourceBundleID, context: context, timeout: timeout, actual: { [weak self] result in
+      self?.evidence.rememberSaved(result, context: context)
+    })
+  }
+
 }
 func locationStatus(_ value: CLAuthorizationStatus) -> LocationAuthorization {
   switch value { case .authorizedAlways, .authorizedWhenInUse: .allowed; case .denied, .restricted: .denied; default: .unknown }
