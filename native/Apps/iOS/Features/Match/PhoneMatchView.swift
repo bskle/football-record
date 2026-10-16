@@ -73,6 +73,7 @@ struct PhoneMatchView: View {
                   Button("比赛控制") { controls = true }.frame(maxWidth: .infinity, minHeight: 56).background(surface, in: RoundedRectangle(cornerRadius: 14)).accessibilityIdentifier("open-controls")
                 }.buttonStyle(.plain).font(.headline).disabled(!model.canRecord)
               }
+              SyncStatusView(model: model, terminal: p.terminal).padding(16).background(surface, in: RoundedRectangle(cornerRadius: 14))
               VStack(alignment: .leading, spacing: 14) {
                 HStack { Text("最近操作").font(.headline); Spacer(); Text("已保存到本机").font(.caption).foregroundStyle(.secondary) }
                 ForEach(p.recent, id: \.eventID) { event in HStack { Text(MatchProjection.clock(event.matchElapsed)).font(.caption).monospacedDigit().foregroundStyle(.secondary); Text(MatchProjection.title(event)).font(.subheadline); Spacer() } }
@@ -110,7 +111,7 @@ struct PhoneMatchView: View {
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
         Text("设置").font(.largeTitle.bold()); Text("球历").font(.title2.bold()); Text("football-record").foregroundStyle(.secondary)
-        Text("开赛服务、跨设备同步和真实运动采集仍在开发中。").font(.subheadline)
+        Text("生产开赛服务、可信配对和真实运动采集仍在开发中。").font(.subheadline)
         if model.development { DevelopmentMarker(); Text("此演练使用独立记录，不代表真实开赛锁或真实运动数据。").font(.caption) }
         #if DEBUG
         Button("新建独立开发演练", action: enterDevelopment).frame(minHeight: 44).accessibilityIdentifier("enter-development")

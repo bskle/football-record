@@ -72,6 +72,7 @@ struct WatchMatchView: View {
           Button("比赛控制") { controls = true }.frame(maxWidth: .infinity, minHeight: 44).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10)).accessibilityIdentifier("open-controls")
         }.buttonStyle(.plain).font(.system(size: 13, weight: .semibold)).disabled(!model.canRecord)
       }
+      SyncStatusView(model: model, terminal: p.terminal, compact: true)
       if let warning = p.captureWarning { Text(warning).font(.caption2).accessibilityIdentifier("capture-warning") }
       if model.issue != nil { RecordingIssueView(model: model) }
       if model.readOnly { Text("另一台设备记录 · 仅可查看").font(.caption2) }

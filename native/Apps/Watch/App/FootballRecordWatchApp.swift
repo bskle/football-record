@@ -8,12 +8,13 @@ struct FootballRecordWatchApp: App {
 private struct RecordingRoot: View {
     @State private var model: RecordingModel?
     @State private var failure: String?
+    @State private var replacing = false
     var body: some View {
         Group {
             if let model { WatchMatchView(model: model, enterDevelopment: enterDevelopment).id(ObjectIdentifier(model)) }
             else if let failure { Text(failure).padding() }
             else { ProgressView("正在载入记录") }
-        }.task { if model == nil { await initialize() } }
+        }.disabled(replacing).task { if model == nil { await initialize() } }
     }
     private func initialize() async {
         do {
@@ -33,8 +34,13 @@ private struct RecordingRoot: View {
     }
     private func enterDevelopment() {
         #if DEBUG
-        do { model = try AppBootstrap.development(dataset: UUID().uuidString) }
-        catch { failure = "无法建立独立开发演练。" }
+        guard !replacing else { return }; replacing = true
+        Task {
+            defer { replacing = false }
+            await model?.shutdown()
+            do { model = try AppBootstrap.development(dataset: UUID().uuidString) }
+            catch { failure = "无法建立独立开发演练。" }
+        }
         #endif
     }
 }

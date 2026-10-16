@@ -23,6 +23,8 @@ EA90A8BEE107413A8816CE5D = {isa = PBXBuildFile; productRef = 91F0C158B9C84211875
 AE0A13407429459A9C986D81 = {isa = PBXBuildFile; productRef = 3A0BA22F6862429EA61BF0D6; };
 4538337D78994DCB8AE3EAC8 = {isa = PBXBuildFile; productRef = 3E0DD92E29AE423C8CF58585; };
 57959E9694FF4BC6B29FA722 = {isa = PBXBuildFile; productRef = FCCDB1BCA2944608AD7D1562; };
+710170000000000000000001 = {isa = PBXBuildFile; productRef = 710170000000000000000003; };
+710170000000000000000002 = {isa = PBXBuildFile; productRef = 710170000000000000000004; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -68,8 +70,8 @@ B3DB6393ADC04592B36C6B9A = {isa = PBXFileReference; explicitFileType = wrapper.c
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-        D00000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (4F84499E8D754EB4903D520F, EA90A8BEE107413A8816CE5D, 4F888403B1A1438A891272B5, B00000000000000000000003 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
-        D00000000000000000000005 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (AE0A13407429459A9C986D81, 4538337D78994DCB8AE3EAC8, 57959E9694FF4BC6B29FA722, B00000000000000000000004 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (710170000000000000000001, 4F84499E8D754EB4903D520F, EA90A8BEE107413A8816CE5D, 4F888403B1A1438A891272B5, B00000000000000000000003 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000005 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (710170000000000000000002, AE0A13407429459A9C986D81, 4538337D78994DCB8AE3EAC8, 57959E9694FF4BC6B29FA722, B00000000000000000000004 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
 33C11198F6964F21B7182913 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 0286F0ADAA4848389C2D36F7 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
@@ -98,7 +100,7 @@ D2270310F0F64E88BF337219 = {isa = PBXGroup; children = (0FE44D4A3B6D4CB2AD9B3554
             buildRules = ();
             dependencies = (C00000000000000000000002 /* PBXTargetDependency */, );
             name = "FootballRecord-iOS";
-            packageProductDependencies = (E556930350E842BC965015E4, 91F0C158B9C84211875A5994, FF9AC8AEF3A04316A179631C, E00000000000000000000002 /* MatchCore */, );
+            packageProductDependencies = (710170000000000000000003, E556930350E842BC965015E4, 91F0C158B9C84211875A5994, FF9AC8AEF3A04316A179631C, E00000000000000000000002 /* MatchCore */, );
             productName = FootballRecord;
             productReference = F00000000000000000000010 /* FootballRecord.app */;
             productType = "com.apple.product-type.application";
@@ -110,7 +112,7 @@ D2270310F0F64E88BF337219 = {isa = PBXGroup; children = (0FE44D4A3B6D4CB2AD9B3554
             buildRules = ();
             dependencies = ();
             name = "FootballRecord-Watch";
-            packageProductDependencies = (3A0BA22F6862429EA61BF0D6, 3E0DD92E29AE423C8CF58585, FCCDB1BCA2944608AD7D1562, E00000000000000000000003 /* MatchCore */, );
+            packageProductDependencies = (710170000000000000000004, 3A0BA22F6862429EA61BF0D6, 3E0DD92E29AE423C8CF58585, FCCDB1BCA2944608AD7D1562, E00000000000000000000003 /* MatchCore */, );
             productName = FootballRecordWatch;
             productReference = F00000000000000000000011 /* FootballRecordWatch.app */;
             productType = "com.apple.product-type.application";
@@ -292,6 +294,8 @@ FF9AC8AEF3A04316A179631C = {isa = XCSwiftPackageProductDependency; package = 409
 3A0BA22F6862429EA61BF0D6 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchSession; };
 3E0DD92E29AE423C8CF58585 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchStore; };
 FCCDB1BCA2944608AD7D1562 = {isa = XCSwiftPackageProductDependency; package = 40947FC041B04BA2A35B83AB; productName = MatchPresentation; };
+710170000000000000000003 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchSync; };
+710170000000000000000004 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchSync; };
 /* End XCSwiftPackageProductDependency section */
     };
     rootObject = A00000000000000000000001 /* Project object */;
