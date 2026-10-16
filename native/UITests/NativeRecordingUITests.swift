@@ -97,6 +97,67 @@ import XCTest
       capture(app, scenario); app.terminate()
     }
   }
+  private func showText(_ id: String, in app: XCUIApplication) {
+    let text = app.staticTexts[id]
+    for _ in 0..<8 {
+      if text.exists && text.isHittable && text.frame.minY > app.frame.minY + 35 && text.frame.maxY < app.frame.maxY - 35 { return }
+      if text.exists && text.frame.minY < app.frame.minY + 35 { app.swipeDown() } else { app.swipeUp() }
+    }
+  }
+  func testPersistentSyncPendingRetryAndPeerSaved() {
+    let app = launch(["--ui-scenario", "sync-pending"])
+    let peer = app.staticTexts["sync-peer-state"]
+    XCTAssertTrue(peer.waitForExistence(timeout: 10))
+    XCTAssertEqual(peer.label, "等待对端保存确认")
+    XCTAssertTrue(app.staticTexts["sync-local-saved"].exists)
+    XCTAssertEqual(app.staticTexts["sync-cloud-state"].label, "云同步尚未接通")
+    XCTAssertTrue(app.staticTexts["development-pair-marker"].exists)
+    showText("sync-peer-state", in: app)
+    capture(app, "sync-pending-transport-success-without-ack")
+    tap("retry-sync", in: app)
+    expectation(for: NSPredicate(format: "label == %@", "对端已保存"), evaluatedWith: peer)
+    waitForExpectations(timeout: 12)
+    showText("sync-peer-state", in: app)
+    capture(app, "sync-real-fixture-peer-ack")
+    let arguments = app.launchArguments
+    app.terminate(); app.launchArguments = arguments; app.launch()
+    XCTAssertTrue(peer.waitForExistence(timeout: 10))
+    XCTAssertEqual(peer.label, "对端已保存")
+    XCTAssertFalse(app.buttons["start-match"].exists)
+    showText("sync-peer-state", in: app)
+    capture(app, "sync-peer-ack-reopened-same-dataset")
+  }
+  func testSyncUnavailableFailureAndBackendPendingAreDistinct() {
+    let unavailable = launch(); start(unavailable)
+    let issue = unavailable.staticTexts["sync-issue"]
+    XCTAssertTrue(issue.waitForExistence(timeout: 8))
+    XCTAssertTrue(issue.label.contains("可信配对"))
+    XCTAssertTrue(unavailable.buttons["field-toggle"].isEnabled)
+    showText("sync-issue", in: unavailable)
+    capture(unavailable, "sync-unavailable-local-recording-valid")
+    unavailable.terminate()
+    let failed = launch(["--ui-scenario", "sync-retry"])
+    XCTAssertTrue(failed.staticTexts["sync-issue"].waitForExistence(timeout: 10))
+    XCTAssertTrue(failed.staticTexts["sync-issue"].label.contains("传输暂不可用"))
+    XCTAssertTrue(failed.buttons["field-toggle"].isEnabled)
+    showText("sync-issue", in: failed)
+    capture(failed, "sync-failed-original-records-retained")
+    tap("retry-sync", in: failed)
+    expectation(for: NSPredicate(format: "label == %@", "对端已保存"), evaluatedWith: failed.staticTexts["sync-peer-state"])
+    waitForExpectations(timeout: 12)
+    showText("sync-peer-state", in: failed)
+    capture(failed, "sync-retry-recovered")
+    failed.terminate()
+    let terminal = launch(["--ui-scenario", "sync-terminal"])
+    XCTAssertTrue(terminal.staticTexts["sync-backend-state"].waitForExistence(timeout: 10))
+    XCTAssertEqual(terminal.staticTexts["sync-backend-state"].label, "后台待终结")
+    XCTAssertEqual(terminal.staticTexts["sync-cloud-state"].label, "云同步尚未接通")
+    XCTAssertTrue(terminal.staticTexts["match-status"].label.contains("待同步"))
+    XCTAssertFalse(terminal.buttons["start-match"].exists)
+    XCTAssertFalse(terminal.buttons["field-toggle"].exists)
+    showText("sync-backend-state", in: terminal)
+    capture(terminal, "sync-terminal-peer-saved-backend-pending")
+  }
   #if os(watchOS)
   private func quickPage(_ app: XCUIApplication) {
     app.swipeLeft()

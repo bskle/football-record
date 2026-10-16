@@ -6,16 +6,27 @@ import MatchSession
 
 /// Explicit isolated UI datasets. These are never a real device, lock or HealthKit acceptance.
 public enum DebugRecordingScenario: String {
+  case syncPending = "sync-pending", syncRetry = "sync-retry", syncSaved = "sync-saved", syncTerminal = "sync-terminal"
   case otherDevice = "other-device", captureGap = "capture-gap"
   case multipleCandidates = "multiple-candidates", identityUnavailable = "identity-unavailable", blockedDiagnostics = "blocked-diagnostics"
 }
 extension AppBootstrap {
   @MainActor public static func developmentScenario(_ scenario: DebugRecordingScenario, dataset: String) async throws -> RecordingModel {
+    if [.syncPending, .syncRetry, .syncSaved, .syncTerminal].contains(scenario) {
+      let mode: DevelopmentSyncPair.Mode = scenario == .syncPending ? .queued : scenario == .syncRetry ? .failed : .online
+      let pair = try await DevelopmentSyncPair.make(dataset: dataset, mode: mode)
+      await pair.model.load()
+      if pair.model.snapshot == nil { await pair.model.start(starter: true) }
+      if scenario == .syncTerminal, pair.model.canRecord { await pair.model.perform(.end) }
+      await pair.settle()
+      return pair.model
+    }
     let original = try development(dataset: dataset)
     switch scenario {
+    case .syncPending, .syncRetry, .syncSaved, .syncTerminal: throw SessionError.invalidRequest
     case .multipleCandidates, .identityUnavailable, .blockedDiagnostics:
       let error: SessionError = scenario == .multipleCandidates ? .multipleCandidates : scenario == .identityUnavailable ? .identityUnavailable : .blockedDiagnostics
-      return RecordingModel(session: DebugRecoveryFailure(original.session, error: error), repository: original.repository, development: true)
+      return RecordingModel(session: DebugRecoveryFailure(original.session, error: error), repository: original.repository, development: true, sync: original.syncStatus.service)
     case .otherDevice, .captureGap:
       let request = try await original.session.prepareStart(starter: true)
       let start = try await original.session.execute(request)
@@ -27,7 +38,7 @@ extension AppBootstrap {
       if scenario == .otherDevice {
         let namespace = await original.repository.databaseNamespace()
         let other = MatchSession(store: original.repository, deviceIdentity: DebugOtherIdentity(), clock: SystemSessionClock(), ids: UUIDSessionIDFactory(), permits: DevelopmentStartPermitProvider(), workout: UnavailableWorkoutGateway(), environment: .development(databaseNamespace: namespace))
-        return RecordingModel(session: other, repository: original.repository, development: true)
+        return RecordingModel(session: other, repository: original.repository, development: true, sync: original.syncStatus.service)
       }
       let s = try await original.repository.snapshotV2(matchID: request.matchID)
       let descriptor = s.business.descriptor

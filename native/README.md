@@ -44,3 +44,14 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHON
 `com.example.footballrecord` 与 `com.example.footballrecord.watchapp` 是本地开发占位 Bundle ID，尚不代表注册。009 未加 HealthKit/真实定位 entitlement，也未连接008。010将准备设备集成候选；真实采集相关实现须经对应真机验收后才进入 `dev`，不以 SDK/模拟器或 fake 代替真实授权、锁屏保存、GPS、后台和恢复证据。
 
 用户连接配对 iPhone / Watch 后，在 Xcode 登录本人 Apple 账号、为两个 target 配置所属 Team、App ID 和签名，设备解锁并信任 Mac，按系统提示开启开发者模式。正式 Bundle ID 同时更新两 target 与 `WKCompanionAppBundleIdentifier`。账号授权、Team 归属和真机签名由用户条件决定，无签名构建不证明设备安装或付费分发资格。
+
+
+## M3 同步状态（NATIVE-017）
+
+默认 App 使用同一个 SQLiteSessionRepository facade 创建 MatchSession 与 MatchSyncService。生产信任、传输和采集仍为 unavailable，开赛许可仍不可用。AppBootstrap.composition 返回同一 repository/session/sync/model，供独立集成模块注入适配器；生产模式忽略注入的开发 trust，不绕过 M4 开赛许可。替换装配前必须 await 旧 model.shutdown()。
+
+记录页面区分本机已保存、待传/等待对端持久确认、对端已保存、同步错误、云未接通、后台待终结。读库错误清除旧的成功结论与计数；ACK 不增加记录反馈、不释放后台锁、不把 endedPendingSync 改为 completed。同步重试不改业务时钟、事件或持久退避预算。
+
+Debug UI 参数 `--ui-scenario sync-pending|sync-retry|sync-saved|sync-terminal` 使用两个实际隔离的本机 SQLite 和稳定 identity 文件；`--ui-dataset` 相同则重开同一组。持续显示开发模拟锁/开发配对；这是本机 fake transport 协议演练，不能证明真实 WatchConnectivity 通信。原 `other-device` 是同库只读观察情景，不能作为双库证据。
+
+UI 验证仍使用实际已存在 simulator UDID；可通过 `NATIVE_UI_TEST_FILTER=FootballRecord-iOS-UITests/NativeRecordingUITests/testPersistentSyncPendingRetryAndPeerSaved`（Watch 对应 target）执行定点复验。最低 iOS17/watchOS10 仅编译，当前 iOS27/watchOS27 模拟器不替代最低系统运行、真人 VoiceOver、触觉或真机验收。

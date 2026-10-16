@@ -75,4 +75,28 @@ public struct RecordingIssueView: View {
     }
   }
 }
+/// Local commit, peer acknowledgement and future cloud/backend states remain distinct.
+public struct SyncStatusView: View {
+  let model: RecordingModel
+  let terminal: Bool
+  let compact: Bool
+  public init(model: RecordingModel, terminal: Bool, compact: Bool = false) { self.model = model; self.terminal = terminal; self.compact = compact }
+  public var body: some View {
+    let status = model.syncStatus.projection(terminal: terminal)
+    VStack(alignment: .leading, spacing: compact ? 3 : 8) {
+      Label("本机已保存", systemImage: "checkmark.circle").accessibilityIdentifier("sync-local-saved")
+      Text(status.peer).accessibilityIdentifier("sync-peer-state")
+      if let count = status.pendingCount, count > 0 { Text("待确认 \(count) 项").accessibilityIdentifier("sync-pending-count") }
+      if let issue = status.issue { Text(issue).foregroundStyle(.orange).accessibilityIdentifier("sync-issue") }
+      Text(status.cloud).foregroundStyle(.secondary).accessibilityIdentifier("sync-cloud-state")
+      if let backend = status.backend { Text(backend).accessibilityIdentifier("sync-backend-state") }
+      if model.developmentPair { Text("开发配对 · 本机协议演练").foregroundStyle(.secondary).accessibilityIdentifier("development-pair-marker") }
+      if !status.peerPersisted {
+        Button("重试同步") { Task { await model.syncStatus.retry() } }
+          .frame(minHeight: 44).disabled(model.syncStatus.retrying).accessibilityIdentifier("retry-sync")
+      }
+    }.font(compact ? .caption2 : .caption).frame(maxWidth: .infinity, alignment: .leading)
+      .accessibilityElement(children: .contain).accessibilityIdentifier("sync-status")
+  }
+}
 #endif

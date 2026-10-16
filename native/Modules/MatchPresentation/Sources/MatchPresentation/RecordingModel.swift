@@ -23,30 +23,40 @@ extension MatchSession: SessionCommanding {}
   public private(set) var history: [SessionSnapshot] = []
   public var metrics = LiveMetrics()
   public let development: Bool
+  public let developmentPair: Bool
+  public let syncStatus: SyncStatusModel
   let session: any SessionCommanding
   let repository: any SessionRepository
-  public init(session: any SessionCommanding, repository: any SessionRepository, development: Bool) {
+  public init(session: any SessionCommanding, repository: any SessionRepository, development: Bool, sync: (any SyncStatusServing)? = nil, developmentPair: Bool = false) {
     self.session = session; self.repository = repository; self.development = development
+    self.developmentPair = developmentPair; syncStatus = SyncStatusModel(service: sync)
   }
   @ObservationIgnored private var observation: Task<Void, Never>?
   @ObservationIgnored private var observedMatch: String?
+  @ObservationIgnored private var lifecycle = UUID()
+  @ObservationIgnored private var stopped = false
   @ObservationIgnored private var acknowledged = Set<String>()
   public var canRecord: Bool {
-    guard let snapshot else { return false }
+    guard !stopped, let snapshot else { return false }
     return !busy && !readOnly && pendingRequest == nil && [.running, .paused].contains(snapshot.replay.state)
   }
   public func load() async {
-    guard !busy else { return }; busy = true; defer { busy = false }
+    guard !busy, !stopped else { return }; busy = true; defer { busy = false }
+    let lifetime = lifecycle
+    await syncStatus.start()
     do {
       try await refreshHistory()
       var recoveredIssue: String? = readOnly ? nil : issue
-      switch try await session.recover() {
+      let recovery = try await session.recover()
+      guard lifecycle == lifetime, !stopped else { return }
+      switch recovery {
       case .none:
         // An ended match with an unreleased lock still owns this installation's record screen.
         if let held = history.first(where: { $0.store.business.descriptor.backendLockState != .releasedConfirmed }) { accept(held) }
       case .active(let value): accept(value)
       case .intentAwaitingPermit(let intent):
         let value = try await session.snapshot(matchID: intent.matchID)
+        guard lifecycle == lifetime, !stopped else { return }
         accept(value)
         if pendingRequest == nil {
           pendingRequest = try .start(intent: intent, starter: value.store.business.descriptor.starter)
@@ -60,6 +70,7 @@ extension MatchSession: SessionCommanding {}
       readOnly = false
       issue = recoveredIssue
     } catch {
+      guard lifecycle == lifetime, !stopped else { return }
       issue = Self.message(error)
       readOnly = true
       // Only a unique candidate may be displayed; never pick one from an ambiguous set.
@@ -115,16 +126,19 @@ extension MatchSession: SessionCommanding {}
     issue = Self.message(error)
   }
   private func acknowledge(_ result: SessionReceipt) {
+    guard !stopped else { return }
     accept(result.snapshot); pendingRequest = nil; issue = nil
     if acknowledged.insert(result.receipt.commandID).inserted { feedbackCount += 1 }
-    Task { try? await refreshHistory() }
+    Task { try? await refreshHistory(); await syncStatus.wake() }
   }
   func accept(_ value: SessionSnapshot) {
+    guard !stopped else { return }
     if let snapshot, snapshot.replay.matchID == value.replay.matchID,
        snapshot.store.business.generation > value.store.business.generation { return }
     snapshot = value
     guard observedMatch != value.replay.matchID else { return }
     observation?.cancel(); observedMatch = value.replay.matchID
+    syncStatus.observe(matchID: value.replay.matchID)
     let session = session; let id = value.replay.matchID
     observation = Task { [weak self] in
       let stream = await session.updates(matchID: id)
@@ -133,6 +147,11 @@ extension MatchSession: SessionCommanding {}
         self?.accept(next)
       }
     }
+  }
+  public func shutdown() async {
+    stopped = true; lifecycle = UUID(); readOnly = true
+    observation?.cancel(); observation = nil; observedMatch = nil
+    await syncStatus.shutdown()
   }
   private func refreshHistory() async throws {
     var values: [SessionSnapshot] = []

@@ -2,12 +2,32 @@ import Foundation
 import MatchCore
 import MatchStore
 import MatchSession
+import MatchSync
+
+/// Integration-only composition. All four objects share one repository actor/connection;
+/// callers inject adapters rather than opening another repository or Session.
+@MainActor public struct AppComposition {
+  public let repository: SQLiteSessionRepository
+  public let session: MatchSession
+  public let sync: MatchSyncService
+  public let model: RecordingModel
+}
 
 public enum AppBootstrap {
+  @MainActor public static func composition(databaseNamespace: String = SQLiteSessionRepository.productionNamespace, development: Bool = false, workout: any WorkoutGateway = UnavailableWorkoutGateway(), transport: any SyncTransport = UnavailableSyncTransport(), trust: any PeerTrustProvider = UnavailablePeerTrustProvider(), rootDirectory: URL? = nil) throws -> AppComposition {
+    guard development ? databaseNamespace != SQLiteSessionRepository.productionNamespace : databaseNamespace == SQLiteSessionRepository.productionNamespace else { throw SessionError.invalidRequest }
+    #if !DEBUG
+    guard !development else { throw SessionError.invalidRequest }
+    #endif
+    return try build(namespace: databaseNamespace, development: development, workout: workout, transport: transport, trust: trust, rootDirectory: rootDirectory)
+  }
   @MainActor public static func production(workout: any WorkoutGateway = UnavailableWorkoutGateway()) throws -> RecordingModel {
     try make(namespace: SQLiteSessionRepository.productionNamespace, development: false, workout: workout)
   }
   @MainActor static func make(namespace: String, development: Bool, failFirstScore: Bool = false, fixedClock: Bool = false, workout: any WorkoutGateway = UnavailableWorkoutGateway(), rootDirectory: URL? = nil) throws -> RecordingModel {
+    try build(namespace: namespace, development: development, failFirstScore: failFirstScore, fixedClock: fixedClock, workout: workout, rootDirectory: rootDirectory).model
+  }
+  @MainActor private static func build(namespace: String, development: Bool, failFirstScore: Bool = false, fixedClock: Bool = false, workout: any WorkoutGateway = UnavailableWorkoutGateway(), transport: any SyncTransport = UnavailableSyncTransport(), trust: any PeerTrustProvider = UnavailablePeerTrustProvider(), rootDirectory: URL? = nil) throws -> AppComposition {
     let support = try rootDirectory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("football-record", isDirectory: true)
     let repository = try SQLiteSessionRepository(rootDirectory: support, databaseNamespace: namespace)
     let identity = PersistentDeviceIdentityProvider(url: support.appendingPathComponent(namespace).appendingPathComponent("device.identity"), repository: repository)
@@ -26,7 +46,11 @@ public enum AppBootstrap {
     if development && fixedClock { clock = DebugFrozenClock(value: Date()) }
     #endif
     let session = MatchSession(store: store, deviceIdentity: identity, clock: clock, ids: UUIDSessionIDFactory(), permits: permits, workout: workout, environment: environment)
-    return RecordingModel(session: session, repository: store, development: development)
+    // A caller-supplied transport does not establish production trust.
+    let effectiveTrust: any PeerTrustProvider = development ? trust : UnavailablePeerTrustProvider()
+    let sync = MatchSyncService(repository: store, inbound: session, transport: transport, trust: effectiveTrust)
+    let model = RecordingModel(session: session, repository: store, development: development, sync: sync)
+    return AppComposition(repository: repository, session: session, sync: sync, model: model)
   }
   #if DEBUG
   @MainActor public static func development(dataset: String, failFirstScore: Bool = false, fixedClock: Bool = false, workout: any WorkoutGateway = UnavailableWorkoutGateway()) throws -> RecordingModel {
