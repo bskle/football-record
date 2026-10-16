@@ -1,6 +1,6 @@
 # Git 与多代理工作树治理方案
 
-状态快照：2026-10-16（上海）M1 与 M2 的 006 / 007 / 011 / 009 已双审集成并同步 `dev`，双端 App 已接入原生记录页面；008 已编译双审留任务分支，010 正在独立树准备设备包，真实采集验收与原生发布均未完成。用户已接受 public 仓库；三条永久分支与原型标签保留。当前治理记录见 [GIT-003](native/tasks/GIT-003.md)，M1 历史快照见 [GIT-002](native/tasks/GIT-002.md)，首次访问与同步记录见 [GIT-001](native/tasks/GIT-001.md)，bootstrap 初始记录见 [NATIVE-000](native/tasks/NATIVE-000.md)。原生开发安排见[原生开发母计划](superpowers/plans/2026-10-15-native-development.md)，执行约束见[根 AGENTS.md](../AGENTS.md)。
+状态快照：2026-10-16（上海），M1、M2的006/007/011/009/012与M3的013/014/015/017已双审集成；本次核对时已验证并同步的产品组合为 `dev=origin/dev=b0070c90d91bf9d7741b7a7ed24165f1ad27383d`；实际merge单轮252宿主/8最低SDK产品/2无签名App及两端各1项UI spot通过。后续本批纯文档合并会推进实际dev/origin HEAD，以Git现场为准。008/010/016候选及已含019测试兼容修复的018本机final均已双审，仍保留设备门槛，真实采集 / WC通信及原生发布未验收。当前治理记录见[GIT-004](native/tasks/GIT-004.md)；[GIT-003](native/tasks/GIT-003.md)、[GIT-002](native/tasks/GIT-002.md)、[GIT-001](native/tasks/GIT-001.md)及[NATIVE-000](native/tasks/NATIVE-000.md)保留各时点快照。原生安排见[母计划](superpowers/plans/2026-10-15-native-development.md)，约束见[根AGENTS](../AGENTS.md)。
 
 ## 1. 事实基线与规则优先级
 
@@ -8,7 +8,7 @@
 
 历史执行快照（2026-10-16，GIT-002 定稿前）：`main`、`release` 与 annotated tag `prototype-baseline-20261015` 保留上述浏览器基线；规划治理、工程基础、事件引擎、SQLite 仓储与采集片段合同均经两位非作者审阅进入 `dev`。最新组合 SHA 为 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`，70 项测试及四项无签名构建通过；具体任务 head 与合并见 GIT-002。`origin = https://github.com/bskle/football-record.git`；用户已明确接受 public，覆盖先前 private 意向。主代理已核对 GitHub CLI 登录及 `PUBLIC` / `ADMIN`，首次原子推送三条长期分支与原型标签成功，随后远端 `dev` 已同步并核对为上述组合 SHA；默认分支为 `main`。正式名称为球历 / `football-record`。旧任务卡保留当时记录，后续以实际 Git 和任务台账为准。
 
-登记时执行事实（2026-10-16，GIT-003）：`dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`，此为已验证产品组合，后续纯文档合并会推进分支 HEAD；006 采集事务、007 共享会话、011 未创建采集收尾与 009 双端记录 UI 均已双审合入。主代理在实际 merge 复验 158 项宿主测试、6 项 SDK 产品、2 个 App 无签名构建及两端各 1 项 XCUI；009 完整模拟器证据为两端各 7 项。008 最终已审 head `6e86e8f1ac647b02b8f1ef407226a10398c5d998` 尚未入 `dev`；010 仅在临时树普通合入它并准备接线，真机门槛保留。005 / 006 / 007 / 011 已实际归档并安全删分支；旧 002 / 003 / 004 / GIT-002 与 009 仍 queued / active，分支保留，不把请求当清理成功。
+历史登记事实（2026-10-16，GIT-003）：`dev=origin/dev=2e1f9c42f4398a50b66765a0f37f90ced95a7554`；006/007/011/009已双审合入，实际merge158宿主/6SDK/2无签名App及两端各1项XCUI。008/010与归档状态保留当时记录，不代表当前交付；当前完整heads、252单轮结果、018候选和生命周期见GIT-004。
 
 当前 `main` 是浏览器原型基线，还不是已发布的 iPhone / Apple Watch 产品。建立分支不代表原生实现、构建、真机验证或发布已经完成。
 
@@ -28,7 +28,7 @@
 
 ## 3. 实际开发前的 bootstrap
 
-以下保留 bootstrap 的执行顺序供核对。2026-10-15 文档已完成双审并以 `2d4616355221af0969e07e9b1f45852449cbb98e` 合入 `dev`，工程基础随后以 `b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入；原文档任务分支与 worktree 已不在活动列表。首次远端同步已在 GIT-001 双审合并后执行。初始任务卡不回写，M1 历史核对见 GIT-002，当前 Git 核对见 GIT-003。
+以下保留 bootstrap 的执行顺序供核对。2026-10-15 文档已完成双审并以 `2d4616355221af0969e07e9b1f45852449cbb98e` 合入 `dev`，工程基础随后以 `b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入；原文档任务分支与 worktree 已不在活动列表。首次远端同步已在 GIT-001 双审合并后执行。初始任务卡不回写，M1历史核对见GIT-002，M2历史核对见GIT-003，当前Git核对见GIT-004。
 
 1. 主代理重新检查 Git 版本、仓库根、HEAD、分支、标签、remote、worktree、暂存区、修改、未跟踪及冲突文件，核对本节基线是否仍成立。发现他人改动时按所有权保留，不能用清理命令消除。
 2. 对基线提交创建不可移动的 annotated tag，建议名为 `prototype-baseline-20261015`，明确记录它只标记浏览器原型。若同名标签存在，验证指向，不覆盖。正式版本才使用 `vX.Y.Z`；原型标签不宣称原生版本已发布。
@@ -174,7 +174,7 @@ Limitations: <未验证项及原因；无则写无>
 
 ## 11. 本地执行边界与未来远程保护
 
-当前 `remote.mode = configured-write-authorized`：`origin = https://github.com/bskle/football-record.git` 为用户已接受的 public 仓库。用户最新“公开就公开暂时没事”覆盖此前 private 意向；无需等待可见性改为 private。主代理已在可访问系统 keyring 与网络的上下文核对 `gh auth status`（已登录、HTTPS）及 `gh repo view`（`PUBLIC` / `ADMIN`），并成功执行 `gh auth setup-git --hostname github.com`。受限 sandbox 无法访问系统凭据或网络时的认证失败不能覆盖这次有效核对。2026-10-15 已按授权以 `git push --atomic -u origin main dev release refs/tags/prototype-baseline-20261015` 完成首次同步并核对远端引用；截至 2026-10-16 本次登记快照，远端 `dev` 已同步并核对到 M2 记录 UI 实际合并 `2e1f9c42f4398a50b66765a0f37f90ced95a7554`，远端仅三条长期分支，默认分支为 `main`。不自动推送其他临时分支或标签。代码同步不代表签名、真机验收、TestFlight / App Store 分发或原生发布完成；PR、CI 与服务端保护规则尚未配置。
+当前 `remote.mode = configured-write-authorized`：`origin = https://github.com/bskle/football-record.git` 为用户已接受的 public 仓库。用户最新“公开就公开暂时没事”覆盖此前 private 意向；无需等待可见性改为 private。主代理已在可访问系统 keyring 与网络的上下文核对 `gh auth status`（已登录、HTTPS）及 `gh repo view`（`PUBLIC` / `ADMIN`），并成功执行 `gh auth setup-git --hostname github.com`。受限 sandbox 无法访问系统凭据或网络时的认证失败不能覆盖这次有效核对。2026-10-15 已按授权以 `git push --atomic -u origin main dev release refs/tags/prototype-baseline-20261015` 完成首次同步并核对远端引用；GIT-003历史登记的远端 `dev` 为M2记录UI合并 `2e1f9c42f4398a50b66765a0f37f90ced95a7554`；GIT-004核对时已同步并核对到017实际合并 `b0070c90d91bf9d7741b7a7ed24165f1ad27383d`，远端仅三条长期分支，默认分支为 `main`。不自动推送其他临时分支或标签。代码同步不代表签名、真机验收、TestFlight / App Store 分发或原生发布完成；PR、CI 与服务端保护规则尚未配置。
 
 首次推送前核对实际 remote、待推引用及预期 SHA，推送后核对远端结果；后续交付仍须重新识别 upstream、默认分支、保护规则与写权限。当前已核对的登录及管理员权限不证明保护或 CI 已配置。三条长期分支应保护禁止直接推送、删除和历史改写；`dev` 要求双审与相关自动检查，`release` 还要求版本候选验收，`main` 要求发布证据并遵守服务端既有审批规则。真机验证无法自动化的部分以绑定 SHA 的记录作为必需审阅证据。provider 不支持某项强制规则时写明限制，由主代理在流程中执行，不能宣称服务端已经强制。
 
