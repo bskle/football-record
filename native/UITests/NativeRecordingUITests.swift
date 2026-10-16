@@ -14,6 +14,15 @@ import XCTest
   }
   private func reveal(_ id: String, in app: XCUIApplication) -> XCUIElement {
     let alertLabels = ["cancel-end": "继续比赛", "confirm-end": "结束并保存"]
+    #if os(watchOS)
+    if let label = alertLabels[id] {
+      // The native Watch confirmation exposes an accessible table row; its nested Button
+      // is printed in snapshots but skipped by XCUI's optimized firstMatch button search.
+      let row = app.cells.matching(NSPredicate(format: "label == %@", label)).element
+      XCTAssertTrue(row.waitForExistence(timeout: 5), label)
+      return row
+    }
+    #endif
     let identified = app.buttons[id].firstMatch
     let element = identified.exists ? identified : app.buttons[alertLabels[id] ?? id].firstMatch
     let modal = ["choose-starter", "choose-substitute", "confirm-start", "cancel-start", "pause-resume", "request-end", "close-controls", "confirm-end", "cancel-end"].contains(id)
