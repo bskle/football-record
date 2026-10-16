@@ -12,7 +12,7 @@
 
 Author `/root/m2_capture_journal`; reviewers `/root/m2_review` and `/root`; integration by `/root` only. Base and target dev at creation: `391228dc556afc716dfc3100d6beb78b2ba6c0e0`. Branch `feat/capture-store-v2`; managed attachment `01a14241-49de-72b3-9f43-a68bd28d8da6`, createdAt `1792112937`; worktree `/Users/liam/.codex/worktrees/capture-store-v2/20260830_足球记录`; actual HEAD verified equal to base and clean before writing.
 
-Allowed: `native/Packages/MatchCore/**`, necessary `scripts/native/verify.sh`, this plan, NATIVE-006 task and validation records. No Apps, Xcode, capabilities, HealthKit, transport, peers or shared contracts. See [frozen M2 contract](../../native/contracts/m2-session-capture.md), sections 1, 2, 4.
+Allowed: `native/Packages/MatchCore/**`, necessary `scripts/native/verify.sh`, this plan, NATIVE-006 task and validation records. No Apps, Xcode, capabilities, HealthKit, transport or peers. Root additionally authorized the reviewed lookup/failure interface revision in `docs/native/contracts/m2-session-capture.md`. See [frozen M2 contract](../../native/contracts/m2-session-capture.md), sections 1, 2, 4.
 
 ## Task 1: establish immutable v1 fixture and red tests
 
@@ -60,3 +60,11 @@ Files: CapturePersistence.swift, MatchStore.swift, LegacyCompatibilityTests.swif
 - [ ] Commit logical implementation and compatibility work using Conventional Commits without scope. Stop writing at final head for two independent reviews; do not merge, push or archive.
 
 Device validation is not applicable to this pure transaction layer. SDK builds are compile evidence only; real capture, transport, production locks and full-save adapters remain outside this task. Contract deviations require root review before implementation.
+
+## Approved contract additions during execution
+
+Root and m2_review approved persisting and returning the original request via `CommittedCommandV2` / read-only `committedCommandV2(commandID:)`, including index/ID/hash and full receipt checks. This supports 007 retries after later facts/generation changes. The shared SessionRepository contract gains its async signature and规范start stable-ID rules (007 implementation ownership).
+
+The same two reviewers approved optional `WorkoutObservation.failure` (nil omitted), preserving actual Workout outcome. Route degradation can settle; stopped+captureFailed remains needsReconciliation pending save proof. No real Workout is relabeled notCreated. The SessionSnapshot optional failure is contract-only here and implemented by 007. These are authorized narrow additions; no other scope deviation.
+
+Correctness clarifications confirmed by root during implementation: a linked outcome requires an existing or same-transaction real CaptureSegment with the same binding/Workout UUID; savedAwaitingLink cannot regress to notCreated/unknown/failed; history is checked against the original canonical command request, not only a recomputable checksum; stored confirmation IDs cannot be rebound to a new event proof/capture digest. No automatic segment or trusted completion evidence is created.

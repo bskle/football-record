@@ -7,6 +7,8 @@ public enum StoreError: Error, Sendable, Equatable {
     case invalidRequest, descriptorConflict, eventConflict, packetConflict, invalidPacket, invalidACK
     case unsupportedSchema(Int64), corruptPayload(table: String, key: String), unresolvedDiagnostics
     case injectedFailure, responseLost, staleCompletionEvidence
+    case captureConflict, invalidCaptureRevision, missingCaptureParent, captureBranch
+    case operationConflict, invalidOperationTransition, staleCaptureEvidence
 }
 
 enum Canonical {
@@ -96,4 +98,5 @@ public struct StoreSnapshot: Sendable {
     }
 }
 
-enum StoreFault: Sendable { case migrationAfterSchema, afterEvents, afterOutbox, beforeCommit, afterCommit }
+enum StoreFault: Sendable { case migrationAfterSchema, migrationBeforeV2Version, migrationAfterV2Version
+    case afterEvents, afterCaptureRevisions, afterCaptureOperations, afterOutbox, afterReceipt, beforeCommit, afterCommit }
