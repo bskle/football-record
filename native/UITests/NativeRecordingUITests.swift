@@ -119,6 +119,7 @@ import XCTest
   func testPhoneTabsAndLargeText() {
     let app = launch(["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
     start(app)
+    XCTAssertLessThan(app.staticTexts["match-score"].frame.height, 70, "Score must remain on one line")
     for id in ["match-clock", "field-clock"] {
       let clock = app.staticTexts[id]
       XCTAssertLessThan(clock.frame.height, 100, "Digits must remain on one line at accessibility size")

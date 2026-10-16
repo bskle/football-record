@@ -38,7 +38,9 @@ struct PhoneMatchView: View {
               HStack { Label(p.status, systemImage: p.paused ? "pause.circle" : p.terminal ? "clock.badge.checkmark" : "record.circle").font(.subheadline).accessibilityIdentifier("match-status"); Spacer(); Text(p.onField ? "场上" : "场下").font(.subheadline.bold()) }
               VStack(spacing: 12) {
                 HStack { Text("本场比分"); Spacer(); Text("球历") }.font(.caption).foregroundStyle(.white.opacity(0.7))
-                HStack(alignment: .firstTextBaseline) { Text("我方"); Spacer(); Text(p.score).font(.system(size: 48, weight: .bold, design: .rounded)).monospacedDigit().minimumScaleFactor(0.7).accessibilityIdentifier("match-score"); Spacer(); Text("对方") }
+                if typeSize.isAccessibilitySize {
+                  VStack(spacing: 8) { score(p); HStack { Text("我方"); Spacer(); Text("对方") }.font(.subheadline) }
+                } else { HStack(alignment: .firstTextBaseline) { Text("我方"); Spacer(); score(p); Spacer(); Text("对方") } }
               }.padding(20).foregroundStyle(.white).background(MatchColors.forest, in: RoundedRectangle(cornerRadius: 18))
               Group {
                 if typeSize.isAccessibilitySize {
@@ -112,6 +114,7 @@ struct PhoneMatchView: View {
     }.background(paper)
   }
   private func placeholder(_ title: String, _ text: String) -> some View { ScrollView { VStack(alignment: .leading, spacing: 20) { Text(title).font(.largeTitle.bold()); Text(text).foregroundStyle(.secondary); if model.development { DevelopmentMarker() } }.frame(maxWidth: .infinity, alignment: .leading).padding(20) }.background(paper) }
+  private func score(_ p: MatchProjection) -> some View { Text(p.score).font(.system(size: 48, weight: .bold, design: .rounded)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7).accessibilityLabel("本场比分 \(p.score)").accessibilityIdentifier("match-score") }
   private func clock(_ title: String, _ value: String, _ id: String) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.title.bold()).monospacedDigit().lineLimit(1).fixedSize(horizontal: true, vertical: false).accessibilityIdentifier(id) } }
   private func metric(_ title: String, _ value: String) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.headline).monospacedDigit() }.frame(maxWidth: .infinity, alignment: .leading).accessibilityElement(children: .combine) }
 }
