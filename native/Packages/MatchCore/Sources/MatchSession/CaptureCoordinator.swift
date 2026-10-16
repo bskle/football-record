@@ -252,8 +252,18 @@ extension MatchSession {
     // Ordinary settled-operation idempotency is unchanged. A late positive fact that
     // contradicts persisted absence must reach Store's raw-byte quarantine, not vanish.
     guard current.state == .needsReconciliation || contradictsAbsence else { return }
-    let normalized = try normalized(observation, operation: operation, current: current)
-    if normalized == current.observation { return }
+    let normalized: WorkoutObservation
+    if contradictsAbsence {
+      guard observation.operationID == operation.id, observation.binding == operation.binding,
+        observation.externalToken == operation.externalToken
+      else { throw CaptureValueError.invalidObservation }
+      // Preserve the gateway value exactly for Store's contradiction quarantine. Normal
+      // lifecycle/failure normalization would replace the evidence we must retain.
+      normalized = observation
+    } else {
+      normalized = try self.normalized(observation, operation: operation, current: current)
+      if normalized == current.observation { return }
+    }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
     let digest = SHA256.hash(data: try encoder.encode(normalized)).map {

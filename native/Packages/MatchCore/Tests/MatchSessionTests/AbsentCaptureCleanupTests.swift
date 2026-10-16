@@ -144,4 +144,58 @@ final class AbsentCaptureCleanupSessionTests: XCTestCase, @unchecked Sendable {
     XCTAssertFalse(diagnostics.contains { $0.severity == .blocking })
   }
 
+  func testLateFinishPositiveRetainsGatewayBytesBeforeNormalization() async throws {
+    for cancelled in [false, true] {
+      let h = try Harness()
+      await h.gateway.configure(outcome: .notCreated(.unavailable))
+      let start = try await h.session.prepareStart(starter: true)
+      _ = try await h.session.execute(start)
+      try await h.waitCaptureSettled(start.matchID)
+      try await eventually("initial driver must retire before staging the late finish") {
+        await h.session.captureDrivers.isEmpty
+      }
+      var snapshot = try await h.repo.snapshotV2(matchID: start.matchID)
+      let original = try XCTUnwrap(snapshot.captureOperations.first?.operation)
+      let finish = try CaptureOperation(
+        id: "late-finish", binding: original.binding,
+        associatedCommandID: "create-late-finish", action: .finish, requestedAt: h.clock.now(),
+        externalToken: original.id)
+      _ = try await h.repo.commitV2(
+        h.session.makeCommit(
+          command: "create-late-finish", generation: snapshot.business.generation,
+          descriptor: snapshot.business.descriptor, operations: [finish]))
+      snapshot = try await h.repo.snapshotV2(matchID: start.matchID)
+      let marker = try CaptureOperationUpdate(
+        operationID: finish.id, expectedState: .pending, state: .needsReconciliation,
+        observation: nil)
+      _ = try await h.repo.commitV2(
+        h.session.makeCommit(
+          command: "mark-late-finish", generation: snapshot.business.generation,
+          descriptor: snapshot.business.descriptor, updates: [marker]))
+      if cancelled { _ = try await h.session.planDispatch(finish, match: start.matchID) }
+      let before = try await h.repo.snapshotV2(matchID: start.matchID)
+      XCTAssertEqual(
+        before.captureOperations.last?.state, cancelled ? .cancelled : .needsReconciliation)
+      let observation = try WorkoutObservation(
+        operationID: finish.id, binding: finish.binding, externalToken: original.id,
+        observedAt: h.clock.now().addingTimeInterval(2), outcome: .running,
+        window: CaptureWindow(start: h.clock.now(), end: nil), failure: nil)
+      do {
+        try await h.session.saveObservation(observation, operation: finish)
+        XCTFail("contradictory physical fact")
+      } catch let error as StoreError { XCTAssertEqual(error, .captureConflict) }
+      let diagnostics = try await h.repo.store.diagnostics(matchID: start.matchID)
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys]
+      let raw = try encoder.encode(observation)
+      XCTAssertTrue(
+        diagnostics.contains { $0.rawBytes == raw && $0.severity == .blocking },
+        "gateway bytes must survive unchanged")
+      do {
+        _ = try await h.session.planDispatch(finish, match: start.matchID)
+        XCTFail("known contradiction blocks absence cancellation")
+      } catch {}
+    }
+  }
+
 }
