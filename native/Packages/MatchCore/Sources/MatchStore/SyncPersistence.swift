@@ -310,6 +310,7 @@ extension MatchStore {
                     }
                     if let saved = collisions.first {
                         guard collisions.count == 1, saved.packetBytes == bytes, saved.peer.sameBinding(as: peer) else { throw StoreError.packetConflict }
+                        try reactivateSyncACKsLocked(messageID: saved.receipt.ack.body.ackID)
                         return saved.receipt
                     }
                     // Also reject globally reused packet or idempotency identities from another match.
@@ -372,7 +373,9 @@ extension MatchStore {
                 let inboxes = try loadSyncInboxes(matchID), progress = try verifySyncProgress(matchID, inboxes: inboxes)
                 let routed = Set(routes.map { $0.receipt.outboxID }), unrouted = items.filter { !routed.contains($0.id) }
                 let diagnostics = try diagnostics(matchID: matchID)
-                let issue: SyncIssue? = diagnostics.contains { $0.severity == .blocking } ? .blockedIntegrity : diagnostics.contains { $0.code == "sync-ancestry-incomplete" && unrouted.map(\.id).contains($0.key) } ? .ancestryIncomplete : nil
+                let acknowledged = try Set(acknowledgements.map { try JSONDecoder().decode(DurableACKV2.self, from: $0.raw).body.packetID })
+                let deliveryIssue = try syncDeliveryIssue(matchID, acknowledgedPacketIDs: acknowledged)
+                let issue: SyncIssue? = diagnostics.contains { $0.severity == .blocking } ? .blockedIntegrity : diagnostics.contains { $0.code == "sync-ancestry-incomplete" && unrouted.map(\.id).contains($0.key) } ? .ancestryIncomplete : deliveryIssue
                 return try SyncState(matchID: matchID, unroutedCount: unrouted.count, pendingACKCount: routes.count - acknowledgements.count, receivedGapCount: progress.reduce(0) { $0 + $1.gaps.count }, lastPeerACKAt: acknowledgements.map(\.acceptedAt).max(), issue: issue)
             }
         }

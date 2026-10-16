@@ -11,6 +11,22 @@ actor FaultRepository: SessionRepository {
   init(_ r: SQLiteSessionRepository) { underlying = r }
   func fault(_ name: String) { nextFault = name }
   func failNextRead() { failRead = true }
+  func syncRepositoryIdentity() async -> SyncRepositoryIdentity { await underlying.syncRepositoryIdentity() }
+  func unroutedBusinessOutboxV3(matchID: String) async throws -> [BusinessOutboxItem] { try await underlying.unroutedBusinessOutboxV3(matchID: matchID) }
+  func routeBusinessOutboxV3(outboxID: String, peer: PeerAuthorization, now: Date) async throws -> RouteReceiptV3 { try await underlying.routeBusinessOutboxV3(outboxID: outboxID, peer: peer, now: now) }
+  func pendingPacketsV2(matchID: String) async throws -> [MatchPacketV2] { try await underlying.pendingPacketsV2(matchID: matchID) }
+  func receiveV2(_ bytes: Data, peer: PeerAuthorization, expectedMatchID: String, now: Date) async throws -> InboundReceiptV3 { try await underlying.receiveV2(bytes, peer: peer, expectedMatchID: expectedMatchID, now: now) }
+  func acknowledgeV2(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws { try await underlying.acknowledgeV2(bytes, peer: peer, now: now) }
+  func syncStateV3(matchID: String) async throws -> SyncState { try await underlying.syncStateV3(matchID: matchID) }
+  func ensureSyncDeliveriesV3(matchID: String) async throws { try await underlying.ensureSyncDeliveriesV3(matchID: matchID) }
+  func dueSyncDeliveriesV3(now: Date, limit: Int) async throws -> [SyncDeliveryRecord] { try await underlying.dueSyncDeliveriesV3(now: now, limit: limit) }
+  func recordSyncAttemptV3(deliveryID: String, nextAttemptAt: Date, issue: SyncIssue?, now: Date) async throws { try await underlying.recordSyncAttemptV3(deliveryID: deliveryID, nextAttemptAt: nextAttemptAt, issue: issue, now: now) }
+  func validateSyncDeliveryV3(deliveryID: String, peer: PeerAuthorization, now: Date) async throws { try await underlying.validateSyncDeliveryV3(deliveryID: deliveryID, peer: peer, now: now) }
+  func reactivateSyncACKsV3() async throws { try await underlying.reactivateSyncACKsV3() }
+  func acceptSyncFragmentV3(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws -> FragmentAssemblyResult { try await underlying.acceptSyncFragmentV3(bytes, peer: peer, now: now) }
+  func pendingSyncAssembliesV3(peer: PeerAuthorization, now: Date) async throws -> [FragmentAssemblyResult] { try await underlying.pendingSyncAssembliesV3(peer: peer, now: now) }
+  func consumeSyncAssemblyV3(messageID: String, wholeChecksum: String) async throws { try await underlying.consumeSyncAssemblyV3(messageID: messageID, wholeChecksum: wholeChecksum) }
+  func expireSyncAssembliesV3(now: Date) async throws { try await underlying.expireSyncAssembliesV3(now: now) }
   func databaseNamespace() async -> String { await underlying.databaseNamespace() }
   func matchIDs() async throws -> [String] {
     if failRead { failRead = false; throw StoreError.injectedFailure }

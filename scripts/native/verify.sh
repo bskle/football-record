@@ -28,6 +28,14 @@ xcrun swift build --package-path "$package" --target MatchSession \
     --triple arm64-apple-watchos10.0-simulator --sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" \
     --scratch-path "$build_root/MatchSession-Watch" \
     2>&1 | tee "$log_dir/session-watch-build.log"
+xcrun swift build --package-path "$package" --target MatchSync \
+    --triple arm64-apple-ios17.0-simulator --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+    --scratch-path "$build_root/MatchSync-iOS" \
+    2>&1 | tee "$log_dir/sync-ios-build.log"
+xcrun swift build --package-path "$package" --target MatchSync \
+    --triple arm64-apple-watchos10.0-simulator --sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" \
+    --scratch-path "$build_root/MatchSync-Watch" \
+    2>&1 | tee "$log_dir/sync-watch-build.log"
 presentation="$repo_root/native/Modules/MatchPresentation"
 swift test --package-path "$presentation" --scratch-path "$build_root/PresentationHost" \
     2>&1 | tee "$log_dir/presentation-test.log"

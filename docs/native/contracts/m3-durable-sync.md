@@ -1,6 +1,6 @@
 # M3 持久设备同步合同
 
-状态：NATIVE-013 待双审的冻结合同；以下新增接口尚未实现。实施顺序见 [M3 子计划](../../superpowers/plans/2026-10-16-native-m3.md)，既有事务语义见 [M2 合同](m2-session-capture.md)。最低 iOS 17 / watchOS 10 不变。
+状态：NATIVE-013 冻结设计；014 已合入，015 的已测实际接口增补如下。各任务审阅与集成状态分别见任务卡，不能由接口落地推定已合入。实施顺序见 [M3 子计划](../../superpowers/plans/2026-10-16-native-m3.md)，既有事务语义见 [M2 合同](m2-session-capture.md)。最低 iOS 17 / watchOS 10 不变。
 
 ## 1. 边界与最小方案
 
@@ -90,6 +90,7 @@ public protocol SyncTransport: Sendable {
     func activate() async
     func deliveries() async -> AsyncStream<SyncDelivery>
     func send(_ fragmentBytes: Data, deliveryID: String) async throws
+    func didPersistDelivery(_ transportDeliveryID: String) async
 }
 public struct SyncDelivery: Sendable {
     public let bytes: Data
@@ -124,16 +125,29 @@ public protocol SyncRepository: Sendable {
     func dueSyncDeliveriesV3(now: Date, limit: Int) async throws -> [SyncDeliveryRecord]
     func recordSyncAttemptV3(deliveryID: String, nextAttemptAt: Date,
                              issue: SyncIssue?, now: Date) async throws
+    func validateSyncDeliveryV3(deliveryID: String, peer: PeerAuthorization,
+                                 now: Date) async throws
+    func reactivateSyncACKsV3() async throws
     func acceptSyncFragmentV3(_ bytes: Data, peer: PeerAuthorization,
                               now: Date) async throws -> FragmentAssemblyResult
+    func pendingSyncAssembliesV3(peer: PeerAuthorization,
+                                 now: Date) async throws -> [FragmentAssemblyResult]
     func consumeSyncAssemblyV3(messageID: String, wholeChecksum: String) async throws
     func expireSyncAssembliesV3(now: Date) async throws
 }
 ```
 
-`SyncDeliveryRecord` 为 `deliveryID, messageID, matchID, sourceDeviceID, targetDeviceID: String; kind: SyncMessageKind; fragmentBytes: Data; attemptCount: Int; nextAttemptAt: Date`。`SyncMessageKind` 只有 packet/ack；`FragmentAssemblyResult` 为 `.incomplete` 或 `.complete(messageID: String, kind: SyncMessageKind, matchID: String, wholeChecksum: String, bytes: Data)`。`ensureSyncDeliveriesV3` 仅从已验证的 route/inbox ACK 原字节生成稳定分片和发送计划；不接受任意调用方 payload。`consume` 在成功业务/ACK receipt 后标记已消费，崩溃前未标记会重放原包并再次唤醒 Session。上述值均有完整校验构造器/decoder；`SyncRepositoryIdentity` 和 `SyncDeliveryRecord` 无网络身份权威。
+`SyncDeliveryRecord` 为 `deliveryID, messageID, matchID, sourceDeviceID, targetDeviceID: String; kind: SyncMessageKind; fragmentBytes: Data; attemptCount: Int; nextAttemptAt: Date`。`SyncMessageKind` 只有 packet/ack；`FragmentAssemblyResult` 为 `.incomplete` 或 `.complete(messageID: String, kind: SyncMessageKind, matchID: String, wholeChecksum: String, bytes: Data)`。`ensureSyncDeliveriesV3` 仅从已验证的 route/inbox ACK 原字节生成稳定分片和发送计划；不接受任意调用方 payload。`consume` 先复核成功业务/ACK receipt，再删除已消费的临时组/片段；重复 consume 安全，原 inbox/ACK 审计字节仍保留。完整但未 consume 的消息是持久恢复工作，启动和可重试的普通 wake 会重新经同一 Session 重放，成功后消费；不依赖发送端再送新帧。一个已隔离坏包不阻止其他完整消息处理。上述值均有完整校验构造器/decoder；`SyncRepositoryIdentity` 和 `SyncDeliveryRecord` 无网络身份权威。
 
-015的服务公开入口固定为 `MatchSyncService.init(repository: any SyncRepository, inbound: any SyncInboundCoordinator, transport: any SyncTransport, trust: any PeerTrustProvider, clock: any SyncClock)`、`start() async throws`、`wake() async`、`stop() async`、`state(matchID: String) async throws -> SyncState`、`states(matchID: String) async -> AsyncStream<SyncState>`。`SyncClock: Sendable` 只需 `func now() -> Date`，SystemSyncClock为正式实现；start先校验两端repositoryIdentity相等再激活/恢复调度，stop取消内存loop且保留持久任务，重复start不产生第二loop。states订阅先读持久状态，再送变化通知。
+015的服务公开入口固定为 `MatchSyncService.init(repository: any SyncRepository, inbound: any SyncInboundCoordinator, transport: any SyncTransport, trust: any PeerTrustProvider, clock: any SyncClock)`、`start() async throws`、`wake() async`、`connectionDidActivate() async`、`stop() async`、`state(matchID: String) async throws -> SyncState`、actor 方法 `states(matchID: String) -> AsyncStream<SyncStateUpdate>`（跨 actor 调用须 await）。`SyncClock: Sendable` 只需 `func now() -> Date`，SystemSyncClock为正式实现；start先校验两端repositoryIdentity相等再激活/恢复调度，stop取消内存loop且保留持久任务，重复start不产生第二loop。states订阅先读持久状态，再送变化通知。`SyncStateUpdate: Codable, Sendable, Equatable` 为 `.state(SyncState)` 或 `.unavailable(matchID: String, issue: SyncIssue)`；读取失败明确发 unavailable/blockedIntegrity，不伪造零计数或保留旧成功通知。恢复读取后发新持久 state。
+
+### 015 实际辅助入口与 016/017 交接
+
+- `SQLiteSessionRepository` 在创建时一次生成 instance UUID，identity 的 namespace 来自实际路径配置；每个 Session/coordinator/service 必须共享这个 facade 与其唯一 Store actor。两个实际隔离库使用各自 namespace，不能从 incoming 授权反向配置。facade 对 production 显式传 Store `.production`，其他受限开发 namespace 显式传 `.development(databaseNamespace:)`；正式 trust/transport 默认 unavailable。两处 Presentation wrapper 真实转发底层 identity 和方法，无共同假 identity。
+- `validateSyncDeliveryV3` 复核保存 route/inbox 的原绑定与原分片，不允许新 account/peer/epoch 替换旧目标。`reactivateSyncACKsV3` 保留累计 attemptCount，只重置本轮连续次数与休眠；仅新 start、重复原包或真实 `connectionDidActivate` 使用，普通 timer/wake 不重置八次预算。016 必须只在真实新连接激活时调用 `connectionDidActivate`，它不新增监听器/发送 loop。每次 start/真实激活先标记需要恢复，再做 trust await；信任暂失后普通 wake 可继续恢复。
+- `pendingSyncAssembliesV3(peer:now:)` 只枚举经当前授权重新验证的完整未消费消息。完整组不因 24 小时过去而丢失；期限只清理尚未组装完整的片段。服务 COMMIT 后通知/cleanup 失去结果也保留恢复标记，普通 wake 可再次经同一 Session 处理。
+- `didPersistDelivery` 有无设备影响的默认 no-op；service 仅在 `acceptSyncFragmentV3` 成功返回后、业务 process 前调用。授权失败、SQL/落盘失败、COMMIT 后 responseLost 均不通知；原片已持久的合法重放成功可通知。016 据此仅释放 transport 自有 durable inbox 输入文件。这个通知只证明本机片段持久，不是业务 ACK，不更新发送端 business/outbox 状态。
+- 017 订阅 typed `SyncStateUpdate`；unavailable 表示计数未知，不能从上次 `.state` 保留“对端已保存”结论。真实待重试 delivery 的最后错误在 backoff 和重开后仍从持久记录恢复。
 
 ## 6. Session 串行、通知与重开
 
@@ -145,11 +159,11 @@ public protocol SyncRepository: Sendable {
 
 ## 7. 持久分片、重试和缺口
 
-单个完整 packet 或 ACK canonical 上限 8 MiB。传输 `SyncFragment.Body` 固定 `version=2; kind=packet|ack; messageID; sourceDeviceID; targetDeviceID; matchID; wholeChecksum; totalBytes; index; count; chunkChecksum; payload: Data`，外层 `body, checksum`；index 从 0，chunk 为最多 256 KiB，count≤32，声明长度必须等于重组结果。小于等于 32 KiB 的完整 payload 为单片；更大按 256 KiB 切片。fragmentID 为 messageID/wholeChecksum/index 域 hash，不因重传换 ID。所有头字段和 payload 纳入 fragment checksum，整个 canonical message 校验后再解码业务。
+单个完整 packet 或 ACK canonical 上限 8 MiB。传输 `SyncFragment.Body` 固定 `version=2; kind=packet|ack; messageID; sourceDeviceID; targetDeviceID; matchID; wholeChecksum; totalBytes; index; count; chunkChecksum; payload: Data`，外层 `body, checksum`；index 从 0，chunk 为最多 256 KiB，count≤32，声明长度必须等于重组结果。小于等于 32 KiB 的完整 payload 为单片；更大按 256 KiB 切片。fragmentID 为 messageID/wholeChecksum/index 域 hash，不因重传换 ID。所有头字段和 payload 纳入 fragment checksum；wholeChecksum 明确为完整 canonical message 原 bytes 的 SHA256，区别于 packet/ACK Body 的域 checksum。完整重组后同时复核 messageID/kind/match/source/target 与消息本体一致，再进入业务。公开 encoded-frame 上限为 `SyncFragment.maximumEncodedBytes = 16 MiB`（JSON/base64 外壳上限），`SyncDelivery` / `SyncDeliveryRecord` 构造及 service/Store 入口在 fragment JSON 解码前检查；不放宽完整消息 8 MiB、单片 payload 256 KiB 或最多32片。
 
-信任检查先于片段落盘。接收只接纳当前 peer / 目标/环境；同 fragmentID 同 hash 幂等，同 ID 异字节隔离且不覆盖。按完整消息域原子保存片段；进程重开重组未完成消息。每消息 24 小时组装期限，每 peer 暂存上限 64 MiB/256 个未完成消息；超限拒绝新片，不删已提交事实。过期只清理该消息临时片段并保留 timeout 诊断，不发送 ACK；发送端仍保留原包，原样重试可重新组装。计时用持久首次接收时间，时钟倒退不提前过期。无半包 COMMIT/ACK。
+信任检查先于片段落盘。接收只接纳当前 peer / 目标/环境；同 fragmentID 同 hash 幂等，同 ID 异字节隔离且不覆盖。按完整消息域原子保存片段；进程重开重组未完成消息。尚未组装完整的每消息有 24 小时组装期限；完整未 consume 组保留到 receipt/consume。每 peer 暂存上限 64 MiB/256 个未消费临时组（含完整待处理组）；超限拒绝新片，不删已提交事实。过期只清理该消息临时片段并保留 timeout 诊断，不发送 ACK；发送端仍保留原包，原样重试可重新组装。计时用持久首次接收时间，时钟倒退不提前过期。无半包 COMMIT/ACK。
 
-SyncService 单 actor、单 drain task，每轮最多处理 32 个 due deliveries；并发 activate/网络变化合并唤醒，不创建重复发送 loop。业务包/控制 ACK 分别持久 attemptCount 和 nextAttemptAt；重试 1、2、4、8、16、32、60、120 秒后最高 300 秒，使用注入 clock，不在测试 sleep。错误保留原 bytes/ID。业务包一直待持久 ACK；ACK 控制项保留原字节，连续 8 次尝试后休眠，重复包或新的连接激活重新唤醒原 ACK，避免无限 ACK-of-ACK。callback 只记录 attempt，不确认业务。重开从持久台账继续，不重新路由、不重新分配序号。
+SyncService 单 actor、单 drain task，每轮最多处理 32 个 due deliveries；并发 activate/网络变化合并唤醒，不创建重复发送 loop。业务包/控制 ACK 分别持久 attemptCount 和 nextAttemptAt；重试 1、2、4、8、16、32、60、120 秒后最高 300 秒，使用注入 clock，不在测试 sleep。错误保留原 bytes/ID。业务包一直待持久 ACK；ACK 控制项保留原字节、累计 attemptCount 审计与独立本轮连续次数，连续 8 次实际 send 尝试后休眠，重复包或新的连接激活重新唤醒原 ACK，避免无限 ACK-of-ACK。授权失效/不可用只暂停并显示 issue，不进入 send、不消耗尝试/休眠预算；进入 send 后的成功或失败均持久记录 attempt/deadline。callback 只记录 attempt，不确认业务。重开从持久台账继续，不重新路由、不重新分配序号。
 
 缺口按独立 peer 域持久显示；本方案完整快照允许安全接收高序号，发送端仍发送所有未 ACK 的原包，丢失低序号自然重试补齐。没有 skip/累计 ACK，也不为填序号伪造事件。错误/未知版本隔离后显示需处理，不能静默清掉 pending。
 
