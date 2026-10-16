@@ -13,6 +13,16 @@
         B00000000000000000000005 /* FootballRecordWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = F00000000000000000000011 /* FootballRecordWatch.app */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
         B00000000000000000000006 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000020 /* iOS InfoPlist.strings */; };
         B00000000000000000000007 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000021 /* Watch InfoPlist.strings */; };
+72FF9145115341399DDDD3E3 = {isa = PBXBuildFile; fileRef = 713AA27D164942F0B699347F; };
+F15C76A2DC654886A3A258FD = {isa = PBXBuildFile; fileRef = 713AA27D164942F0B699347F; };
+87161F5AC6C44FD0B296CA76 = {isa = PBXBuildFile; fileRef = 0FE44D4A3B6D4CB2AD9B3554; };
+4F84499E8D754EB4903D520F = {isa = PBXBuildFile; productRef = E556930350E842BC965015E4; };
+EA90A8BEE107413A8816CE5D = {isa = PBXBuildFile; productRef = 91F0C158B9C84211875A5994; };
+4F888403B1A1438A891272B5 = {isa = PBXBuildFile; productRef = FF9AC8AEF3A04316A179631C; };
+08BE6DEF0991450B95B136CF = {isa = PBXBuildFile; fileRef = 9F134AB6BBB141DAB70B2D02; };
+AE0A13407429459A9C986D81 = {isa = PBXBuildFile; productRef = 3A0BA22F6862429EA61BF0D6; };
+4538337D78994DCB8AE3EAC8 = {isa = PBXBuildFile; productRef = 3E0DD92E29AE423C8CF58585; };
+57959E9694FF4BC6B29FA722 = {isa = PBXBuildFile; productRef = FCCDB1BCA2944608AD7D1562; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -23,6 +33,8 @@
             remoteGlobalIDString = A00000000000000000000011;
             remoteInfo = "FootballRecord-Watch";
         };
+3905B905DC274878B786E6FA = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000001; proxyType = 1; remoteGlobalIDString = A00000000000000000000010; remoteInfo = "FootballRecord-iOS"; };
+58E9221E036E4D83B10FE856 = {isa = PBXContainerItemProxy; containerPortal = A00000000000000000000001; proxyType = 1; remoteGlobalIDString = A00000000000000000000011; remoteInfo = "FootballRecord-Watch"; };
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -48,24 +60,34 @@
         F00000000000000000000031 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
         F00000000000000000000032 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
         F00000000000000000000033 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = "zh-Hans.lproj/InfoPlist.strings"; sourceTree = "<group>"; };
+713AA27D164942F0B699347F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeRecordingUITests.swift; sourceTree = "<group>"; };
+2583ACF1290243C2A009C4A4 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "FootballRecord-iOS-UITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+B3DB6393ADC04592B36C6B9A = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "FootballRecord-Watch-UITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+0FE44D4A3B6D4CB2AD9B3554 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMatchView.swift; sourceTree = "<group>"; };
+9F134AB6BBB141DAB70B2D02 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchMatchView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-        D00000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000003 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
-        D00000000000000000000005 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000004 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (4F84499E8D754EB4903D520F, EA90A8BEE107413A8816CE5D, 4F888403B1A1438A891272B5, B00000000000000000000003 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000005 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (AE0A13407429459A9C986D81, 4538337D78994DCB8AE3EAC8, 57959E9694FF4BC6B29FA722, B00000000000000000000004 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+33C11198F6964F21B7182913 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+0286F0ADAA4848389C2D36F7 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
         A00000000000000000000002 = {
             isa = PBXGroup;
-            children = (A00000000000000000000004 /* iOS App */, A00000000000000000000005 /* Watch App */, A00000000000000000000006 /* iOS Configuration */, A00000000000000000000007 /* Watch Configuration */, A00000000000000000000003 /* Products */, );
+            children = (D2270310F0F64E88BF337219, 66B86CBE363F4BD6A0CF2B0E, C69748A4C9DA4706BC8555E1, A00000000000000000000004 /* iOS App */, A00000000000000000000005 /* Watch App */, A00000000000000000000006 /* iOS Configuration */, A00000000000000000000007 /* Watch Configuration */, A00000000000000000000003 /* Products */, );
             sourceTree = "<group>";
         };
-        A00000000000000000000003 /* Products */ = {isa = PBXGroup; children = (F00000000000000000000010 /* FootballRecord.app */, F00000000000000000000011 /* FootballRecordWatch.app */, ); name = Products; sourceTree = "<group>"; };
+        A00000000000000000000003 /* Products */ = {isa = PBXGroup; children = (B3DB6393ADC04592B36C6B9A, 2583ACF1290243C2A009C4A4, F00000000000000000000010 /* FootballRecord.app */, F00000000000000000000011 /* FootballRecordWatch.app */, ); name = Products; sourceTree = "<group>"; };
         A00000000000000000000004 /* iOS App */ = {isa = PBXGroup; children = (F00000000000000000000001 /* FootballRecordApp.swift */, ); name = "iOS App"; path = Apps/iOS/App; sourceTree = "<group>"; };
         A00000000000000000000005 /* Watch App */ = {isa = PBXGroup; children = (F00000000000000000000002 /* FootballRecordWatchApp.swift */, ); name = "Watch App"; path = Apps/Watch/App; sourceTree = "<group>"; };
         A00000000000000000000006 /* iOS Configuration */ = {isa = PBXGroup; children = (F00000000000000000000003 /* Info.plist */, F00000000000000000000020 /* InfoPlist.strings */, ); name = "iOS Configuration"; path = Configuration/iOS; sourceTree = "<group>"; };
         A00000000000000000000007 /* Watch Configuration */ = {isa = PBXGroup; children = (F00000000000000000000004 /* Info.plist */, F00000000000000000000021 /* InfoPlist.strings */, ); name = "Watch Configuration"; path = Configuration/Watch; sourceTree = "<group>"; };
+C69748A4C9DA4706BC8555E1 = {isa = PBXGroup; children = (713AA27D164942F0B699347F, ); path = UITests; sourceTree = "<group>"; };
+D2270310F0F64E88BF337219 = {isa = PBXGroup; children = (0FE44D4A3B6D4CB2AD9B3554, ); name = "iOS Match"; path = Apps/iOS/Features/Match; sourceTree = "<group>"; };
+66B86CBE363F4BD6A0CF2B0E = {isa = PBXGroup; children = (9F134AB6BBB141DAB70B2D02, ); name = "Watch Match"; path = Apps/Watch/Features/Match; sourceTree = "<group>"; };
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -76,7 +98,7 @@
             buildRules = ();
             dependencies = (C00000000000000000000002 /* PBXTargetDependency */, );
             name = "FootballRecord-iOS";
-            packageProductDependencies = (E00000000000000000000002 /* MatchCore */, );
+            packageProductDependencies = (E556930350E842BC965015E4, 91F0C158B9C84211875A5994, FF9AC8AEF3A04316A179631C, E00000000000000000000002 /* MatchCore */, );
             productName = FootballRecord;
             productReference = F00000000000000000000010 /* FootballRecord.app */;
             productType = "com.apple.product-type.application";
@@ -88,11 +110,13 @@
             buildRules = ();
             dependencies = ();
             name = "FootballRecord-Watch";
-            packageProductDependencies = (E00000000000000000000003 /* MatchCore */, );
+            packageProductDependencies = (3A0BA22F6862429EA61BF0D6, 3E0DD92E29AE423C8CF58585, FCCDB1BCA2944608AD7D1562, E00000000000000000000003 /* MatchCore */, );
             productName = FootballRecordWatch;
             productReference = F00000000000000000000011 /* FootballRecordWatch.app */;
             productType = "com.apple.product-type.application";
         };
+DB16D69FE75F425282B75785 = {isa = PBXNativeTarget; buildConfigurationList = 66AA06B675504AD0BD2C6DF3; buildPhases = (F8E08F07575C4FA7813A6735, 33C11198F6964F21B7182913, 88F971DF3F4D45CCAC285D10, ); buildRules = (); dependencies = (F5C0E01EFACD448B9BCE45EA, ); name = "FootballRecord-iOS-UITests"; productName = "FootballRecord-iOS-UITests"; productReference = 2583ACF1290243C2A009C4A4; productType = "com.apple.product-type.bundle.ui-testing"; };
+486150B50C5A47A0B6112B94 = {isa = PBXNativeTarget; buildConfigurationList = 5C5D68750E384E27B52E2B85; buildPhases = (E8E50F5CAE5543B9B9271B14, 0286F0ADAA4848389C2D36F7, 57ED2CABBD8E4C3FB7E34670, ); buildRules = (); dependencies = (894772CAC260455D9CBA3BC9, ); name = "FootballRecord-Watch-UITests"; productName = "FootballRecord-Watch-UITests"; productReference = B3DB6393ADC04592B36C6B9A; productType = "com.apple.product-type.bundle.ui-testing"; };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -105,26 +129,32 @@
             hasScannedForEncodings = 0;
             knownRegions = (en, "zh-Hans", );
             mainGroup = A00000000000000000000002;
-            packageReferences = (E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */, );
+            packageReferences = (40947FC041B04BA2A35B83AB, E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */, );
             productRefGroup = A00000000000000000000003 /* Products */;
             projectDirPath = "";
             projectRoot = "";
-            targets = (A00000000000000000000010 /* FootballRecord-iOS */, A00000000000000000000011 /* FootballRecord-Watch */, );
+            targets = (486150B50C5A47A0B6112B94, DB16D69FE75F425282B75785, A00000000000000000000010 /* FootballRecord-iOS */, A00000000000000000000011 /* FootballRecord-Watch */, );
         };
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
         D00000000000000000000003 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000006 /* InfoPlist.strings in Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
         D00000000000000000000006 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000007 /* InfoPlist.strings in Resources */, ); runOnlyForDeploymentPostprocessing = 0; };
+88F971DF3F4D45CCAC285D10 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+57ED2CABBD8E4C3FB7E34670 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-        D00000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000001 /* FootballRecordApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
-        D00000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B00000000000000000000002 /* FootballRecordWatchApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (87161F5AC6C44FD0B296CA76, B00000000000000000000001 /* FootballRecordApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (08BE6DEF0991450B95B136CF, B00000000000000000000002 /* FootballRecordWatchApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+F8E08F07575C4FA7813A6735 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (72FF9145115341399DDDD3E3, ); runOnlyForDeploymentPostprocessing = 0; };
+E8E50F5CAE5543B9B9271B14 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F15C76A2DC654886A3A258FD, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
         C00000000000000000000002 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A00000000000000000000011 /* FootballRecord-Watch */; targetProxy = C00000000000000000000001; };
+F5C0E01EFACD448B9BCE45EA = {isa = PBXTargetDependency; target = A00000000000000000000010; targetProxy = 3905B905DC274878B786E6FA; };
+894772CAC260455D9CBA3BC9 = {isa = PBXTargetDependency; target = A00000000000000000000011; targetProxy = 58E9221E036E4D83B10FE856; };
 /* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
@@ -234,21 +264,34 @@
             };
             name = Release;
         };
+AECC44AE92B249FE8031FFAB = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "com.example.footballrecord.ios.uitests"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; TARGETED_DEVICE_FAMILY = 1; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TEST_TARGET_NAME = "FootballRecord-iOS"; }; name = Debug; };
+E8E5DC620DF442FDA9E046DD = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "com.example.footballrecord.ios.uitests"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; TARGETED_DEVICE_FAMILY = 1; IPHONEOS_DEPLOYMENT_TARGET = 17.0; TEST_TARGET_NAME = "FootballRecord-iOS"; }; name = Release; };
+0B4E91191DE043C680903AD1 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "com.example.footballrecord.watch.uitests"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = watchos; SUPPORTED_PLATFORMS = "watchos watchsimulator"; TARGETED_DEVICE_FAMILY = 4; WATCHOS_DEPLOYMENT_TARGET = 10.0; TEST_TARGET_NAME = "FootballRecord-Watch"; }; name = Debug; };
+0ACAFEE050E141E185491F31 = {isa = XCBuildConfiguration; buildSettings = {CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = "com.example.footballrecord.watch.uitests"; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = watchos; SUPPORTED_PLATFORMS = "watchos watchsimulator"; TARGETED_DEVICE_FAMILY = 4; WATCHOS_DEPLOYMENT_TARGET = 10.0; TEST_TARGET_NAME = "FootballRecord-Watch"; }; name = Release; };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
         A00000000000000000000020 = {isa = XCConfigurationList; buildConfigurations = (900000000000000000000000 /* Debug */, 900000000000000000000001 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
         A00000000000000000000021 = {isa = XCConfigurationList; buildConfigurations = (900000000000000000000002 /* Debug */, 900000000000000000000003 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
         A00000000000000000000022 = {isa = XCConfigurationList; buildConfigurations = (900000000000000000000004 /* Debug */, 900000000000000000000005 /* Release */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+66AA06B675504AD0BD2C6DF3 = {isa = XCConfigurationList; buildConfigurations = (AECC44AE92B249FE8031FFAB, E8E5DC620DF442FDA9E046DD, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+5C5D68750E384E27B52E2B85 = {isa = XCConfigurationList; buildConfigurations = (0B4E91191DE043C680903AD1, 0ACAFEE050E141E185491F31, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
         E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */ = {isa = XCLocalSwiftPackageReference; relativePath = Packages/MatchCore; };
+40947FC041B04BA2A35B83AB = {isa = XCLocalSwiftPackageReference; relativePath = Modules/MatchPresentation; };
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
         E00000000000000000000002 /* MatchCore */ = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */; productName = MatchCore; };
         E00000000000000000000003 /* MatchCore */ = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */; productName = MatchCore; };
+E556930350E842BC965015E4 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchSession; };
+91F0C158B9C84211875A5994 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchStore; };
+FF9AC8AEF3A04316A179631C = {isa = XCSwiftPackageProductDependency; package = 40947FC041B04BA2A35B83AB; productName = MatchPresentation; };
+3A0BA22F6862429EA61BF0D6 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchSession; };
+3E0DD92E29AE423C8CF58585 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchStore; };
+FCCDB1BCA2944608AD7D1562 = {isa = XCSwiftPackageProductDependency; package = 40947FC041B04BA2A35B83AB; productName = MatchPresentation; };
 /* End XCSwiftPackageProductDependency section */
     };
     rootObject = A00000000000000000000001 /* Project object */;

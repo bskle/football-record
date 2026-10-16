@@ -1,49 +1,46 @@
 # 球历原生工程
 
-正式名称：球历 / football-record；Xcode技术名：FootballRecord。
+正式名称为“球历” / `football-record`，Xcode 技术名为 `FootballRecord`。使用 Xcode 27、Swift 6，最低 iOS 17 / watchOS 10。打开 `FootballRecord.xcodeproj`，选择 `FootballRecord-iOS` 或 `FootballRecord-Watch` 共享 scheme 与对应模拟器。iPhone target 嵌入现代单目标 Watch App。
 
-用Xcode27打开FootballRecord.xcodeproj，选择共享scheme FootballRecord-iOS或FootballRecord-Watch与相应模拟器。最低iOS17/watchOS10，Swift6。Watch为现代单目标App，iOS构建并嵌入Watch产品。两个App实际消费MatchCore/AppIdentity，目前界面仍只有“开发预览”空状态，没有正式开赛入口。
+当前任务已将共享会话接入原生记录页面：Watch 为比赛/实时状态与四快记两页，iPhone 为比赛、历史、生涯、设置四标签，历史仅展示已保存事实骨架。赛后纠错、分析与路线页面留 M5。App、共享页面及测试均显式注册到实际 target，不能以文件存在替代编译。
 
-在仓库根目录执行 scripts/native/verify.sh，依次运行共享包swift test、MatchStore的iOS17/watchOS10 Simulator显式SDK编译、两个App无签名构建，任一步失败返回非零。App仅消费MatchCore，所以单靠App构建不能证明SQLite target编译。产物、DerivedData和日志默认位于忽略的native/.build/，可用NATIVE_BUILD_ROOT=/absolute/path改为独立目录；Desktop存在Finder元数据时使用/tmp内唯一目录。仅宿主行为测试可执行 swift test --package-path native/Packages/MatchCore。
+正式入口的开赛服务在 M4 前明确不可用，保留原开赛意图供重试，不会偷偷取得模拟许可。Debug 版本可从设置或 Watch 入口新建独立开发演练，持续显示“开发模拟锁”。每个演练使用实际独立 namespace、数据库和设备 identity；这不是真实开赛锁、真实运动采集或跨设备 E2E。结束先进入 `endedPendingSync`，不会因本机保存而冒充完整完成、释放锁或立即另开一场。
 
-例如 `NATIVE_BUILD_ROOT=/tmp/football-record-native-check scripts/native/verify.sh` 将构建产物放到独立目录；若遇到Desktop FinderInfo资源属性污染，无需清除源码xattr或删除他人产物。
+## 验证与证据
 
-## 共享引擎与保存边界
+在仓库根目录运行：
 
-NATIVE-002实现纯内存比赛事件引擎与原有33个独立XCTest方法；NATIVE-004增加采集元数据合同的8个测试，当前MatchCore共41个。App仍是预览壳。MatchDescriptor固定matchID/recordingDeviceID和稳定StartIntent；不可变MatchEvent保存原事实与追加revision。MatchReplay.replay(descriptor:events:now:completionEvidence:)确定性计算双轴区间、比分、出场、生涯及诊断，无Timer累计时长。
+```sh
+NATIVE_BUILD_ROOT=/tmp/football-record-check scripts/native/verify.sh
+```
 
-LiveMatchRecorder/PostMatchEditor只产生待保存事实与影响预览。应用复制staging值，交给MatchStore事务保存descriptor/事实/outbox，成功返回CommitReceipt后才替换状态并反馈成功。预览App尚未装配该保存链路。sequence在sourceDeviceID内唯一，修订使用根事实sequence/sourceDeviceID/eventID保留同刻业务顺序。start/end可改时间、不可删除或颠倒；损坏导入诊断conflict，已知终结禁止再次start。
+脚本依次执行 MatchCore / MatchStore / MatchSession 共享包宿主 XCTest、Store 与 Session 的双端最低部署 SDK 编译、MatchPresentation 宿主 XCTest及双端最低部署 SDK 编译、两个 App 无签名 Simulator 构建。任一步失败返回非零。产物和日志可用独立 `NATIVE_BUILD_ROOT` 指定；Desktop FinderInfo 影响代码签名时使用 `/tmp`，不清除源码 xattr 或他人产物。
 
-正常本地结束先为endedPendingSync，不进入生涯；可信完整保存/durable ACK适配器完成实际工作后才调用TrustedCompletionEvidence.acceptedByCompleteSaveBoundary。凭据绑定matchID、当前终结ID、去重原始事实全集canonical SHA256；乱序/相同重传不失效，新增事实/修订使旧凭据失效。核心不实现保存或ACK验证，完成与后台锁释放独立。
+实际 UI 验收需使用已安装 runtime 的模拟器 UDID，脚本不创建、重配或删除模拟器：
 
-先保存StartIntent，真实网络适配器验证许可后才调用TrustedStartPermit.acceptedByTrustedNetworkBoundary。DevelopmentStartFixture带developmentSimulation标记，不代表真实锁或E2E证据。手机赛后更正/异常终结授权由已认证应用边界提供，不能接管采集。异常终结保持incomplete与原记录设备，迟到end不能晋级completed；后台锁状态独立，不由本地结束推定释放。
+```sh
+NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh Watch WATCH_SIMULATOR_UDID
+NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHONE_SIMULATOR_UDID
+```
 
-手机完全没有start也可保留可信异常终结：incomplete+missingStart，不造开始；matchElapsed快照此时可nil，matchDuration/appearanceDuration/elapsed(at:)未知为nil，timingComplete=false。迟到start/score恢复计算但仍incomplete，未知影响差值nil并要求确认。暂停期间允许比分补记，双时长冻结、场上状态保留，下场不暂停比赛。completed且实际出场才计出场/胜率/体能；未出场completed仅计场次，健康缺失返回nil。
+两端 scheme 均含 XCUI target。UI 脚本实际 launch/tap/swipe、核对按钮 frame/已保存显示变化并导出 xcresult 截图与可访问性树。`ONLY_ACTIVE_ARCH=YES` 限定实际测试设备架构。测试启动参数仅在 Debug 生效，dataset、失败注入和固定测试 clock 不进入生产入口。纯宿主或 SDK 构建不替代实际 UI 启动，更不证明 HealthKit、GPS、后台或触觉手感。
 
-事件引擎证据见 [NATIVE-002验证](../docs/native/validation/NATIVE-002.md)，SQLite仓储证据见 [NATIVE-003验证](../docs/native/validation/NATIVE-003.md)。M1本地基础已双审集成：仓储merge为 `9e4ee11e723f6dd46fccce35b93a9c625c7f0d42`，采集合同merge及当前组合为 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0`。2026-10-16（上海）主代理在组合提交上运行 `NATIVE_BUILD_ROOT=/tmp/football-record-m1-combined scripts/native/verify.sh` 退出0，70项测试和两端MatchStore SDK、两个App构建全部通过；组合证据与远端快照见 [GIT-002](../docs/native/tasks/GIT-002.md)。App仍为开发预览壳，没有用户记录页面；真实采集、联网锁、设备同步、云、签名与发布均未验收。
+基础已集成事实及证据见 [NATIVE-006](../docs/native/validation/NATIVE-006.md)、[NATIVE-007](../docs/native/validation/NATIVE-007.md) 与 [NATIVE-011](../docs/native/validation/NATIVE-011.md)。009最终组合源码 `117c4c42744a96fd5fa695671accee7a843d08df` 已通过158项宿主测试、六项最低部署SDK编译、双App构建及Watch/iPhone各七项实际XCUI；准确输入、runtime、截图及最低系统/真机限制见 [NATIVE-009](../docs/native/validation/NATIVE-009.md)。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试仅是当时证据，不是当前测试数或原生 UI 验收。
 
-## 采集元数据值合同
+## 事实、事务和展示边界
 
-NATIVE-004新增独立 `CaptureMetadata` 值类型，只保存固定matchID/recordingDeviceID绑定、非健康Workout关联ID、片段/缺口标识与已知或未知的观测时间。恢复失败可表达同一比赛下多个Workout片段和缺口；不补造时间、不插值、不更换原记录设备。构造与Codable解码均验证绑定、标识和已知时间边界。它不含HR、GPS、距离、速度、路线或权限样本，不证明Workout实际存在，也没有接入MatchStore、CloudKit、后台或HealthKit。真实Workout核验、元数据落盘与恢复适配由M2接线，不能把此合同当作采集已实现。证据见 [NATIVE-004验证](../docs/native/validation/NATIVE-004.md)。
+`MatchDescriptor` 固定 matchID、recordingDeviceID 与原 `StartIntent`。不可变 `MatchEvent`、追加修订及采集 revision 是事实；`MatchReplay` 从事实与展示时间派生比分、比赛/上场双时钟及诊断，不按秒落库。暂停冻结双时钟且保留场上状态；上下场仅影响上场时长，不能冒充 Workout 暂停。四快记共享 1000ms guard，撤销仅针对最后一次快记并以追加 revision 保留审计，撤销后可立即纠正。
 
-## SQLite 事务与可靠传输边界
+`LiveMatchRecorder` 只 staging。`MatchSession` 串行编排请求，`MatchStore` 用系统 SQLite WAL / synchronous=FULL 事务保存事实、采集操作、首次 receipt 与 outbox。UI 只接受已提交 snapshot/receipt，成功触觉只由首次确认 receipt 触发；失败不采纳 staging，不用旧点击快照覆盖已到达的更新。响应不明保留原完整 request 原样重试；只有明确 stale 且持久 command 查无提交，才刷新后分配新 command。
 
-MatchStore为actor，系统SQLite3使用WAL和synchronous=FULL并核对实际PRAGMA；一笔事务内无await。原记录设备先commit无permit、无events的descriptor以保存StartIntent（expectedGeneration=0），真实网络adapter验证permit后才让LiveMatchRecorder生成start，再用已保存generation提交新facts和完整匹配outbox包。MatchID/recordingDeviceID/intent不可改绑；数据库不保存第二份比分或累计时长，也不保存健康原始样本。
+006 已实现 additive v1→v2 迁移和采集元数据落盘，保留 v1 canonical 请求、包和 receipt 兼容。`CaptureRevision` 保留同场/同设备下真实 Workout 关联和已知或未知窗口、缺口；未得到实际 Workout UUID 不造 segment。持久 `CaptureOperation` 在事务外执行/对账，未知保留 `needsReconciliation`，保存待解锁保留 `savedAwaitingLink`，不盲建第二个 Workout。011增加严格的未创建证明：同token原start持久notCreated、无正向观测/真实窗口或片段并通过完整历史校验时，才允许取消未决finish；迟到矛盾原始观测保留并阻断该证明。一般unknown仍继续对账。正常结束不制造 `completed`；完整保存凭据同时绑定当前业务事实与完整采集 digest。
 
-StoreCommit同时保存descriptor、新原始facts、稳定commandID/首次receipt和稳定MatchPacket。重试必须复用第一次完整请求，包括expectedGeneration、事实顺序、包ID/idempotencyKey；相同commandID异请求报commandConflict。成功命令在CAS前查receipt，并核验对应descriptor、原始facts与outbox仍完整，提交后响应丢失并关闭重开仍返回首次receipt；凭据存在但原行缺失或损坏则诊断失败。合法permit升级和后续修订不使首次receipt失效。不同命令用旧generation报staleGeneration，多个连接不能覆盖彼此。SQLite故障抛错，调用端不采纳staging、不反馈成功。重启只需数据库URL，通过matchIDs发现全部已保存意图/比赛，再读snapshot与pendingPackets，无需另存UserDefaults索引。
+没有可信 peer 时业务变更保留 `unrouted` outbox，不制造手机目标或把传输成功当持久 ACK。旧包/ACK API保留完整性校验；实际同账号认证、配对、传输和可信 ACK 来源仍待 M3。checksum 仅校验完整性。生产许可、账号、后台唯一锁与云仍待 M4。
 
-receive接收可信adapter提供的expectedPeerDeviceID/localDeviceID/expectedMatchID，核对包版本、路由和canonical SHA256，事实与接收receipt同事务COMMIT后才返回DurableACK；首次合法接收已开始比赛不要求本机事先保存intent。同包重传先核验对应descriptor和原始facts仍完整，再返回同ACK，不以receipt代替丢失的事实。修订先到、乱序和跨writer同sequence均保留，业务异常由同一MatchReplay诊断。eventID为全库唯一；相同ID异canonical payload（含跨match碰撞）保留原事实、隔离新bytes并显式失败，不ACK。坏JSON/checksum、错误路由保留非阻塞audit，不影响合法事实回放或正确包重试；事实冲突/库内损坏保留blocking诊断，StoreSnapshot.replay拒绝正常结果。阻塞诊断需后续恢复界面或可信处理流程处理，本阶段不静默选择冲突胜者或自动清除。
+`MatchPresentation` 直接消费已集成 `MatchSession`，只投影事实并处理保存/重试/只读状态。心率、GPS、距离和速度走独立可选内存展示通道，缺失显示“未记录/不支持”，真实零值与未知分开，不进入业务 snapshot/outbox。009 默认装配 `UnavailableWorkoutGateway`；bootstrap 保留 gateway 注入接缝供010在 Apps/工程层装配已审适配器，许可与 namespace 隔离固定，不接受外部伪许可。
 
-pendingPackets返回未确认包；传输完成不清包。acknowledge只接受packetID/checksum/接收设备均匹配的可信持久ACK，重复幂等，仅标记该包并保留包与ACK审计记录；部分ACK不完成比赛。checksum是完整性检查，不是认证。真实同账号、配对、写入权限、实际发送和可信ACK来源仍由后续adapter验证，本组件不伪造这些能力。
+## 签名与真实采集
 
-saveCompletionEvidence仅保存可信完整保存adapter给出的、与当前全事实集匹配的凭据；正常end、本地保存或任意ACK不自行创建它。新增原始修订让旧凭据失效，异常终结与迟到normal end仍incomplete。本仓储拒绝releaseRequested/releasedConfirmed的本地descriptor写入，后续后台锁adapter需独立设计真实确认路径，不能由本地end释放当前或后来比赛的锁。
+`com.example.footballrecord` 与 `com.example.footballrecord.watchapp` 是本地开发占位 Bundle ID，尚不代表注册。009 未加 HealthKit/真实定位 entitlement，也未连接008。010将准备设备集成候选；真实采集相关实现须经对应真机验收后才进入 `dev`，不以 SDK/模拟器或 fake 代替真实授权、锁屏保存、GPS、后台和恢复证据。
 
-schema v0空库到v1创建和user_version更新同事务；没有虚构旧版发布库。未来版本、部分schema、损坏数据库显式失败，不删除或重建原库；未来版本回归也核对原DB/WAL内容及SHM文件保留（SHM读标记是SQLite可变锁索引，不声称字节不变）。坏业务payload保留原bytes及诊断。故障注入和原始SQL仅为internal测试入口，生产公开API无任意SQL。当前29个仓储测试使用真实临时SQLite文件，与41个纯核心测试合计70个；尚无进程被系统杀死/物理断电或真机存储压力实测，不能用故障注入代替这些证据。
-
-## 签名与真机
-
-com.example.footballrecord和com.example.footballrecord.watchapp是本地开发占位Bundle ID，不代表已注册。没有Developer Team、entitlements、HealthKit、CloudKit或Sign in with Apple能力。WKCompanionAppBundleIdentifier与iOS占位ID一致；正式配置时同步修改两个target及该键。
-
-用户能连接配对iPhone/Watch后，在Xcode登录Apple账号，为两个target配置本人Team、正式App ID与签名，设备解锁并信任Mac、按提示开启开发者模式后运行。账号授权与Team归属由用户完成，无签名SDK构建不能证明签名安装或付费分发资格。
-
-签名安装、真实启动、配对通信、采集、后台恢复、联网锁与分发留后续阶段。本任务纯业务引擎没有设备能力变更，真机验证不适用。工程壳原始启动证据见 [NATIVE-001验证](../docs/native/validation/NATIVE-001.md)。
+用户连接配对 iPhone / Watch 后，在 Xcode 登录本人 Apple 账号、为两个 target 配置所属 Team、App ID 和签名，设备解锁并信任 Mac，按系统提示开启开发者模式。正式 Bundle ID 同时更新两 target 与 `WKCompanionAppBundleIdentifier`。账号授权、Team 归属和真机签名由用户条件决定，无签名构建不证明设备安装或付费分发资格。
