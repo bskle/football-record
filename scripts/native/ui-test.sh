@@ -17,10 +17,12 @@ if [[ -n "${NATIVE_UI_TEST_CLASS:-}" ]]; then
   [[ "$NATIVE_UI_TEST_CLASS" =~ ^[A-Za-z0-9_]+$ ]] || { printf 'Invalid UI test class\n' >&2; exit 2; }
   test_filter=("-only-testing:FootballRecord-$platform-UITests/$NATIVE_UI_TEST_CLASS")
 fi
+# Simulator ad-hoc signing lets Xcode embed its simulated application identifier/entitlements.
+# It uses no real Team/profile/certificate and never signs a physical-device candidate.
 xcodebuild test "${test_filter[@]}" -project "$repo_root/native/FootballRecord.xcodeproj" \
   -scheme "FootballRecord-$platform" -destination "platform=$destination,id=$device" \
   -derivedDataPath "$build_root/DerivedData-$platform" \
-  -resultBundlePath "$run_root/acceptance.xcresult" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES \
+  -resultBundlePath "$run_root/acceptance.xcresult" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ONLY_ACTIVE_ARCH=YES \
   2>&1 | tee "$run_root/xcodebuild-test.log"
 xcrun xcresulttool export attachments --path "$run_root/acceptance.xcresult" --output-path "$run_root/attachments" \
   2>&1 | tee "$run_root/attachments.log"
