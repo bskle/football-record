@@ -91,7 +91,7 @@ struct WatchMatchView: View {
           Text("进球 \(p.goals) · 助攻 \(p.assists)").font(.system(size: 9)).accessibilityIdentifier("personal-stats")
         }
         Spacer(minLength: 3)
-        Text(p.score).font(.system(size: 22, weight: .bold)).monospacedDigit().foregroundStyle(MatchColors.accent).accessibilityLabel("本场比分 \(p.score)")
+        Text(p.score).font(.system(size: 22, weight: .bold)).monospacedDigit().foregroundStyle(MatchColors.accent).accessibilityLabel("本场比分 \(p.score)").accessibilityIdentifier("quick-score")
       }
       VStack(spacing: 6) {
         HStack(spacing: 6) { quick(.myGoal); quick(.myAssist) }

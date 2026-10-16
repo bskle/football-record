@@ -16,7 +16,21 @@ import XCTest
     let alertLabels = ["cancel-end": "继续比赛", "confirm-end": "结束并保存"]
     let identified = app.buttons[id].firstMatch
     let element = identified.exists ? identified : app.buttons[alertLabels[id] ?? id].firstMatch
-    for _ in 0..<5 { if element.exists && element.isHittable { return element }; app.swipeUp() }
+    let modal = ["choose-starter", "choose-substitute", "confirm-start", "cancel-start", "pause-resume", "request-end", "close-controls", "confirm-end", "cancel-end"].contains(id)
+    for _ in 0..<8 {
+      let top = app.frame.minY + 36
+      var bottom = app.frame.maxY - 4
+      #if os(watchOS)
+      if !modal { bottom -= 18 }
+      #else
+      let bar = app.tabBars.firstMatch
+      if !modal && bar.exists && bar.isHittable { bottom = min(bottom, bar.frame.minY - 6) }
+      #endif
+      if element.exists && element.isHittable && element.frame.minY >= top && element.frame.maxY <= bottom { return element }
+      if element.exists && element.frame.minY < top { app.swipeDown() } else { app.swipeUp() }
+    }
+    print("Unresolved control \(id), frame \(element.exists ? element.frame.debugDescription : "absent")")
+    capture(app, "unresolved-control-" + id)
     return element
   }
   private func tap(_ id: String, in app: XCUIApplication) {
@@ -81,9 +95,13 @@ import XCTest
   }
   private func expectLast(_ title: String, _ app: XCUIApplication) {
     let e = app.staticTexts["last-quick"]
-    let predicate = NSPredicate(format: "label CONTAINS %@", title)
+    let predicate = NSPredicate(format: "label == %@", "已记：" + title)
     expectation(for: predicate, evaluatedWith: e)
     waitForExpectations(timeout: 5)
+  }
+  private func expectQuickValues(_ score: String, goals: Int, assists: Int, in app: XCUIApplication) {
+    XCTAssertEqual(app.staticTexts["quick-score"].label, "本场比分 " + score)
+    XCTAssertEqual(app.staticTexts["personal-stats"].label, "进球 \(goals) · 助攻 \(assists)")
   }
   func testFourQuickButtonsReceiptGuardAndPersistentUndo() {
     let app = launch(["--ui-fixed-clock"]); start(app); quickPage(app)
@@ -92,23 +110,25 @@ import XCTest
       XCTAssertTrue(button.isHittable); XCTAssertGreaterThanOrEqual(button.frame.width, 44); XCTAssertGreaterThanOrEqual(button.frame.height, 44)
     }
     tap("quick-myGoal", in: app); XCTAssertTrue(app.buttons["undo-quick"].waitForExistence(timeout: 5))
+    expectQuickValues("1 : 0", goals: 1, assists: 0, in: app)
     tap("quick-conceded", in: app)
     XCTAssertTrue(app.staticTexts["recording-issue"].label.contains("刚刚已记录"))
     XCTAssertTrue(app.staticTexts["personal-stats"].exists || app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "进球 1")).firstMatch.exists)
+    expectQuickValues("1 : 0", goals: 1, assists: 0, in: app)
     capture(app, "quick-debounced-undo")
     tap("undo-quick", in: app); XCTAssertTrue(app.buttons["undo-quick"].waitForNonExistence(timeout: 4)); tap("quick-myAssist", in: app)
-    expectLast("我助攻", app); capture(app, "quick-assist")
-    tap("undo-quick", in: app); XCTAssertTrue(app.buttons["undo-quick"].waitForNonExistence(timeout: 4)); tap("quick-teamGoal", in: app); expectLast("进球", app); capture(app, "quick-team-goal")
-    tap("undo-quick", in: app); XCTAssertTrue(app.buttons["undo-quick"].waitForNonExistence(timeout: 4)); tap("quick-conceded", in: app); expectLast("失球", app); capture(app, "quick-conceded")
+    expectLast("我助攻", app); expectQuickValues("1 : 0", goals: 0, assists: 1, in: app); capture(app, "quick-assist")
+    tap("undo-quick", in: app); XCTAssertTrue(app.buttons["undo-quick"].waitForNonExistence(timeout: 4)); tap("quick-teamGoal", in: app); expectLast("进球", app); expectQuickValues("1 : 0", goals: 0, assists: 0, in: app); capture(app, "quick-team-goal")
+    tap("undo-quick", in: app); XCTAssertTrue(app.buttons["undo-quick"].waitForNonExistence(timeout: 4)); tap("quick-conceded", in: app); expectLast("失球", app); expectQuickValues("0 : 1", goals: 0, assists: 0, in: app); capture(app, "quick-conceded")
     XCTAssertTrue(app.buttons["undo-quick"].isHittable); XCTAssertGreaterThanOrEqual(app.buttons["undo-quick"].frame.width, 44); XCTAssertGreaterThanOrEqual(app.buttons["undo-quick"].frame.height, 44)
     app.swipeRight(); XCTAssertTrue(app.buttons["field-toggle"].waitForExistence(timeout: 5)); capture(app, "watch-main-after-quick")
   }
   func testSaveFailureRetainsScoreAndRetry() {
     let app = launch(["--ui-fail-first-score"]); start(app); quickPage(app)
     tap("quick-myGoal", in: app)
-    XCTAssertTrue(app.buttons["retry-save"].waitForExistence(timeout: 5)); capture(app, "save-failed-original-state")
+    XCTAssertTrue(app.buttons["retry-save"].waitForExistence(timeout: 5)); expectQuickValues("0 : 0", goals: 0, assists: 0, in: app); capture(app, "save-failed-original-state")
     tap("retry-save", in: app); XCTAssertTrue(app.buttons["undo-quick"].waitForExistence(timeout: 5))
-    XCTAssertFalse(app.buttons["retry-save"].exists); capture(app, "save-retry-committed")
+    XCTAssertFalse(app.buttons["retry-save"].exists); expectQuickValues("1 : 0", goals: 1, assists: 0, in: app); capture(app, "save-retry-committed")
   }
   #else
   func testPhoneOverviewScreenshot() {
@@ -130,7 +150,9 @@ import XCTest
     app.tabBars.buttons["生涯"].tap(); XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "后续版本")).firstMatch.exists)
     app.tabBars.buttons["设置"].tap(); XCTAssertTrue(app.staticTexts["football-record"].exists)
     app.tabBars.buttons["比赛"].tap()
-    tap("open-controls", in: app); tap("request-end", in: app); tap("confirm-end", in: app)
+    tap("open-controls", in: app)
+    XCTAssertTrue(app.buttons["pause-resume"].waitForExistence(timeout: 4), "Control sheet must actually open")
+    tap("request-end", in: app); tap("confirm-end", in: app)
     let status = app.staticTexts["match-status"].firstMatch
     XCTAssertTrue(status.waitForExistence(timeout: 5)); XCTAssertTrue(status.label.contains("待同步"))
     XCTAssertGreaterThanOrEqual(status.frame.minX, 0); XCTAssertLessThanOrEqual(status.frame.maxX, app.frame.width)
