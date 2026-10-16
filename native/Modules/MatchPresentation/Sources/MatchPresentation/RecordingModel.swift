@@ -53,6 +53,9 @@ extension MatchSession: SessionCommanding {}
         }
         recoveredIssue = "开赛服务尚未就绪，开赛请求已保留。"
       }
+      if pendingRequest != nil, recoveredIssue == nil {
+        recoveredIssue = Self.message(StoreError.responseLost)
+      }
       // Only a complete successful recovery may clear a previous recovery failure.
       readOnly = false
       issue = recoveredIssue

@@ -133,6 +133,8 @@ actor RecoveryFaultClient: SessionCommanding {
     XCTAssertEqual(model.pendingRequest, original)
     await model.load()
     XCTAssertFalse(model.readOnly); XCTAssertFalse(model.canRecord)
+    // RecordingIssueView only exposes retry-save while a valid issue remains visible.
+    XCTAssertEqual(model.issue, RecordingModel.message(StoreError.responseLost))
     XCTAssertEqual(try encoder.encode(XCTUnwrap(model.pendingRequest)), originalBytes)
     XCTAssertEqual(model.feedbackCount, 1)
     await model.retry()
