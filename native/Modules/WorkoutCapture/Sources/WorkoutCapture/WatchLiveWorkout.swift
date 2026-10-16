@@ -5,6 +5,7 @@ import MatchCore
 
 @MainActor final class WatchLiveWorkout: AppleWorkoutDriver, HKWorkoutSessionDelegate, HKLiveWorkoutBuilderDelegate {
   let session: HKWorkoutSession
+  var stopIssued = false
   var liveBuilder: HKLiveWorkoutBuilder { builder as! HKLiveWorkoutBuilder }
   init(newContext context: WorkoutContext, store: HKHealthStore, metrics: LiveMetricsChannel, timeout: Duration) throws {
     let configuration = HKWorkoutConfiguration(); configuration.activityType = .soccer; configuration.locationType = .outdoor
@@ -25,9 +26,12 @@ import MatchCore
     // A stopped recovered session may already have an unresolved finish request. Never issue another finish blindly.
     saveAttempted = session.state == .stopped || session.state == .ended
     collectionEnded = builder.endDate != nil
+    acceptance.begin(at: Date())
     state = DriverState(outcome: session.state == .paused ? .paused : session.state == .running ? .running : session.state == .stopped || session.state == .ended ? .stopped : .unknown, start: session.startDate, end: session.endDate)
     connect()
-    if state.outcome == .running || state.outcome == .paused { setupLocation(); if state.outcome == .paused { route?.setPaused(true); location?.stopUpdatingLocation() } }
+    if liveBuilder.dataSource == nil { liveBuilder.dataSource = HKLiveWorkoutDataSource(healthStore: store, workoutConfiguration: session.workoutConfiguration) }
+    if state.outcome == .stopped { state.failure = .captureFailed }
+    if state.outcome == .running || state.outcome == .paused { setupLocation(); if state.outcome == .paused { acceptance.setPaused(true, at: Date()); location?.stopUpdatingLocation() } }
   }
   func connect() { session.delegate = self; liveBuilder.delegate = self }
   override func start() async -> DriverState {
@@ -35,15 +39,15 @@ import MatchCore
   }
   override func pause() async -> DriverState {
     guard !stopRequested, !state.saved else { return currentState() }
-    route?.setPaused(true); location?.stopUpdatingLocation(); session.pause()
+    acceptance.setPaused(true, at: Date()); location?.stopUpdatingLocation(); session.pause()
     return await waitFor(.paused)
   }
   override func resume() async -> DriverState {
     guard !stopRequested, !state.saved else { return currentState() }
     session.resume(); return await waitFor(.running)
   }
-  override func requestStop() { super.requestStop(); if session.state != .stopped && session.state != .ended { session.stopActivity(with: Date()) } }
-  override func stop() async -> DriverState { requestStop(); return await waitFor(.stopped) }
+  override func requestStop() { super.requestStop(); if !stopIssued, session.state != .stopped && session.state != .ended { stopIssued = true; session.stopActivity(with: Date()) } }
+  override func stop() async -> DriverState { requestStop(); let result = await waitFor(.stopped); if result.outcome != .stopped && !result.saved { stopIssued = false }; return result }
   override func endSession() { if state.saved { session.end() } }
   func waitFor(_ expected: WorkoutOutcome) async -> DriverState {
     let clock = ContinuousClock(); let deadline = clock.now.advanced(by: timeout)
@@ -57,10 +61,10 @@ import MatchCore
       guard let self, !self.state.saved else { return }
       switch toState {
       case .running:
-        guard !self.stopRequested else { self.session.stopActivity(with: Date()); return }
+        guard !self.stopRequested else { self.requestStop(); return }
         self.state.outcome = .running; self.state.start = self.state.start ?? self.session.startDate
-        self.route?.setPaused(false); self.location?.startUpdatingLocation()
-      case .paused: self.state.outcome = .paused; self.route?.setPaused(true); self.location?.stopUpdatingLocation()
+        self.acceptance.setPaused(false, at: date); self.location?.startUpdatingLocation()
+      case .paused: self.state.outcome = .paused; self.acceptance.setPaused(true, at: date); self.location?.stopUpdatingLocation()
       case .stopped: self.state.outcome = .stopped; self.state.end = date
       default: break
       }

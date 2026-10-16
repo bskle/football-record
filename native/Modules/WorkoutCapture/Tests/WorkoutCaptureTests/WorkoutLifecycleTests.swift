@@ -10,6 +10,7 @@ import MatchCore
   var hangStart = false
   var suspendedSave: CheckedContinuation<DriverState, Never>?
   var hangSave = false
+  var stopFailures = 0
   func start() async -> DriverState {
     calls.append("start")
     if hangStart { return await withCheckedContinuation { suspendedStart = $0 } }
@@ -18,7 +19,7 @@ import MatchCore
   func pause() async -> DriverState { calls.append("pause"); state.outcome = .paused; return state }
   func resume() async -> DriverState { calls.append("resume"); state.outcome = .running; return state }
   func requestStop() { calls.append("requestStop") }
-  func stop() async -> DriverState { calls.append("stopped"); state.outcome = .stopped; return state }
+  func stop() async -> DriverState { calls.append("stopped"); if stopFailures > 0 { stopFailures -= 1; state.failure = .captureFailed; return state }; state.outcome = .stopped; return state }
   func endCollection() async -> Bool { calls.append("endCollection"); return true }
   func save() async -> DriverState { calls.append("save"); if hangSave { state = await withCheckedContinuation { suspendedSave = $0 }; return state }; state = saveResult; return state }
   func endSession() { calls.append("endSession") }
@@ -122,6 +123,15 @@ import MatchCore
     _ = await g.perform(try operation(.start)); f.driver.state = DriverState(outcome: .stopped, failure: .captureFailed)
     let result = await g.reconcile(try operation(.finish))
     XCTAssertEqual(result.outcome, .linked(workoutID: "REAL-UUID")); XCTAssertEqual(f.creations, 1)
+  }
+
+  func testFailedStopCanRetryOriginalTokenOnNewTerminalOperation() async throws {
+    let f = FakeFactory(); f.driver.stopFailures = 1; let g = AppleWorkoutGateway(factory: f)
+    _ = await g.perform(try operation(.start)); let failed = await g.perform(try operation(.finish))
+    XCTAssertEqual(failed.outcome, .running); XCTAssertEqual(failed.failure, .captureFailed)
+    let saved = await g.perform(try operation(.finish, id: "finish-second"))
+    XCTAssertEqual(saved.outcome, .linked(workoutID: "REAL-UUID")); XCTAssertEqual(f.creations, 1)
+    XCTAssertEqual(f.driver.calls.filter { $0 == "stopped" }.count, 2); XCTAssertEqual(f.driver.calls.filter { $0 == "save" }.count, 1)
   }
 
 }

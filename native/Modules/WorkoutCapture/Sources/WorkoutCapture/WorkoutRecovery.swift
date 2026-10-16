@@ -19,7 +19,7 @@ public enum WorkoutMetadata {
 #if os(iOS) || os(watchOS)
 @preconcurrency import HealthKit
 
-@MainActor func querySavedWorkout(store: HKHealthStore, sourceBundleID: String, context: WorkoutContext, timeout: Duration) async -> DriverState? {
+@MainActor func querySavedWorkout(store: HKHealthStore, sourceBundleID: String, context: WorkoutContext, timeout: Duration, actual: @escaping @MainActor (DriverState) -> Void) async -> DriverState? {
   let task = Task { @MainActor in
     await withCheckedContinuation { (c: CheckedContinuation<DriverState?, Never>) in
       let first = FirstCallback()
@@ -31,7 +31,8 @@ public enum WorkoutMetadata {
           WorkoutMetadata.matchesSaved(source: $0.sourceRevision.source.bundleIdentifier, expectedSource: sourceBundleID, metadata: $0.metadata ?? [:], context: context)
         }
         guard matches.count == 1, let workout = matches.first else { c.resume(returning: nil); return }
-        c.resume(returning: DriverState(outcome: .linked(workoutID: workout.uuid.uuidString), start: workout.startDate, end: workout.endDate))
+        let result = DriverState(outcome: .linked(workoutID: workout.uuid.uuidString), start: workout.startDate, end: workout.endDate)
+        Task { @MainActor in actual(result); c.resume(returning: result) }
       }
       store.execute(query)
     }

@@ -114,7 +114,7 @@ import MatchSession
   }
   private func finish(_ entry: Entry) async -> DriverState {
     if entry.state.saved { return entry.state }
-    if entry.finishCompleted, entry.driver?.currentState().outcome == .stopped { entry.finishTask = nil; entry.finishCompleted = false }
+    if entry.finishCompleted { entry.finishTask = nil; entry.finishCompleted = false }
     if let task = entry.finishTask { return await task.value }
     guard let driver = entry.driver else { return entry.state }
     driver.requestStop()

@@ -25,9 +25,7 @@ import MatchCore
   let sourceBundleID: String
   let timeout: Duration
   private let locationAuthorization = CLLocationManager()
-  #if os(watchOS)
-  private var recovered: [String: WatchLiveWorkout] = [:]
-  #endif
+  private let evidence = RecoveryEvidenceCache()
   public init(metrics: LiveMetricsChannel, timeout: Duration = .seconds(10)) {
     self.metrics = metrics; self.store = HKHealthStore(); self.sourceBundleID = HKSource.default().bundleIdentifier; self.timeout = timeout
   }
@@ -60,27 +58,39 @@ import MatchCore
     #endif
   }
   public func recover(context: WorkoutContext) async -> RecoveryLookup {
-    if let saved = await querySavedWorkout(store: store, sourceBundleID: sourceBundleID, context: context, timeout: timeout) { return .saved(saved) }
+    if case .saved(let proof) = evidence.lookup(context) { return .saved(proof) }
     #if os(watchOS)
-    if let driver = recovered[context.externalToken], driver.context == context { return .active(driver) }
-    let task = Task { @MainActor [store] in
-      await withCheckedContinuation { (c: CheckedContinuation<HKWorkoutSession?, Never>) in
+    if case .active(let driver) = evidence.lookup(context) {
+      if driver.currentState().saved { return .saved(driver.currentState()) }
+      if driver.currentState().outcome == .running || driver.currentState().outcome == .paused { return .active(driver) }
+    }
+    let task = Task { @MainActor [self] in
+      await withCheckedContinuation { (c: CheckedContinuation<WatchLiveWorkout?, Never>) in
         let first = FirstCallback()
         store.recoverActiveWorkoutSession { session, _ in
-          guard first.claim() else { return }; c.resume(returning: session)
+          guard first.claim() else { return }
+          Task { @MainActor [self] in
+            guard let session, WorkoutMetadata.matches(session.associatedWorkoutBuilder().metadata, context: context) else { c.resume(returning: nil); return }
+            // Reattachment itself is retained even if the caller's deadline has already elapsed.
+            let driver: WatchLiveWorkout
+            if case .active(let existing) = evidence.lookup(context), let watch = existing as? WatchLiveWorkout { driver = watch }
+            else { driver = WatchLiveWorkout(recovered: session, context: context, store: store, metrics: metrics, timeout: timeout); evidence.rememberActive(driver, context: context) }
+            c.resume(returning: driver)
+          }
         }
       }
     }
-    guard let result = await withDeadline(timeout, operation: { await task.value }), let session = result else { return .unknown }
-    let builder = session.associatedWorkoutBuilder()
-    guard WorkoutMetadata.matches(builder.metadata, context: context) else { return .unknown }
-    let driver = WatchLiveWorkout(recovered: session, context: context, store: store, metrics: metrics, timeout: timeout)
-    recovered[context.externalToken] = driver
-    return .active(driver)
-    #else
+    if let result = await withDeadline(timeout, operation: { await task.value }), let driver = result,
+       driver.currentState().outcome == .running || driver.currentState().outcome == .paused { return .active(driver) }
+    #endif
+    if let saved = await querySavedWorkout(store: store, sourceBundleID: sourceBundleID, context: context, timeout: timeout, actual: { [weak self] result in
+      self?.evidence.rememberSaved(result, context: context)
+    }) { return .saved(saved) }
+    #if os(watchOS)
+    if case .active(let driver) = evidence.lookup(context) { return .active(driver) }
+    #endif
     // iOS17 has no original manual-builder recovery API. An empty/hidden query cannot prove it was never saved.
     return .unknown
-    #endif
   }
 }
 func locationStatus(_ value: CLAuthorizationStatus) -> LocationAuthorization {

@@ -16,8 +16,8 @@ import MatchCore
   }
   override func pause() async -> DriverState {
     guard !stopRequested, !state.saved else { return currentState() }
-    route?.setPaused(true); location?.stopUpdatingLocation()
-    let event = HKWorkoutEvent(type: .pause, dateInterval: DateInterval(start: Date(), duration: 0), metadata: nil)
+    let pauseAt = Date(); acceptance.setPaused(true, at: pauseAt); location?.stopUpdatingLocation()
+    let event = HKWorkoutEvent(type: .pause, dateInterval: DateInterval(start: pauseAt, duration: 0), metadata: nil)
     let added = await sdkBool(timeout: timeout, issue: { [self] done in builder.addWorkoutEvents([event], completion: done) }, actual: { [self] success, _ in
       if success, !stopRequested, !state.saved { state.outcome = .paused } else if !state.saved { state.failure = .captureFailed }
     })
@@ -26,10 +26,11 @@ import MatchCore
   }
   override func resume() async -> DriverState {
     guard !stopRequested, !state.saved else { return currentState() }
-    let event = HKWorkoutEvent(type: .resume, dateInterval: DateInterval(start: Date(), duration: 0), metadata: nil)
+    let resumeAt = Date()
+    let event = HKWorkoutEvent(type: .resume, dateInterval: DateInterval(start: resumeAt, duration: 0), metadata: nil)
     _ = await sdkBool(timeout: timeout, issue: { [self] done in builder.addWorkoutEvents([event], completion: done) }, actual: { [self] success, _ in
       guard !stopRequested, !state.saved else { return }
-      if success { state.outcome = .running; route?.setPaused(false); location?.startUpdatingLocation() } else { state.failure = .captureFailed }
+      if success { state.outcome = .running; acceptance.setPaused(false, at: resumeAt); location?.startUpdatingLocation() } else { state.failure = .captureFailed }
     })
     return currentState()
   }

@@ -18,19 +18,44 @@ public struct RoutePoint: Sendable, Equatable {
   }
 }
 public protocol RouteSink: Sendable { func insert(_ points: [RoutePoint]) async -> Bool }
+/// Actual acceptance windows, including historical pauses for delayed Core Location batches.
+@MainActor public final class CaptureAcceptanceTimeline {
+  private var start: Date?
+  private var pauses: [(Date, Date?)] = []
+  public private(set) var paused = false
+  public init(start: Date? = nil) { self.start = start }
+  public func begin(at date: Date) { if start == nil { start = date } }
+  public func setPaused(_ value: Bool, at date: Date) {
+    if value {
+      if !paused { pauses.append((date, nil)); paused = true }
+      else if let last = pauses.indices.last, date < pauses[last].0 { pauses[last].0 = date }
+    } else if paused, let last = pauses.indices.last {
+      pauses[last].1 = max(pauses[last].0, date); paused = false
+    }
+  }
+  func continuity(at date: Date) -> Int? {
+    guard date.timeIntervalSinceReferenceDate.isFinite, start.map({ date >= $0 }) ?? true else { return nil }
+    var epoch = 0
+    for (pause, resume) in pauses {
+      if date >= pause {
+        guard let resume, date >= resume else { return nil }; epoch += 1
+      }
+    }
+    return epoch
+  }
+}
 @MainActor public final class WorkoutRouteWriter {
   public private(set) var failed = false
   private let sink: any RouteSink
   private let timeout: Duration
+  private let timeline: CaptureAcceptanceTimeline
   private var tail: Task<Void, Never>?
-  private var paused = false
   private var stopped = false
-  private var continuity = 0
   private var latestDate: Date?
-  public init(sink: any RouteSink, timeout: Duration = .seconds(10)) { self.sink = sink; self.timeout = timeout }
-  public func setPaused(_ paused: Bool) { if self.paused != paused { continuity += 1 }; self.paused = paused }
+  public init(sink: any RouteSink, timeout: Duration = .seconds(10), timeline: CaptureAcceptanceTimeline? = nil) { self.sink = sink; self.timeout = timeout; self.timeline = timeline ?? CaptureAcceptanceTimeline() }
+  public func setPaused(_ paused: Bool, at date: Date = Date()) { timeline.setPaused(paused, at: date) }
   @discardableResult public func append(_ point: RoutePoint) -> Bool {
-    guard !paused, !stopped, !failed, point.valid, latestDate.map({ point.timestamp > $0 }) ?? true else { return false }
+    guard !timeline.paused, !stopped, !failed, point.valid, let continuity = timeline.continuity(at: point.timestamp), latestDate.map({ point.timestamp > $0 }) ?? true else { return false }
     latestDate = point.timestamp; var point = point; point.continuity = continuity
     let acceptedPoint = point
     let previous = tail; let sink = sink; let timeout = timeout

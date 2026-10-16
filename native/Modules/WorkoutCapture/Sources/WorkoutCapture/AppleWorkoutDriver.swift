@@ -17,6 +17,8 @@ import MatchCore
   var saveAttempted = false
   var stopRequested = false
   var metadataTask: Task<Bool, Never>?
+  let metadataReadiness = MetadataReadiness()
+  let acceptance = CaptureAcceptanceTimeline()
   var route: WorkoutRouteWriter?
   var location: CLLocationManager?
   init(context: WorkoutContext, store: HKHealthStore, metrics: LiveMetricsChannel, timeout: Duration) {
@@ -38,16 +40,19 @@ import MatchCore
     state = state.merging(value)
   }
   func begin(at actualStart: Date) async -> Bool {
+    acceptance.begin(at: actualStart)
     let builder = builder!
     let result = await sdkBool(timeout: timeout, issue: { done in builder.beginCollection(withStart: actualStart, completion: done) }, actual: { [self] success, _ in
       if success {
         collectionStarted = true
-        if !state.saved { state = DriverState(outcome: stopRequested ? .stopped : .running, start: actualStart, end: state.end, failure: state.failure) }
+        if !state.saved { if state.outcome == .unknown { state.outcome = .running }; state.start = actualStart }
         metadataTask = Task { @MainActor [self] in
-          let added = await sdkBool(timeout: timeout, issue: { [self] done in builder.addMetadata(WorkoutMetadata.values(context: context), completion: done) })
-          if added == true, !stopRequested { setupLocation() }
-          if added != true, !state.saved { state.failure = .captureFailed }
-          if stopRequested { await finishLateCollection() }
+          let added = await sdkBool(timeout: timeout, issue: { [self] done in builder.addMetadata(WorkoutMetadata.values(context: context), completion: done) }, actual: { [self] success, _ in
+            metadataReadiness.receive(success: success, terminal: stopRequested,
+              startLocation: { [self] in setupLocation() },
+              finishOriginal: { [self] in Task { @MainActor in await finishLateCollection() } })
+            if !success, !state.saved { state.failure = .captureFailed }
+          })
           return added == true
         }
       } else if !state.saved { state.failure = .captureFailed }
@@ -106,7 +111,7 @@ import MatchCore
     #else
     let manualDistance = false
     #endif
-    route = WorkoutRouteWriter(sink: AppleRouteSink(route: routeBuilder, builder: builder, manualDistance: manualDistance, metrics: metrics, timeout: timeout), timeout: timeout)
+    route = WorkoutRouteWriter(sink: AppleRouteSink(route: routeBuilder, builder: builder, manualDistance: manualDistance, metrics: metrics, timeout: timeout), timeout: timeout, timeline: acceptance)
     let manager = CLLocationManager(); location = manager; manager.delegate = self
     manager.activityType = .fitness; manager.desiredAccuracy = kCLLocationAccuracyBest; manager.distanceFilter = kCLDistanceFilterNone
     #if os(iOS)
@@ -114,7 +119,7 @@ import MatchCore
     // Enable only when NATIVE-010 added the corresponding capability to this actual consumer.
     if (Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])?.contains("location") == true { manager.allowsBackgroundLocationUpdates = true }
     #endif
-    manager.requestWhenInUseAuthorization(); manager.startUpdatingLocation()
+    manager.requestWhenInUseAuthorization(); if !acceptance.paused { manager.startUpdatingLocation() }
   }
   nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
     Task { @MainActor [weak self] in
