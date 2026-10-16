@@ -424,6 +424,12 @@ public actor MatchSession {
       phase = .needsReconciliation
     } else if !pending.isEmpty {
       phase = .pending
+    } else if let original = records.first(where: { $0.operation.action == .start }),
+      original.state == .failed, case .notCreated(let failure) = original.observation?.outcome
+    {
+      // A cancelled absent finish's earlier unknown observation does not overturn the
+      // original start's fully persisted negative proof. Pending cleanup still wins above.
+      phase = .notRecorded(failure)
     } else if let physical {
       switch physical.outcome {
       case .running: phase = terminal(s) ? .needsReconciliation : .recording

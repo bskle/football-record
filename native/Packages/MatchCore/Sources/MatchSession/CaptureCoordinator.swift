@@ -83,6 +83,31 @@ extension MatchSession {
       current.operation == operation,
       current.state == .pending || current.state == .needsReconciliation
     else { return nil }
+    if current.state == .needsReconciliation, operation.action == .finish,
+      let start = s.captureOperations.first(where: { $0.operation.id == operation.externalToken }),
+      start.state == .failed, case .notCreated = start.observation?.outcome,
+      !s.captureOperations.contains(where: {
+        $0.operation.externalToken == operation.externalToken
+          && ($0.operation.action == .recover || $0.observation?.hasPositiveCaptureEvidence == true)
+      }),
+      !s.captureRevisions.contains(where: {
+        !$0.metadata.segments.isEmpty
+          || $0.metadata.gaps.contains(where: { $0.window.start != nil || $0.window.end != nil })
+      })
+    {
+      // Snapshot is only a candidate hint. Store checks the canonical start and all
+      // historical/segment evidence atomically before allowing this sole exception.
+      let update = try CaptureOperationUpdate(
+        operationID: operation.id, expectedState: .needsReconciliation, state: .cancelled,
+        observation: nil)
+      let command = operation.id + "/cancel-absent/" + String(s.business.generation)
+      _ = try await store.commitV2(
+        makeCommit(
+          command: command, generation: s.business.generation, descriptor: s.business.descriptor,
+          updates: [update]))
+      publish(try await snapshot(matchID: match))
+      return nil
+    }
     if current.state == .pending {
       let start = s.captureOperations.first { $0.operation.id == operation.externalToken }
       let neverCreated: Bool
@@ -214,7 +239,19 @@ extension MatchSession {
     guard let current = s.captureOperations.first(where: { $0.operation.id == operation.id }),
       current.operation == operation
     else { throw StoreError.operationConflict }
-    guard current.state == .needsReconciliation else { return }
+    let absentStart = s.captureOperations.first {
+      $0.operation.id == operation.externalToken && $0.operation.action == .start
+        && $0.state == .failed
+    }
+    let contradictsAbsence: Bool
+    if case .notCreated = absentStart?.observation?.outcome {
+      contradictsAbsence = observation.hasPositiveCaptureEvidence
+    } else {
+      contradictsAbsence = false
+    }
+    // Ordinary settled-operation idempotency is unchanged. A late positive fact that
+    // contradicts persisted absence must reach Store's raw-byte quarantine, not vanish.
+    guard current.state == .needsReconciliation || contradictsAbsence else { return }
     let normalized = try normalized(observation, operation: operation, current: current)
     if normalized == current.observation { return }
     let encoder = JSONEncoder()
@@ -225,7 +262,7 @@ extension MatchSession {
     let command = operation.id + "/observation/" + digest + "/" + String(s.business.generation)
     let state = observationState(normalized, operation: operation)
     let update = try CaptureOperationUpdate(
-      operationID: operation.id, expectedState: .needsReconciliation, state: state,
+      operationID: operation.id, expectedState: current.state, state: state,
       observation: normalized)
     let head = s.captureRevisions.max { $0.revision < $1.revision }
     var segments = head?.metadata.segments ?? []
@@ -279,6 +316,7 @@ extension MatchSession {
       outboxID: revisions.isEmpty ? nil : command + "/outbox")
     _ = try await store.commitV2(commit)
     publish(try projected(await store.snapshotV2(matchID: match)))
+    if case .notCreated = normalized.outcome { scheduleCapture(match) }
   }
   /// One finish attempt per token in each driver run. A confirmed failed action may be
   /// retried by recovery, while unknown/saved results must reconcile the existing operation.
