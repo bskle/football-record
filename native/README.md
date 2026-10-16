@@ -25,7 +25,7 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHON
 
 两端 scheme 均含 XCUI target。UI 脚本实际 launch/tap/swipe、核对按钮 frame/已保存显示变化并导出 xcresult 截图与可访问性树。`ONLY_ACTIVE_ARCH=YES`限定测试设备架构。UI执行使用Xcode正常Simulator ad-hoc签名，让其生成simulated application identifier/entitlements；不使用真实Team/profile/证书。无签名iPhone真实模式启动在HKSource的失败及同源ad-hoc定点通过均保留，不算真实授权证据。仅运行集成用例可加`NATIVE_UI_TEST_CLASS=NativeIntegrationUITests`。测试启动参数仅在 Debug 生效，dataset、失败注入和固定测试 clock 不进入生产入口。纯宿主或 SDK 构建不替代实际 UI 启动，更不证明 HealthKit、GPS、后台或触觉手感。
 
-基础已集成事实及证据见 [NATIVE-006](../docs/native/validation/NATIVE-006.md)、[NATIVE-007](../docs/native/validation/NATIVE-007.md) 与 [NATIVE-011](../docs/native/validation/NATIVE-011.md)。009基线的158宿主、六SDK、双App及两端七XCUI证据见[NATIVE-009](../docs/native/validation/NATIVE-009.md)。010候选4a90组合已执行204宿主、十SDK、双sim/双generic实际设备SDK无签名构建；后续窄修/已审依赖同步的来源与实际交互结果见[NATIVE-010](../docs/native/validation/NATIVE-010.md)，不把旧SHA证据改称新组合通过。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试仅是当时证据，不是当前测试数或原生 UI 验收。
+基础已集成事实及证据见 [NATIVE-006](../docs/native/validation/NATIVE-006.md)、[NATIVE-007](../docs/native/validation/NATIVE-007.md) 与 [NATIVE-011](../docs/native/validation/NATIVE-011.md)。009基线的158宿主、六SDK、双App及两端七XCUI证据见[NATIVE-009](../docs/native/validation/NATIVE-009.md)。010候选4a90组合已执行204宿主、十SDK、双sim/双generic实际设备SDK无签名构建；最终同步source834包含已审012修复；本轮Presentation22+Integration6，未变化184项沿用旧源，累计覆盖212而非单轮全跑。两端App及实际交互的精确来源见[NATIVE-010](../docs/native/validation/NATIVE-010.md)。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试仅是当时证据，不是当前测试数或原生 UI 验收。
 
 ## 事实、事务和展示边界
 

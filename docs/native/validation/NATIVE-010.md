@@ -1,6 +1,41 @@
 # NATIVE-010 设备集成候选验证
 
-作者`/root/m2_recording_ui`，创建base/目标dev=`2e1f9c42f4398a50b66765a0f37f90ced95a7554`。已审008 `6e86e8f1ac647b02b8f1ef407226a10398c5d998`由主代理普通合入后初始组合=`3a9d567362f4415146352acb706e586704c6f00c`。任务branch `test/m2-device-integration`，最新目标治理提交`7ae65db8f662c4afcdd053f63da6462bbed57262`不改产品字节。当前源`93e17b8a9b6783cace81aec8a2e6f7a24bd24450`含Phone说明和UI脚本窄修；已审012尚待主代理同步，最终受影响组合验证和双审待决，不宣称已合入/推送或物理通过。
+作者`/root/m2_recording_ui`，创建base/目标dev=`2e1f9c42f4398a50b66765a0f37f90ced95a7554`。已审008 `6e86e8f1ac647b02b8f1ef407226a10398c5d998`由主代理普通合入后初始组合=`3a9d567362f4415146352acb706e586704c6f00c`。任务branch `test/m2-device-integration`。主代理将已验证dev `505449279d6461436a051b5e6bc43324d805e3e0`（含已审012与GIT003纯治理）普通同步，**最终冻结源码=`834cac56522d88f7b11adf2c1cb98be1e3a5fca6`**；根质量及规格两名非作者均对此source确认PASS。最终文档增量审阅待决；本地候选待物理gate，不合入/推送dev、不归档。
+
+## 最终834受影响复验
+
+冻结105项编译/测试输入，`inputs-834cac5.json` SHA256=`f27c1416d7d0586f2d6c36f3c21e77562fe7623c9188af7b3454c44abf297f89`。源码与008/Core精确对应已审1ae/4a；与4a相比仅Phone说明、UI签名脚本及012的Presentation源/测试5条输入路径变化。Core/Workout67文件逐SHA256比对完全相同，因此未重复无变化全矩阵。
+
+| 检查 | 本轮实际结果及来源 |
+|---|---|
+| Presentation / AppIntegration宿主 | 22+6=28项，零失败；`affected-834/`日志，命令exit0 |
+| 未变化宿主与累计覆盖 | Core44 + Store64 + Session36 + Workout40共184项沿用下述4a90实跑；与本轮28累计212，**不是834同轮运行全212** |
+| 两Simulator App | iOS / Watch无签名BUILD SUCCEEDED，实际最低部署17/10 |
+| 两generic实际设备SDK App | iOS / Watch无签名BUILD SUCCEEDED，`device-source/logs/20261016T043540Z`；最终Info和最小配置entitlement检查通过，签名entitlement/profile/安装未验 |
+| 45mm Watch实际UI | 当前Xcode ad-hoc脚本新增3项通过，零失败，35.87秒；`ui-source/20261016T043542Z-Watch` |
+| 390pt iPhone实际UI | 当前ad-hoc脚本新增3项通过，零失败，48.57秒；`ui-source/20261016T043655Z-iOS` |
+| 部署SDK来源 | 4a90已实跑十项SDK；012对应Presentation双SDK另有已审[012证据](NATIVE-012.md)，最终受影响App实际编译。未把它们冒称834同轮十项重跑 |
+
+本轮受影响入口脚本保存在外部`final-834cac5/verify-affected-834.sh`，依次运行实际Presentation/Integration宿主及两端generic Simulator App；设备候选仍用仓库`scripts/native/verify-device-candidate.sh`，两端UI用当前`scripts/native/ui-test.sh`及`NATIVE_UI_TEST_CLASS=NativeIntegrationUITests`。新增UI核对真实SQLite中场下事实重开、UI-only启动及真实模式偏好重启（不开始Workout）。
+
+最终证据在下述持久目录`final-834cac5/`：105项输入、`source-comparison.json`、本轮host-sim-affected/unsigned-device日志、双端xcresult/截图/AX及结果索引。后续文档提交只绑定source/head和文件hash，不改变编译输入。
+
+本轮命令全部exit0；运行前后105项输入逐SHA256相同。`evidence-index.json`关联source、28本轮/212累计、全部6张图；`evidence-sha256.json`保存证据hash；`candidate-apps/`持久保留双端无开发者签名App供核对，不用于设备安装或分发。当前工具链Xcode27.0(27A266a)/Swift6.4，真实Team/证书未访问。
+
+以下PNG相对持久目录`final-834cac5/`：
+
+| 实际画面 | 路径 |
+|---|---|
+| iPhone真实模式重开、修正后的模拟锁说明 | `iOS/attachments/2DB5D4DC-02D0-4415-8AFF-D38B6EE6050C.png` |
+| iPhone UI-only记录启动 | `iOS/attachments/05504283-3640-49DA-A972-2320DA2D1DE5.png` |
+| iPhone原库场下事实重开 | `iOS/attachments/05B1CAC4-7D63-451C-A7B6-4E560A0EC1D3.png` |
+| Watch真实模式重开，不开始Workout | `Watch/attachments/CE2E17EC-2E2A-4CEC-9CFD-9DF665D6E240.png` |
+| Watch UI-only记录启动 | `Watch/attachments/2CF3A6FB-DE3E-4B64-9B78-BCBEA757B2CA.png` |
+| Watch原库场下事实重开 | `Watch/attachments/69E9E99F-3D32-4F53-A89B-0354EEEFB219.png` |
+
+作者实际查看真实模式两端图；Phone不再否定真实健康数据，模拟锁与真实验收模式同时可识别。每端xcresult及AX完整保留，实际朗读/触觉仍未执行。
+
+
 
 ## 冻结4a90实际组合
 
@@ -28,7 +63,7 @@
 
 两App仅普通HealthKit entitlement；share/update和WhenInUse用途，Watch workout-processing、Phone实际路线所需location后台。未加Always/audio/background-delivery，Team未知、占位Bundle ID未注册。无签名最终Info及配置entitlement不证明签名App能力。
 
-主代理/规格审指出Phone旧development说明否定真实运动数据，f3facc3改为“独立开发记录与模拟开赛锁，采集方式见当前环境”。真实模式会真的写健康。最终受影响Phone验证与012组合仍待执行，未把4a90旧结果倒写为窄修后通过。
+主代理/规格审指出Phone旧development说明否定真实运动数据，f3facc3改为“独立开发记录与模拟开赛锁，采集方式见当前环境”。真实模式会真的写健康。Phone说明与012当前组合按顶部受影响矩阵复验，未把4a90旧结果倒写为窄修后通过。
 
 ## 证据、资源与物理gate
 
