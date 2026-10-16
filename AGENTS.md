@@ -9,7 +9,7 @@
 - M1 本地基础交付完成：NATIVE-001 工程、NATIVE-002 共享事件引擎、NATIVE-003 SQLite 事务仓储 / outbox 与 NATIVE-004 采集片段值合同均经两位非作者审阅合入 `dev`。组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 已验证 70 项 XCTest 零失败、两端 MatchStore SDK 与两个 App 无签名构建通过。采集元数据仅为合同，落盘及真实采集接线留 M2；App 仍为开发预览壳，没有用户记录页面。当前治理快照见 [GIT-002 台账](docs/native/tasks/GIT-002.md)，旧任务卡保留当时状态。
 - 用户已授权按现有计划推进，并以“公开就公开暂时没事”接受当前 public 仓库，覆盖先前 private 意向。`origin = https://github.com/bskle/football-record.git`；主代理已核对 `gh` 登录、HTTPS 认证与仓库 `PUBLIC` / `ADMIN` 权限。GIT-001 合并后已首次原子推送三条长期分支与原型标签；截至本快照，远端 `dev` 已核对为上述组合 SHA，`main` / `release` 仍为原型基线，默认分支为 `main`。代码同步不等于原生发布，PR、CI 与服务端保护规则尚未配置。
 - NATIVE-002 / 003 / 004 已请求原生 worktree 归档，但工具仍返回 queued 且实际列表仍 active，三个临时分支均保留；不把请求当作清理成功，不强删或手动绕过。证据已保存到工作树外，代码均已进入 `dev`；GIT-002 文档树待双审集成后按同一规则处理。
-- Xcode 27.0 / Swift 6.4 可用；用户暂不能连接真机。签名、真实设备和远端写权限不阻止 M1 工程搭建、纯业务测试与无签名 SDK 构建；真实采集、联网锁及分发仍须各阶段证据。
+- Xcode 27.0 / Swift 6.4 可用；用户暂不能连接真机。M2 已进入技术计划，见 [M2 子计划](docs/superpowers/plans/2026-10-16-native-m2.md) 与 [NATIVE-005](docs/native/tasks/NATIVE-005.md)：先 006 采集事务、007 共享会话，再并行 008 真实采集适配与 009 UI/唯一工程装配；010 为临时设备集成任务，不增加长期分支。无设备不阻止仓储、服务和无设备影响 UI；真实采集先形成已编译/双审包，相关真机验收通过后才入 `dev`。生产许可仍待 M4，开发 fixture 隔离且不算真实锁/E2E。
 
 ## 角色与派工
 
