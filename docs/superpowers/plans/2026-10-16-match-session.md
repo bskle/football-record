@@ -7,10 +7,10 @@ Approved scope: M2 plan §5 and [session contract](../../native/contracts/m2-ses
 - [x] Implement canonical durable start, lookup-before-guard, global start admission, per-match transaction queue/inFlight, staged business commands and committed streams.
 - [x] Red/green capture and recovery races: durable pending→needsReconciliation→gateway→observation/revision, uncertain DB results, end priority, original token reconciliation, unique recovery and retained warnings.
 - [x] Extend verify.sh with both MatchSession SDK targets; run full host, iOS17/watch10 MatchStore+Session SDK and unsigned Apps. Copy logs and input hashes outside tree.
-- [ ] Deliver immutable source head for root and `/root/m2_review` dual review, resolve findings in new commits, then update final evidence docs. Root alone merges/pushes/archives.
+- [x] Deliver immutable source head for root and `/root/m2_review` dual review, resolve findings in new commits, then update final evidence docs. Root alone merges/pushes/archives.
 
 Start canonical IDs: command equals intent ID; `/intent` and `/start` store commands; `/event/start`, `/capture/start`, `/outbox/start` facts. Original requestedAt is the business start time per frozen contract; permit latency is not silently substituted. Ordinary request payload remains unchanged on retry. Gateway waits never occupy business queue. Capture failures remain orthogonal to lifecycle.
 
 Ownership: `native/Packages/MatchCore/**`, `scripts/native/verify.sh`, this plan, NATIVE-007 task/validation. Shared contract corrections require root review. Apps/Xcode/configuration and other modules/tasks read-only. No HealthKit/transport/real lock or device capability changes; device acceptance not applicable.
 
-Execution: final source `dd89f9f6592b6556d02dd7bea520f9ab7195184c`; 131 host tests and all four SDK/two unsigned App builds passed. Root quality review PASS; final specification/document review remains pending. Concrete storage, wakeup, recovery and token-proof findings were reproduced red and fixed in new commits; details in NATIVE-007 validation. No merge/push/archive by author.
+Execution: final source `dd89f9f6592b6556d02dd7bea520f9ab7195184c`; 131 host tests and all four SDK/two unsigned App builds passed. Root quality review and `/root/m2_review` specification review both PASS for this exact source; final document review remains pending. Concrete storage, wakeup, recovery and token-proof findings were reproduced red and fixed in new commits; details in NATIVE-007 validation. No merge/push/archive by author.

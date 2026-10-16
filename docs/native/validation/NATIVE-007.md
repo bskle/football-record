@@ -1,6 +1,6 @@
 # NATIVE-007 validation
 
-Source candidate: `dd89f9f6592b6556d02dd7bea520f9ab7195184c`; original base / target `7680ef6c45eab75105b244dd08f98f785adaa918`. Author `/root/m2_match_session`; quality review by `/root` PASS on this exact source; specification review by `/root/m2_review` pending final confirmation. This record does not assert integration or device acceptance.
+Source candidate: `dd89f9f6592b6556d02dd7bea520f9ab7195184c`; original base / target `7680ef6c45eab75105b244dd08f98f785adaa918`. Author `/root/m2_match_session`; independent source quality review by `/root` and specification review by `/root/m2_review` both PASS on this exact source; final document review and root integration remain pending. This record does not assert integration or device acceptance.
 
 ## Executed verification
 
