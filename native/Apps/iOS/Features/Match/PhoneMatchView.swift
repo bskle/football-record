@@ -8,6 +8,7 @@ struct PhoneMatchView: View {
   let model: RecordingModel
   let enterDevelopment: () -> Void
   @Environment(\.colorScheme) private var scheme
+  @Environment(\.dynamicTypeSize) private var typeSize
   @State private var choosingStart = false
   @State private var controls = false
   private var surface: Color { scheme == .dark ? MatchColors.forest : MatchColors.surface }
@@ -27,7 +28,9 @@ struct PhoneMatchView: View {
   private var match: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 16) {
-        HStack { Text("比赛").font(.largeTitle.bold()); Spacer(); if model.development { DevelopmentMarker() } }
+        if typeSize.isAccessibilitySize {
+          VStack(alignment: .leading, spacing: 8) { Text("比赛").font(.largeTitle.bold()); if model.development { DevelopmentMarker() } }
+        } else { HStack { Text("比赛").font(.largeTitle.bold()); Spacer(); if model.development { DevelopmentMarker() } } }
         if let s = model.snapshot, s.replay.state != .notStarted {
           TimelineView(.periodic(from: .now, by: 1)) { context in
             let p = MatchProjection(snapshot: s, now: context.date)
@@ -37,12 +40,21 @@ struct PhoneMatchView: View {
                 HStack { Text("本场比分"); Spacer(); Text("球历") }.font(.caption).foregroundStyle(.white.opacity(0.7))
                 HStack(alignment: .firstTextBaseline) { Text("我方"); Spacer(); Text(p.score).font(.system(size: 48, weight: .bold, design: .rounded)).monospacedDigit().minimumScaleFactor(0.7).accessibilityIdentifier("match-score"); Spacer(); Text("对方") }
               }.padding(20).foregroundStyle(.white).background(MatchColors.forest, in: RoundedRectangle(cornerRadius: 18))
-              HStack { clock("比赛时间", p.matchClock, "match-clock"); Spacer(); Divider(); Spacer(); clock("上场时间", p.fieldClock, "field-clock") }.padding(18).background(surface, in: RoundedRectangle(cornerRadius: 18))
+              Group {
+                if typeSize.isAccessibilitySize {
+                  VStack(alignment: .leading, spacing: 16) { clock("比赛时间", p.matchClock, "match-clock"); Divider(); clock("上场时间", p.fieldClock, "field-clock") }.frame(maxWidth: .infinity, alignment: .leading)
+                } else { HStack { clock("比赛时间", p.matchClock, "match-clock"); Spacer(); Divider(); Spacer(); clock("上场时间", p.fieldClock, "field-clock") } }
+              }.padding(18).background(surface, in: RoundedRectangle(cornerRadius: 18))
               VStack(alignment: .leading, spacing: 16) {
-                HStack { Text("实时数据").font(.headline); Spacer(); Text(p.capture).font(.caption).foregroundStyle(.secondary) }
-                Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 14) {
-                  GridRow { metric("心率", model.metrics.heartRate.text(unit: "bpm")); metric("距离", model.metrics.distance.text(unit: "km")) }
-                  GridRow { metric("速度", model.metrics.speed.text(unit: "km/h")); metric("GPS", model.metrics.gps) }
+                if typeSize.isAccessibilitySize {
+                  VStack(alignment: .leading, spacing: 8) { Text("实时数据").font(.headline); Text(p.capture).font(.caption).foregroundStyle(.secondary) }
+                  VStack(alignment: .leading, spacing: 14) { metric("心率", model.metrics.heartRate.text(unit: "bpm")); metric("距离", model.metrics.distance.text(unit: "km")); metric("速度", model.metrics.speed.text(unit: "km/h")); metric("GPS", model.metrics.gps) }
+                } else {
+                  HStack { Text("实时数据").font(.headline); Spacer(); Text(p.capture).font(.caption).foregroundStyle(.secondary) }
+                  Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 14) {
+                    GridRow { metric("心率", model.metrics.heartRate.text(unit: "bpm")); metric("距离", model.metrics.distance.text(unit: "km")) }
+                    GridRow { metric("速度", model.metrics.speed.text(unit: "km/h")); metric("GPS", model.metrics.gps) }
+                  }
                 }
               }.padding(18).background(surface, in: RoundedRectangle(cornerRadius: 18)).accessibilityIdentifier("missing-metrics")
               if let warning = p.captureWarning { Text(warning).font(.subheadline).accessibilityIdentifier("capture-warning") }
@@ -100,6 +112,6 @@ struct PhoneMatchView: View {
     }.background(paper)
   }
   private func placeholder(_ title: String, _ text: String) -> some View { ScrollView { VStack(alignment: .leading, spacing: 20) { Text(title).font(.largeTitle.bold()); Text(text).foregroundStyle(.secondary); if model.development { DevelopmentMarker() } }.frame(maxWidth: .infinity, alignment: .leading).padding(20) }.background(paper) }
-  private func clock(_ title: String, _ value: String, _ id: String) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.title.bold()).monospacedDigit().accessibilityIdentifier(id) } }
+  private func clock(_ title: String, _ value: String, _ id: String) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.title.bold()).monospacedDigit().lineLimit(1).fixedSize(horizontal: true, vertical: false).accessibilityIdentifier(id) } }
   private func metric(_ title: String, _ value: String) -> some View { VStack(alignment: .leading, spacing: 5) { Text(title).font(.caption).foregroundStyle(.secondary); Text(value).font(.headline).monospacedDigit() }.frame(maxWidth: .infinity, alignment: .leading).accessibilityElement(children: .combine) }
 }

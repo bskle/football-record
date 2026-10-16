@@ -14,7 +14,8 @@ import XCTest
   }
   private func reveal(_ id: String, in app: XCUIApplication) -> XCUIElement {
     let alertLabels = ["cancel-end": "继续比赛", "confirm-end": "结束并保存"]
-    let element = app.buttons[alertLabels[id] ?? id]
+    let identified = app.buttons[id]
+    let element = identified.exists ? identified : app.buttons[alertLabels[id] ?? id]
     for _ in 0..<5 { if element.exists && element.isHittable { return element }; app.swipeUp() }
     return element
   }
@@ -110,10 +111,21 @@ import XCTest
     XCTAssertFalse(app.buttons["retry-save"].exists); capture(app, "save-retry-committed")
   }
   #else
+  func testPhoneOverviewScreenshot() {
+    let app = launch(); start(app)
+    XCTAssertTrue(app.staticTexts["match-score"].exists)
+    capture(app, "phone-overview")
+  }
   func testPhoneTabsAndLargeText() {
     let app = launch(["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"])
-    start(app); capture(app, "phone-large-text")
-    app.tabBars.buttons["历史"].tap(); XCTAssertTrue(app.staticTexts["历史"].exists); capture(app, "phone-history")
+    start(app)
+    for id in ["match-clock", "field-clock"] {
+      let clock = app.staticTexts[id]
+      XCTAssertLessThan(clock.frame.height, 100, "Digits must remain on one line at accessibility size")
+      XCTAssertGreaterThanOrEqual(clock.frame.minX, 0); XCTAssertLessThanOrEqual(clock.frame.maxX, app.frame.width)
+    }
+    capture(app, "phone-large-text")
+    app.tabBars.buttons["历史"].tap(); XCTAssertTrue(app.staticTexts["历史"].firstMatch.exists); capture(app, "phone-history")
     app.tabBars.buttons["生涯"].tap(); XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "后续版本")).firstMatch.exists)
     app.tabBars.buttons["设置"].tap(); XCTAssertTrue(app.staticTexts["football-record"].exists)
   }
