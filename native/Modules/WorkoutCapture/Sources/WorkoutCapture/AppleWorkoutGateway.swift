@@ -31,7 +31,9 @@ import MatchSession
       default: break
       }
       if next.start != nil || next.end != nil { existenceObserved = true }
-      state = state.merging(next)
+      if existenceObserved { negativeStartProof = false }
+      if negativeStartProof { state = DriverState(outcome: .notCreated(.unavailable), failure: .unavailable) }
+      else { state = state.merging(next) }
     }
   }
   private let factory: any WorkoutDriverFactory
@@ -70,7 +72,7 @@ import MatchSession
     guard let entry = entry(for: operation) else { return observation(operation, state: DriverState(outcome: .unknown)) }
     if let prior = operations[operation.id], prior != operation { return observation(operation, state: DriverState(outcome: .unknown)) }
     operations[operation.id] = operation
-    if operation.action == .start, entry.negativeStartProof { return observation(operation, state: entry.state) }
+    if entry.negativeStartProof { return observation(operation, state: DriverState(outcome: .notCreated(.unavailable), failure: .unavailable)) }
     entry.recoveryAttempted = true
     if operation.action == .finish { entry.terminal = true }
     if case .linked = entry.state.outcome { return observation(operation, state: entry.state) }

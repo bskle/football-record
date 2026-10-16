@@ -154,6 +154,8 @@ import MatchCore
     XCTAssertEqual(endedStart.outcome, .notCreated(.unavailable)); XCTAssertEqual(f.creations, 0)
     let original = await g.reconcile(start); XCTAssertEqual(original.outcome, .notCreated(.unavailable))
     let notStart = await g.reconcile(finish); XCTAssertEqual(notStart.outcome, .unknown); XCTAssertEqual(f.creations, 0)
+    _ = await g.perform(finish) // Previously cached unknown finish response must not erase proven start absence.
+    let stillAbsent = await g.reconcile(start); XCTAssertEqual(stillAbsent.outcome, .notCreated(.unavailable))
   }
   func testTimedOutFreshAuthorizationStillNeverCreatesAfterTerminal() async throws {
     let f = FakeFactory(); f.holdAuthorization = true; let g = AppleWorkoutGateway(factory: f, timeout: .milliseconds(5))
