@@ -15,7 +15,20 @@ public struct MatchProjection {
   public let assists: Int
   public let recent: [MatchEvent]
   public let capture: String
+  public let captureWarning: String?
   public init(snapshot: SessionSnapshot, now: Date) {
+    if snapshot.store.captureRevisions.max(by: { $0.revision < $1.revision })?.metadata.gaps.isEmpty == false {
+      captureWarning = "运动采集存在缺口，未补算缺失数据。"
+    } else {
+      switch snapshot.captureFailure {
+      case .writeDenied: captureWarning = "未获运动写入权限，比赛事实仍已保存。"
+      case .locationDenied: captureWarning = "定位不可用，路线未记录。"
+      case .routeFailed: captureWarning = "路线记录中断，比赛事实仍已保存。"
+      case .recoveryUnavailable: captureWarning = "原运动无法恢复，采集片段需要核对。"
+      case .captureFailed: captureWarning = "运动采集失败，等待核对。"
+      case .unavailable, nil: captureWarning = nil
+      }
+    }
     let facts = snapshot.store.business
     let r = MatchReplay.replay(descriptor: facts.descriptor, events: facts.events, now: now, completionEvidence: facts.completionEvidence)
     score = "\(r.score.forTeam) : \(r.score.against)"

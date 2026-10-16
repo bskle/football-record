@@ -1,27 +1,40 @@
-import MatchCore
+import MatchPresentation
 import SwiftUI
 
 @main
 struct FootballRecordWatchApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ScrollView {
-                VStack(spacing: 12) {
-                    Text(AppIdentity.chineseName)
-                        .font(.title2.bold())
-                    Text(AppIdentity.englishName)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("开发预览")
-                        .font(.headline)
-                    Text("尚未开始记录。")
-                    Text("比赛记录功能正在开发中。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+    var body: some Scene { WindowGroup { RecordingRoot() } }
+}
+private struct RecordingRoot: View {
+    @State private var model: RecordingModel?
+    @State private var failure: String?
+    var body: some View {
+        Group {
+            if let model { WatchMatchView(model: model, enterDevelopment: enterDevelopment).id(ObjectIdentifier(model)) }
+            else if let failure { Text(failure).padding() }
+            else { ProgressView("正在载入记录") }
+        }.task { if model == nil { await initialize() } }
+    }
+    private func initialize() async {
+        do {
+            #if DEBUG
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("--ui-testing"), let index = arguments.firstIndex(of: "--ui-dataset"), arguments.indices.contains(index + 1) {
+                if let scenarioIndex = arguments.firstIndex(of: "--ui-scenario"), arguments.indices.contains(scenarioIndex + 1), let scenario = DebugRecordingScenario(rawValue: arguments[scenarioIndex + 1]) {
+                    model = try await AppBootstrap.developmentScenario(scenario, dataset: arguments[index + 1])
+                    return
                 }
-                .multilineTextAlignment(.center)
-                .padding()
+                model = try AppBootstrap.development(dataset: arguments[index + 1], failFirstScore: arguments.contains("--ui-fail-first-score"), fixedClock: arguments.contains("--ui-fixed-clock"))
+                return
             }
-        }
+            #endif
+            model = try AppBootstrap.production()
+        } catch { failure = "暂时无法载入记录，请保留本机数据后重试。" }
+    }
+    private func enterDevelopment() {
+        #if DEBUG
+        do { model = try AppBootstrap.development(dataset: UUID().uuidString) }
+        catch { failure = "无法建立独立开发演练。" }
+        #endif
     }
 }

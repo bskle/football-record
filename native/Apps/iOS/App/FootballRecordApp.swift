@@ -1,26 +1,40 @@
-import MatchCore
+import MatchPresentation
 import SwiftUI
 
 @main
 struct FootballRecordApp: App {
-    var body: some Scene {
-        WindowGroup {
-            VStack(spacing: 24) {
-                VStack(spacing: 8) {
-                    Text(AppIdentity.chineseName)
-                        .font(.largeTitle.bold())
-                    Text(AppIdentity.englishName)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+    var body: some Scene { WindowGroup { RecordingRoot() } }
+}
+private struct RecordingRoot: View {
+    @State private var model: RecordingModel?
+    @State private var failure: String?
+    var body: some View {
+        Group {
+            if let model { PhoneMatchView(model: model, enterDevelopment: enterDevelopment).id(ObjectIdentifier(model)) }
+            else if let failure { Text(failure).padding() }
+            else { ProgressView("正在载入记录") }
+        }.task { if model == nil { await initialize() } }
+    }
+    private func initialize() async {
+        do {
+            #if DEBUG
+            let arguments = ProcessInfo.processInfo.arguments
+            if arguments.contains("--ui-testing"), let index = arguments.firstIndex(of: "--ui-dataset"), arguments.indices.contains(index + 1) {
+                if let scenarioIndex = arguments.firstIndex(of: "--ui-scenario"), arguments.indices.contains(scenarioIndex + 1), let scenario = DebugRecordingScenario(rawValue: arguments[scenarioIndex + 1]) {
+                    model = try await AppBootstrap.developmentScenario(scenario, dataset: arguments[index + 1])
+                    return
                 }
-
-                ContentUnavailableView {
-                    Label("开发预览", systemImage: "soccerball")
-                } description: {
-                    Text("尚未开始记录。比赛记录功能正在开发中。")
-                }
+                model = try AppBootstrap.development(dataset: arguments[index + 1], failFirstScore: arguments.contains("--ui-fail-first-score"), fixedClock: arguments.contains("--ui-fixed-clock"))
+                return
             }
-            .padding()
-        }
+            #endif
+            model = try AppBootstrap.production()
+        } catch { failure = "暂时无法载入记录，请保留本机数据后重试。" }
+    }
+    private func enterDevelopment() {
+        #if DEBUG
+        do { model = try AppBootstrap.development(dataset: UUID().uuidString) }
+        catch { failure = "无法建立独立开发演练。" }
+        #endif
     }
 }

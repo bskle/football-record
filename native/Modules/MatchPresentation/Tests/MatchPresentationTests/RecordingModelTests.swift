@@ -135,3 +135,27 @@ extension RecordingModelTests {
     await m.perform(.undoLastQuick); XCTAssertEqual(m.snapshot?.replay.score.forTeam, 0)
   }
 }
+
+struct OtherIdentity: DeviceIdentityProvider { func localDeviceID() async throws -> String { "another-device" } }
+extension RecordingModelTests {
+  func testOtherDeviceRecoveryDisplaysUniqueSnapshotReadOnly() async throws {
+    let f = try Fixture(); let started = try await f.start()
+    let other = MatchSession(store: f.repository, deviceIdentity: OtherIdentity(), clock: f.clock, ids: UUIDSessionIDFactory(), permits: DevelopmentStartPermitProvider(), workout: UnavailableWorkoutGateway(), environment: .development(databaseNamespace: "presentation-test"))
+    let m = RecordingModel(session: other, repository: f.repository, development: true)
+    await m.load(); XCTAssertTrue(m.readOnly); XCTAssertFalse(m.canRecord)
+    XCTAssertEqual(m.snapshot?.replay.matchID, started.replay.matchID)
+    await m.perform(.quick(.myGoal)); XCTAssertEqual(m.snapshot?.replay.score.forTeam, 0)
+    XCTAssertTrue(m.issue?.contains("另一台设备") == true)
+  }
+  func testUnavailableProductionPermitKeepsSingleOriginalIntentOnRetry() async throws {
+    let repository = try SQLiteSessionRepository(rootDirectory: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), databaseNamespace: "production")
+    let s = MatchSession(store: repository, deviceIdentity: Identity(), clock: Clock(), ids: UUIDSessionIDFactory(), permits: UnavailableStartPermitProvider(), workout: UnavailableWorkoutGateway(), environment: .production)
+    let m = RecordingModel(session: s, repository: repository, development: false)
+    await m.start(starter: true); let original = try XCTUnwrap(m.pendingRequest)
+    XCTAssertEqual(m.feedbackCount, 0); await m.retry()
+    XCTAssertEqual(m.pendingRequest, original); XCTAssertEqual(m.feedbackCount, 0)
+    let matches = try await repository.matchIDs(); XCTAssertEqual(matches, [original.matchID])
+    let stored = try await repository.snapshotV2(matchID: original.matchID)
+    XCTAssertTrue(stored.business.events.isEmpty); XCTAssertNil(stored.business.descriptor.startPermit)
+  }
+}

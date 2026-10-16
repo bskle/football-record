@@ -4,11 +4,11 @@ import MatchStore
 import MatchSession
 
 public enum AppBootstrap {
-  @MainActor public static func production() throws -> RecordingModel {
-    try make(namespace: SQLiteSessionRepository.productionNamespace, development: false)
+  @MainActor public static func production(workout: any WorkoutGateway = UnavailableWorkoutGateway()) throws -> RecordingModel {
+    try make(namespace: SQLiteSessionRepository.productionNamespace, development: false, workout: workout)
   }
-  @MainActor private static func make(namespace: String, development: Bool, failFirstScore: Bool = false) throws -> RecordingModel {
-    let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("football-record", isDirectory: true)
+  @MainActor static func make(namespace: String, development: Bool, failFirstScore: Bool = false, fixedClock: Bool = false, workout: any WorkoutGateway = UnavailableWorkoutGateway(), rootDirectory: URL? = nil) throws -> RecordingModel {
+    let support = try rootDirectory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("football-record", isDirectory: true)
     let repository = try SQLiteSessionRepository(rootDirectory: support, databaseNamespace: namespace)
     let identity = PersistentDeviceIdentityProvider(url: support.appendingPathComponent(namespace).appendingPathComponent("device.identity"), repository: repository)
     var store: any SessionRepository = repository
@@ -21,20 +21,25 @@ public enum AppBootstrap {
       if failFirstScore { store = DebugFailureRepository(repository) }
     }
     #endif
-    let session = MatchSession(store: store, deviceIdentity: identity, clock: SystemSessionClock(), ids: UUIDSessionIDFactory(), permits: permits, workout: UnavailableWorkoutGateway(), environment: environment)
+    var clock: any SessionClock = SystemSessionClock()
+    #if DEBUG
+    if development && fixedClock { clock = DebugFrozenClock(value: Date()) }
+    #endif
+    let session = MatchSession(store: store, deviceIdentity: identity, clock: clock, ids: UUIDSessionIDFactory(), permits: permits, workout: workout, environment: environment)
     return RecordingModel(session: session, repository: store, development: development)
   }
   #if DEBUG
-  @MainActor public static func development(dataset: String, failFirstScore: Bool = false) throws -> RecordingModel {
+  @MainActor public static func development(dataset: String, failFirstScore: Bool = false, fixedClock: Bool = false, workout: any WorkoutGateway = UnavailableWorkoutGateway()) throws -> RecordingModel {
     let canonical = String(dataset.lowercased().utf8.filter { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }.map { Character(UnicodeScalar($0)) }.prefix(80))
     guard !canonical.isEmpty else { throw SessionError.invalidRequest }
-    return try make(namespace: "ui-simulation-" + canonical, development: true, failFirstScore: failFirstScore)
+    return try make(namespace: "ui-simulation-" + canonical, development: true, failFirstScore: failFirstScore, fixedClock: fixedClock, workout: workout)
   }
   #endif
 }
 
 #if DEBUG
 /// Explicit UI-test failure injection, reachable only through the separate Debug dataset factory.
+private struct DebugFrozenClock: SessionClock { let value: Date; func now() -> Date { value } }
 private actor DebugFailureRepository: SessionRepository {
   let repository: SQLiteSessionRepository
   var failed = false

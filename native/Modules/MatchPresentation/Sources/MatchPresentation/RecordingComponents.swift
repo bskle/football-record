@@ -13,10 +13,11 @@ public enum MatchColors {
   public static let watch = Color(red: 8/255, green: 19/255, blue: 15/255)
 }
 public struct DevelopmentMarker: View {
-  public init() {}
+  let compact: Bool
+  public init(compact: Bool = false) { self.compact = compact }
   public var body: some View {
-    Text("开发模拟锁").font(.caption2.bold()).foregroundStyle(MatchColors.accent)
-      .padding(.horizontal, 6).padding(.vertical, 2).background(MatchColors.forest, in: Capsule())
+    Text("开发模拟锁").font(compact ? .system(size: 8, weight: .bold) : .caption2.bold()).foregroundStyle(MatchColors.accent)
+      .padding(.horizontal, compact ? 3 : 6).padding(.vertical, compact ? 1 : 2).background(MatchColors.forest, in: Capsule())
       .accessibilityIdentifier("development-marker")
   }
 }
