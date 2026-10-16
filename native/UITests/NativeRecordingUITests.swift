@@ -14,8 +14,8 @@ import XCTest
   }
   private func reveal(_ id: String, in app: XCUIApplication) -> XCUIElement {
     let alertLabels = ["cancel-end": "继续比赛", "confirm-end": "结束并保存"]
-    let identified = app.buttons[id]
-    let element = identified.exists ? identified : app.buttons[alertLabels[id] ?? id]
+    let identified = app.buttons[id].firstMatch
+    let element = identified.exists ? identified : app.buttons[alertLabels[id] ?? id].firstMatch
     for _ in 0..<5 { if element.exists && element.isHittable { return element }; app.swipeUp() }
     return element
   }
