@@ -20,6 +20,22 @@ private actor FaultRepository: SessionRepository {
   init(_ inner: SQLiteSessionRepository) { self.inner = inner }
   func inject(_ mode: String, outcome: WorkoutOutcome? = nil) { self.mode = mode; failed = false; failedAction = outcome }
   func injectCancellation(_ mode: String) { cancellationFault = mode; failed = false }
+  func syncRepositoryIdentity() async -> SyncRepositoryIdentity { await inner.syncRepositoryIdentity() }
+  func unroutedBusinessOutboxV3(matchID: String) async throws -> [BusinessOutboxItem] { try await inner.unroutedBusinessOutboxV3(matchID: matchID) }
+  func routeBusinessOutboxV3(outboxID: String, peer: PeerAuthorization, now: Date) async throws -> RouteReceiptV3 { try await inner.routeBusinessOutboxV3(outboxID: outboxID, peer: peer, now: now) }
+  func pendingPacketsV2(matchID: String) async throws -> [MatchPacketV2] { try await inner.pendingPacketsV2(matchID: matchID) }
+  func receiveV2(_ bytes: Data, peer: PeerAuthorization, expectedMatchID: String, now: Date) async throws -> InboundReceiptV3 { try await inner.receiveV2(bytes, peer: peer, expectedMatchID: expectedMatchID, now: now) }
+  func acknowledgeV2(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws { try await inner.acknowledgeV2(bytes, peer: peer, now: now) }
+  func syncStateV3(matchID: String) async throws -> SyncState { try await inner.syncStateV3(matchID: matchID) }
+  func ensureSyncDeliveriesV3(matchID: String) async throws { try await inner.ensureSyncDeliveriesV3(matchID: matchID) }
+  func dueSyncDeliveriesV3(now: Date, limit: Int) async throws -> [SyncDeliveryRecord] { try await inner.dueSyncDeliveriesV3(now: now, limit: limit) }
+  func recordSyncAttemptV3(deliveryID: String, nextAttemptAt: Date, issue: SyncIssue?, now: Date) async throws { try await inner.recordSyncAttemptV3(deliveryID: deliveryID, nextAttemptAt: nextAttemptAt, issue: issue, now: now) }
+  func validateSyncDeliveryV3(deliveryID: String, peer: PeerAuthorization, now: Date) async throws { try await inner.validateSyncDeliveryV3(deliveryID: deliveryID, peer: peer, now: now) }
+  func reactivateSyncACKsV3() async throws { try await inner.reactivateSyncACKsV3() }
+  func acceptSyncFragmentV3(_ bytes: Data, peer: PeerAuthorization, now: Date) async throws -> FragmentAssemblyResult { try await inner.acceptSyncFragmentV3(bytes, peer: peer, now: now) }
+  func pendingSyncAssembliesV3(peer: PeerAuthorization, now: Date) async throws -> [FragmentAssemblyResult] { try await inner.pendingSyncAssembliesV3(peer: peer, now: now) }
+  func consumeSyncAssemblyV3(messageID: String, wholeChecksum: String) async throws { try await inner.consumeSyncAssemblyV3(messageID: messageID, wholeChecksum: wholeChecksum) }
+  func expireSyncAssembliesV3(now: Date) async throws { try await inner.expireSyncAssembliesV3(now: now) }
   func databaseNamespace() async -> String { await inner.databaseNamespace() }
   func matchIDs() async throws -> [String] { try await inner.matchIDs() }
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 { try await inner.snapshotV2(matchID: matchID) }
