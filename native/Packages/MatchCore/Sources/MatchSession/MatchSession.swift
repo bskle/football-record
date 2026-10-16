@@ -41,13 +41,16 @@ public actor MatchSession {
   }
   func validateEnvironment() async throws {
     let namespace = await store.databaseNamespace()
+    guard SQLiteSessionRepository.isCanonicalNamespace(namespace) else {
+      throw SessionError.developmentIsolationRequired
+    }
     switch environment {
     case .production:
       guard namespace == SQLiteSessionRepository.productionNamespace else {
         throw SessionError.developmentIsolationRequired
       }
     case .development(let expected):
-      guard !expected.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      guard SQLiteSessionRepository.isCanonicalNamespace(expected),
         expected != SQLiteSessionRepository.productionNamespace, namespace == expected
       else { throw SessionError.developmentIsolationRequired }
     }

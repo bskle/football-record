@@ -185,4 +185,29 @@ final class SessionRecoveryTests: XCTestCase, @unchecked Sendable {
     } catch let e as SessionError { XCTAssertEqual(e, .multipleCandidates) }
   }
 
+  func testNamespaceAliasesAreRejectedBeforeOpeningExistingProductionDatabase() async throws {
+    let h = try Harness()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let production = try SQLiteSessionRepository(
+      rootDirectory: root, databaseNamespace: "production")
+    let session = MatchSession(
+      store: production, deviceIdentity: Identity(value: "watch"), clock: h.clock, ids: h.ids,
+      permits: UnavailableStartPermitProvider(), workout: h.gateway, environment: .production)
+    let original = try await session.prepareStart(starter: true)
+    do { _ = try await session.execute(original) } catch {}
+    let before = try await production.snapshotV2(matchID: original.matchID)
+    for alias in ["Production", "PRODUCTION", "ｐroduction", "productioｎ", "devélopment"] {
+      do {
+        let opened = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: alias)
+        try await opened.close()
+        XCTFail("namespace alias must be rejected before opening a database: \(alias)")
+      } catch let e as SessionError { XCTAssertEqual(e, .invalidRequest) }
+    }
+    let after = try await production.snapshotV2(matchID: original.matchID)
+    XCTAssertEqual(after.business.descriptor, before.business.descriptor)
+    XCTAssertEqual(after.business.generation, before.business.generation)
+    XCTAssertEqual(after.business.events, before.business.events)
+    try await production.close()
+  }
+
 }

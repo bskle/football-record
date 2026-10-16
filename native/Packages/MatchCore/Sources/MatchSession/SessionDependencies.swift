@@ -67,10 +67,14 @@ public actor SQLiteSessionRepository: SessionRepository {
   private let store: MatchStore
   private let namespace: String
   public let databaseURL: URL
+  static func isCanonicalNamespace(_ value:String) -> Bool {
+    !value.isEmpty && value.utf8.allSatisfy { byte in
+      (byte >= 97 && byte <= 122) || (byte >= 48 && byte <= 57) || byte == 45 || byte == 95
+    }
+  }
   public init(rootDirectory: URL, databaseNamespace: String) throws {
-    let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
-    guard !databaseNamespace.isEmpty, databaseNamespace.unicodeScalars.allSatisfy(allowed.contains)
-    else { throw SessionError.invalidRequest }
+    // APFS may fold case and Unicode. Only canonical ASCII names reach the path factory.
+    guard Self.isCanonicalNamespace(databaseNamespace) else { throw SessionError.invalidRequest }
     namespace = databaseNamespace
     let directory = rootDirectory.appendingPathComponent(databaseNamespace, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
