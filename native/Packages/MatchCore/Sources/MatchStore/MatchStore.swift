@@ -55,6 +55,7 @@ public actor MatchStore {
                 throw quarantine(.invalidPacket, code: "invalid-wire-routing", key: b.packetID, raw: bytes, severity: .audit)
             }
             return try db.transaction {
+                if let descriptor = try descriptorAndGeneration(expectedMatchID)?.0 { try validateCaptureAbsenceIntegrity(descriptor: descriptor) }
                 let ack = DurableACK(packetID: b.packetID, checksum: packet.checksum, receivingDeviceID: localDeviceID)
                 if let row = try db.rows("SELECT checksum,peer,ack FROM inbound WHERE packet_id=? OR idempotency_key=?", [.text(b.packetID), .text(b.idempotencyKey)]).first {
                     let saved = try decode(DurableACK.self, row[2], table: "inbound", key: b.packetID)
@@ -107,6 +108,8 @@ public actor MatchStore {
         let bytes = try Canonical.data(request), hash = Canonical.hash(bytes)
         let receipt: CommitReceipt = try preservingDiagnostics(matchID: request.descriptor.matchID) {
             try db.transaction {
+                if let descriptor = try descriptorAndGeneration(request.descriptor.matchID)?.0 { try validateCaptureAbsenceIntegrity(descriptor: descriptor) }
+
                 if let saved = try db.rows("SELECT request_hash,receipt FROM commands WHERE command_id=?", [.text(request.commandID)]).first {
                     guard saved[0].string == hash else { throw StoreError.commandConflict }
                     let receipt = try decode(CommitReceipt.self, saved[1], table: "commands", key: request.commandID)
@@ -195,7 +198,8 @@ public actor MatchStore {
 
     public func pendingPackets(matchID: String) throws -> [MatchPacket] {
         try preservingDiagnostics(matchID: matchID) {
-            try db.rows("SELECT packet_id,packet,checksum,target FROM outbox WHERE match_id=? AND ack IS NULL ORDER BY rowid", [.text(matchID)]).map {
+            if let descriptor = try descriptorAndGeneration(matchID)?.0 { try validateCaptureAbsenceIntegrity(descriptor: descriptor) }
+            return try db.rows("SELECT packet_id,packet,checksum,target FROM outbox WHERE match_id=? AND ack IS NULL ORDER BY rowid", [.text(matchID)]).map {
                 let key = $0[0].string ?? "invalid-id"
                 let packet = try decode(MatchPacket.self, $0[1], table: "outbox", key: key)
                 do { try packet.validate() } catch {
