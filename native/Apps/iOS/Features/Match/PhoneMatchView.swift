@@ -113,7 +113,7 @@ struct PhoneMatchView: View {
       VStack(alignment: .leading, spacing: 16) {
         Text("设置").font(.largeTitle.bold()); Text("球历").font(.title2.bold()); Text("football-record").foregroundStyle(.secondary)
         Text("开赛服务与跨设备同步仍在开发中；真实采集须在设备验收环境核对。").font(.subheadline)
-        if model.development { DevelopmentMarker(); Text("此演练使用独立记录，不代表真实开赛锁或真实运动数据。").font(.caption) }
+        if model.development { DevelopmentMarker(); Text("此环境使用独立开发记录与模拟开赛锁，采集方式见当前环境。").font(.caption) }
         #if DEBUG
         Text(environmentTitle).accessibilityIdentifier("integration-environment-title")
         Button("开发环境", action: openEnvironment).frame(minHeight: 44).accessibilityIdentifier("open-environment")
