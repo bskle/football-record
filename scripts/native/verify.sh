@@ -47,4 +47,11 @@ xcodebuild -project "$project" -scheme FootballRecord-Watch \
     -destination 'generic/platform=watchOS Simulator' \
     -derivedDataPath "$build_root/DerivedData-Watch" CODE_SIGNING_ALLOWED=NO build \
     2>&1 | tee "$log_dir/watch-build.log"
+# The device candidate links these real modules; validate their host boundaries and deployment SDKs.
+for module in WorkoutCapture AppIntegration; do
+    if [[ "$module" == WorkoutCapture ]]; then module_path="$repo_root/native/Modules/WorkoutCapture"; else module_path="$repo_root/native/Apps/iOS/Integration"; fi
+    swift test --package-path "$module_path" --scratch-path "$build_root/$module-Host" 2>&1 | tee "$log_dir/$module-tests.log"
+    xcrun swift build --package-path "$module_path" --target "$module" --triple arm64-apple-ios17.0-simulator --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" --scratch-path "$build_root/$module-iOS" 2>&1 | tee "$log_dir/$module-ios-build.log"
+    xcrun swift build --package-path "$module_path" --target "$module" --triple arm64-apple-watchos10.0-simulator --sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" --scratch-path "$build_root/$module-Watch" 2>&1 | tee "$log_dir/$module-watch-build.log"
+done
 printf 'Native verification passed. Logs: %s\n' "$log_dir"

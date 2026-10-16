@@ -12,7 +12,12 @@ build_root="${NATIVE_UI_BUILD_ROOT:-/tmp/football-record-native-ui}"
 run_root="$build_root/$(date -u +%Y%m%dT%H%M%SZ)-$platform"
 mkdir -p "$run_root"
 printf 'Native UI evidence: %s\n' "$run_root"
-xcodebuild test -project "$repo_root/native/FootballRecord.xcodeproj" \
+test_filter=()
+if [[ -n "${NATIVE_UI_TEST_CLASS:-}" ]]; then
+  [[ "$NATIVE_UI_TEST_CLASS" =~ ^[A-Za-z0-9_]+$ ]] || { printf 'Invalid UI test class\n' >&2; exit 2; }
+  test_filter=("-only-testing:FootballRecord-$platform-UITests/$NATIVE_UI_TEST_CLASS")
+fi
+xcodebuild test "${test_filter[@]}" -project "$repo_root/native/FootballRecord.xcodeproj" \
   -scheme "FootballRecord-$platform" -destination "platform=$destination,id=$device" \
   -derivedDataPath "$build_root/DerivedData-$platform" \
   -resultBundlePath "$run_root/acceptance.xcresult" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES \

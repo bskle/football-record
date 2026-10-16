@@ -7,6 +7,8 @@ import WatchKit
 struct WatchMatchView: View {
   let model: RecordingModel
   let enterDevelopment: () -> Void
+  let openEnvironment: () -> Void
+  let environmentTitle: String
   @State private var choosingStart = false
   @State private var controls = false
   @State private var page = 0
@@ -30,7 +32,9 @@ struct WatchMatchView: View {
             Button("开始比赛") { choosingStart = true }.frame(minHeight: 44).tint(MatchColors.accent).accessibilityIdentifier("start-match").disabled(model.busy || model.pendingRequest != nil || model.readOnly)
             RecordingIssueView(model: model)
             #if DEBUG
-            if !model.development { Button("开发演练", action: enterDevelopment).frame(minHeight: 44).accessibilityIdentifier("enter-development") }
+            Text(environmentTitle).font(.caption2).accessibilityIdentifier("integration-environment-title")
+            Button("开发环境", action: openEnvironment).frame(minHeight: 44).accessibilityIdentifier("open-environment")
+            if !model.development { Button("纯界面演练", action: enterDevelopment).frame(minHeight: 44).accessibilityIdentifier("enter-development") }
             #endif
           }.padding(.horizontal, 8)
         }
@@ -75,6 +79,9 @@ struct WatchMatchView: View {
       if let warning = p.captureWarning { Text(warning).font(.caption2).accessibilityIdentifier("capture-warning") }
       if model.issue != nil { RecordingIssueView(model: model) }
       if model.readOnly { Text("另一台设备记录 · 仅可查看").font(.caption2) }
+      #if DEBUG
+      Button("开发环境", action: openEnvironment).font(.caption2).frame(minHeight: 44).accessibilityIdentifier("open-environment")
+      #endif
     }.padding(.bottom, 2)
   }
   private func clock(_ title: String, _ value: String, _ id: String) -> some View {
