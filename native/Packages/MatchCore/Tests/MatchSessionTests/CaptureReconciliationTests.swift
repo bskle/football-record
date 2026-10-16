@@ -432,4 +432,69 @@ final class CaptureReconciliationTests: XCTestCase, @unchecked Sendable {
       }.allSatisfy { $0.state == .cancelled })
   }
 
+  func testPauseQueuedDuringRecoveryIsCancelledWhenOldTokenBecomesSavedAndReplaced() async throws {
+    let h = try Harness()
+    let r = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(r)
+    try await h.waitCaptureSettled(r.matchID)
+    let gateway = FakeGateway()
+    await gateway.configure(
+      outcome: .linked(workoutID: "actual-old"), failure: .recoveryUnavailable, suspend: true)
+    let recovering = MatchSession(
+      store: h.repo, deviceIdentity: Identity(value: "watch"), clock: h.clock, ids: h.ids,
+      permits: DevelopmentStartPermitProvider(), workout: gateway,
+      environment: .development(databaseNamespace: "test-development"))
+    _ = try await recovering.recover()
+    await gateway.waitForPerform(1)
+    h.clock.advance(10)
+    _ = try await recovering.execute(recovering.prepare(.pause, matchID: r.matchID))
+    await gateway.release()
+    try await eventually(
+      "old pending pause must be resolved while replacement start remains pending"
+    ) {
+      let s = try await h.repo.snapshotV2(matchID: r.matchID)
+      return s.captureOperations.filter { $0.operation.action == .start }.count == 2
+        && s.captureOperations.contains { $0.operation.action == .pause && $0.state != .pending }
+    }
+    let s = try await h.repo.snapshotV2(matchID: r.matchID)
+    XCTAssertEqual(s.captureOperations.last { $0.operation.action == .pause }?.state, .cancelled)
+    let calls = await gateway.performed
+    XCTAssertEqual(calls.map(\.action), [.recover])
+    XCTAssertEqual(s.captureOperations.last?.state, .pending)
+  }
+  func testLinkedTokenProofFromEarlierOperationDominatesOlderRunningSibling() async throws {
+    let h = try Harness()
+    await h.gateway.configure(outcome: .unknown)
+    let r = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(r)
+    await h.repo.waitForObservation()
+    await h.gateway.configure(outcome: .unknown, failure: .captureFailed)
+    await h.gateway.script(.finish, [.running])
+    h.clock.advance(10)
+    _ = try await h.session.execute(h.session.prepare(.end, matchID: r.matchID))
+    try await eventually("finish known failed with start still uncertain") {
+      let s = try await h.repo.snapshotV2(matchID: r.matchID)
+      return s.captureOperations.contains { $0.operation.action == .finish && $0.state == .failed }
+    }
+    let gateway = FakeGateway()
+    let repo = TestRepository(try MatchStore(url: h.url))
+    await gateway.configure(outcome: .linked(workoutID: "actual-saved"), suspend: true)
+    await gateway.script(.finish, [.linked(workoutID: "actual-saved")])
+    await gateway.setReconciliationTime(h.clock.now().addingTimeInterval(20))
+    let reopened = MatchSession(
+      store: repo, deviceIdentity: Identity(value: "watch"), clock: h.clock, ids: h.ids,
+      permits: DevelopmentStartPermitProvider(), workout: gateway,
+      environment: .development(databaseNamespace: "test-development"))
+    _ = try await reopened.recover()
+    await repo.waitForObservation()
+    try await Task.sleep(for: .milliseconds(30))
+    let calls = await gateway.performed
+    XCTAssertTrue(calls.isEmpty, "saved original token must never finish again")
+    let value = try await reopened.snapshot(matchID: r.matchID)
+    XCTAssertEqual(value.capturePhase, .finished)
+    XCTAssertEqual(
+      value.store.captureRevisions.last?.metadata.segments.map(\.workoutID), ["actual-saved"])
+    await gateway.release()
+  }
+
 }

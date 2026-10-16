@@ -96,7 +96,7 @@ extension MatchSession {
       let tokenRecords = s.captureOperations.filter {
         $0.operation.externalToken == operation.externalToken
       }
-      let lifecycle = tokenRecords.compactMap(\.observation).last?.outcome
+      let lifecycle = tokenObservation(s, token: operation.externalToken)?.outcome
       let obsolete =
         (operation.action == .pause && business != .paused)
         || (operation.action == .resume && business != .running)
@@ -106,7 +106,10 @@ extension MatchSession {
           || (operation.action == .resume && lifecycle == .running))
       if (terminal(s) && operation.action != .finish)
         || (operation.action == .finish && neverCreated)
-        || (controls && (neverCreated || start?.state == .pending || obsolete || redundant))
+        || (controls
+          && (neverCreated || start?.state == .pending || obsolete || redundant
+            || tokenHasSaveProof(s, token: operation.externalToken)
+            || tokenWasReplaced(s, token: operation.externalToken)))
       {
         let update = try CaptureOperationUpdate(
           operationID: operation.id, expectedState: .pending, state: .cancelled, observation: nil)
@@ -132,7 +135,10 @@ extension MatchSession {
       publish(try projected(s))
       // Holding the match queue across this final read establishes dispatch-before-end order.
       // If end already won, reconcile the original token instead of issuing a new start/resume.
-      return Dispatch(operation: operation, perform: !terminal(s) || operation.action == .finish)
+      return Dispatch(
+        operation: operation,
+        perform: !tokenHasSaveProof(s, token: operation.externalToken)
+          && (!terminal(s) || operation.action == .finish))
     }
     return Dispatch(operation: operation, perform: false)
   }
@@ -287,8 +293,9 @@ extension MatchSession {
     where start.operation.action == .start && !attempted.contains(start.operation.externalToken) {
       let token = start.operation.externalToken
       let records = s.captureOperations.filter { $0.operation.externalToken == token }
-      guard !records.contains(where: { $0.state == .pending || $0.state == .needsReconciliation }),
-        let latest = records.compactMap(\.observation).last,
+      guard !tokenHasSaveProof(s, token: token),
+        !records.contains(where: { $0.state == .pending || $0.state == .needsReconciliation }),
+        let latest = tokenObservation(s, token: token),
         latest.outcome == .running || latest.outcome == .paused
       else { continue }
       let command = token + "/terminal-finish/" + String(s.business.generation)

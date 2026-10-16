@@ -154,6 +154,7 @@ actor FakeGateway: WorkoutGateway {
   var failure: CaptureFailure?
   var suspend = false
   var scripts: [String: [WorkoutOutcome]] = [:]
+  var reconcileTime: Date?
   var reconSuspend = false
   var reconContinuation: CheckedContinuation<Void, Never>?
   var reconWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
@@ -170,6 +171,7 @@ actor FakeGateway: WorkoutGateway {
     if reconciled.count >= count { return }
     await withCheckedContinuation { reconWaiters.append((count, $0)) }
   }
+  func setReconciliationTime(_ time: Date) { reconcileTime = time }
   func suspendReconciliation() { reconSuspend = true }
   func releaseReconciliation() {
     reconSuspend = false
@@ -217,7 +219,7 @@ actor FakeGateway: WorkoutGateway {
     if reconSuspend { await withCheckedContinuation { reconContinuation = $0 } }
     return try! WorkoutObservation(
       operationID: operation.id, binding: operation.binding, externalToken: operation.externalToken,
-      observedAt: operation.requestedAt.addingTimeInterval(0.2), outcome: outcome,
+      observedAt: reconcileTime ?? operation.requestedAt.addingTimeInterval(0.2), outcome: outcome,
       window: CaptureWindow(start: nil, end: nil), failure: failure)
   }
 }

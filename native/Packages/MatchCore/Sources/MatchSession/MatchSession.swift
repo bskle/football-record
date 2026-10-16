@@ -116,6 +116,36 @@ public actor MatchSession {
       $0.operation.action == .start && $0.state != .failed && $0.state != .cancelled
     }
   }
+  /// Save proof is monotonic across every operation for one physical Workout token.
+  /// Operation creation order is not observation order (an older start may reconcile last).
+  func tokenObservation(_ snapshot: StoreSnapshotV2, token: String) -> WorkoutObservation? {
+    let observations = snapshot.captureOperations.filter { $0.operation.externalToken == token }
+      .compactMap(\.observation)
+    let newest: (WorkoutObservation, WorkoutObservation) -> Bool = { $0.observedAt < $1.observedAt }
+    if let linked = observations.filter({
+      if case .linked = $0.outcome { return true }
+      return false
+    }).max(by: newest) {
+      return linked
+    }
+    if let awaiting = observations.filter({ $0.outcome == .savedAwaitingLink }).max(by: newest) {
+      return awaiting
+    }
+    return observations.max(by: newest)
+  }
+  func tokenHasSaveProof(_ snapshot: StoreSnapshotV2, token: String) -> Bool {
+    switch tokenObservation(snapshot, token: token)?.outcome {
+    case .linked, .savedAwaitingLink: return true
+    default: return false
+    }
+  }
+  func tokenWasReplaced(_ snapshot: StoreSnapshotV2, token: String) -> Bool {
+    let starts = snapshot.captureOperations.filter { $0.operation.action == .start }
+    guard let index = starts.firstIndex(where: { $0.operation.externalToken == token }) else {
+      return false
+    }
+    return index < starts.count - 1
+  }
   public func prepareStart(starter: Bool) async throws -> SessionRequest {
     try await validateEnvironment()
     let device = try await identity()
@@ -378,23 +408,29 @@ public actor MatchSession {
         if case .notCreated(let f) = o.outcome { return f }
         return o.failure
       }.first
-    let pending = s.captureOperations.filter {
-      $0.state == .pending || $0.state == .needsReconciliation
-    }
+    // The newest start selects the current token, while its physical phase is aggregated
+    // from all operations for that token. A linked proof outranks stale running siblings.
+    let token = s.captureOperations.last(where: { $0.operation.action == .start })?.operation
+      .externalToken
+    let records = s.captureOperations.filter { $0.operation.externalToken == token }
+    let pending = records.filter { $0.state == .pending || $0.state == .needsReconciliation }
+    let physical = token.flatMap { tokenObservation(s, token: $0) }
     let phase: CapturePhase
-    if pending.contains(where: { $0.observation?.outcome == .savedAwaitingLink }) {
+    if case .linked = physical?.outcome {
+      phase = .finished
+    } else if physical?.outcome == .savedAwaitingLink {
       phase = .savedAwaitingLink
     } else if pending.contains(where: { $0.state == .needsReconciliation }) {
       phase = .needsReconciliation
     } else if !pending.isEmpty {
       phase = .pending
-    } else if let last = observations.last {
-      switch last.outcome {
+    } else if let physical {
+      switch physical.outcome {
       case .running: phase = terminal(s) ? .needsReconciliation : .recording
       case .paused: phase = terminal(s) ? .needsReconciliation : .paused
       case .linked: phase = .finished
       case .savedAwaitingLink: phase = .savedAwaitingLink
-      case .notCreated(let f): phase = .notRecorded(f)
+      case .notCreated(let failure): phase = .notRecorded(failure)
       case .stopped, .unknown: phase = .needsReconciliation
       }
     } else {
