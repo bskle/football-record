@@ -98,6 +98,9 @@ public struct WorkoutObservation: Codable, Sendable, Equatable {
     public init(operationID: String, binding: CaptureBinding, externalToken: String, observedAt: Date, outcome: WorkoutOutcome, window: CaptureWindow, failure: CaptureFailure? = nil) throws {
         try captureID(operationID); try captureID(externalToken); try captureDate(observedAt)
         if case .linked(let workoutID) = outcome { try captureID(workoutID) }
+        if case .notCreated = outcome, window.start != nil || window.end != nil {
+            throw CaptureValueError.invalidObservation
+        }
         self.operationID = operationID
         self.binding = binding
         self.externalToken = externalToken
@@ -105,6 +108,14 @@ public struct WorkoutObservation: Codable, Sendable, Equatable {
         self.outcome = outcome
         self.window = window
         self.failure = failure
+    }
+    /// Shared package-only proof predicate; no new public gateway/repository API.
+    package var hasPositiveCaptureEvidence: Bool {
+        if window.start != nil || window.end != nil || failure == .routeFailed { return true }
+        switch outcome {
+        case .running, .paused, .stopped, .savedAwaitingLink, .linked: return true
+        case .unknown, .notCreated: return false
+        }
     }
     private enum CodingKeys: String, CodingKey { case operationID, binding, externalToken, observedAt, outcome, window, failure }
     public init(from decoder: any Decoder) throws {

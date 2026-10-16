@@ -42,6 +42,11 @@ extension MatchStore {
                 }
                 try validateDescriptor(request.descriptor, prior: existing?.0)
                 try validateFacts(request.events, descriptor: request.descriptor)
+                if let existing {
+                    let saved = try loadSavedOperations(matchID: matchID, descriptor: existing.0)
+                    try rejectAbsenceContradictions(request, saved: saved, descriptor: existing.0)
+                    try validateAbsentCancellations(saved, descriptor: existing.0)
+                }
                 let generation = request.expectedGeneration + 1
                 try writeDescriptor(request.descriptor, generation: generation)
                 try append(request.events, matchID: matchID); try fail(.afterEvents)
@@ -54,6 +59,7 @@ extension MatchStore {
                 try fail(.afterOutbox)
                 let receipt = try expectedReceipt(request)
                 try db.execute("INSERT INTO commands_v2 VALUES (?,?,?,?,?)", [.text(request.commandID), .text(matchID), .blob(bytes), .text(hash), .blob(try Canonical.data(receipt))])
+                _ = try loadOperations(matchID: matchID, descriptor: request.descriptor)
                 try fail(.afterReceipt); try fail(.beforeCommit)
                 return receipt
             }
@@ -83,6 +89,7 @@ extension MatchStore {
     public func pendingBusinessOutbox(matchID: String) throws -> [BusinessOutboxItem] {
         try preservingDiagnostics(matchID: matchID) {
             try db.transaction {
+                if let descriptor = try descriptorAndGeneration(matchID)?.0 { try validateCaptureAbsenceIntegrity(descriptor: descriptor) }
                 let items = try db.rows("SELECT id FROM business_outbox WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
                     let item = try loadBusinessOutbox(id: $0[0].string ?? "invalid-id")
                     guard item.matchID == matchID else { throw corruptCapture("business_outbox", key: item.id, raw: try Canonical.data(item)) }
@@ -117,6 +124,7 @@ extension MatchStore {
 
     /// Both snapshot APIs call this boundary, so old evidence cannot bypass capture invalidation.
     func filteredCompletionEvidence(descriptor: MatchDescriptor, legacy: TrustedCompletionEvidence?) throws -> TrustedCompletionEvidence? {
+        try validateCaptureAbsenceIntegrity(descriptor: descriptor)
         let revisions = try loadCaptureRevisions(descriptor: descriptor)
         if let row = try db.rows("SELECT evidence,capture_digest FROM completion_v2 WHERE match_id=?", [.text(descriptor.matchID)]).first {
             let evidence = try decode(TrustedCompletionEvidence.self, row[0], table: "completion_v2", key: descriptor.matchID)
@@ -166,7 +174,7 @@ extension MatchStore {
             operationIDs: request.newCaptureOperations.map(\.id) + request.captureOperationUpdates.map(\.operationID),
             businessOutboxIDs: request.businessOutbox.map(\.id))
     }
-    private func verifiedCommandV2(commandID: String, row: [SQLValue]) throws -> CommittedCommandV2 {
+    private func verifiedCommandV2(commandID: String, row: [SQLValue], validateAbsence: Bool = true) throws -> CommittedCommandV2 {
         let request = try checkedCapture(StoreCommitV2.self, raw: row[0], checksum: row[1], table: "commands_v2", key: commandID)
         let receipt = try decode(CommitReceiptV2.self, row[2], table: "commands_v2", key: commandID)
         guard request.commandID == commandID, request.descriptor.matchID == row[3].string, receipt == (try expectedReceipt(request)),
@@ -197,6 +205,7 @@ extension MatchStore {
         for item in request.businessOutbox {
             guard try loadBusinessOutbox(id: item.id) == item else { throw corruptCapture("business_outbox", key: item.id, raw: try Canonical.data(item)) }
         }
+        if validateAbsence { _ = try loadOperations(matchID: persisted.0.matchID, descriptor: persisted.0) }
         return try CommittedCommandV2(request: request, receipt: receipt)
     }
     private func validateV2Coverage(_ request: StoreCommitV2) throws {
@@ -290,12 +299,89 @@ extension MatchStore {
 
     private struct HistoryItem { let commandID: String; let record: CaptureOperationRecord }
     private struct SavedOperation { let record: CaptureOperationRecord; let history: [HistoryItem] }
-    private func loadOperations(matchID: String, descriptor: MatchDescriptor) throws -> [CaptureOperationRecord] {
+    private func loadSavedOperations(matchID: String, descriptor: MatchDescriptor) throws -> [SavedOperation] {
         let operations = try db.rows("SELECT id FROM capture_operations WHERE match_id=? ORDER BY rowid", [.text(matchID)]).map {
-            try loadOperation(id: $0[0].string ?? "invalid-id", descriptor: descriptor).record
+            try loadOperation(id: $0[0].string ?? "invalid-id", descriptor: descriptor)
         }
-        try verifyCaptureRegistrySet(kind: "operation", matchID: matchID, ids: operations.map { $0.operation.id }, table: "capture_operations")
+        try verifyCaptureRegistrySet(kind: "operation", matchID: matchID, ids: operations.map { $0.record.operation.id }, table: "capture_operations")
         return operations
+    }
+    func validateCaptureAbsenceIntegrity(descriptor: MatchDescriptor) throws {
+        _ = try loadOperations(matchID: descriptor.matchID, descriptor: descriptor)
+    }
+    private func loadOperations(matchID: String, descriptor: MatchDescriptor) throws -> [CaptureOperationRecord] {
+        let saved = try loadSavedOperations(matchID: matchID, descriptor: descriptor)
+        try validateAbsentCancellations(saved, descriptor: descriptor)
+        return saved.map(\.record)
+    }
+    private func isAbsenceCancellation(_ from: CaptureOperationRecord, _ to: CaptureOperationRecord) -> Bool {
+        from.state == .needsReconciliation && to.state == .cancelled && to.observation == nil && to.operation.action == .finish
+    }
+    private func absenceProven(for finish: CaptureOperation, saved: [SavedOperation], descriptor: MatchDescriptor) throws -> Bool {
+        guard finish.action == .finish,
+              let start = saved.first(where: { $0.record.operation.id == finish.externalToken }),
+              start.record.operation.action == .start, start.record.operation.externalToken == finish.externalToken,
+              start.record.operation.binding == finish.binding, start.record.state == .failed,
+              case .notCreated = start.record.observation?.outcome else { return false }
+        // Rejected late evidence is retained outside the canonical history. It is still
+        // known physical evidence, so a later retry cannot ignore that contradiction.
+        guard !(try diagnostics(matchID: descriptor.matchID)).contains(where: {
+            $0.code == "capture-absence-contradiction" && $0.severity == .blocking
+        }) else { return false }
+        let token = saved.filter { $0.record.operation.externalToken == finish.externalToken }
+        guard !token.contains(where: { $0.record.operation.action == .recover }),
+              !token.flatMap(\.history).contains(where: { $0.record.observation?.hasPositiveCaptureEvidence == true }) else { return false }
+        // Segment has a binding but no trusted token field. Do not guess from an ID prefix.
+        let revisions = try loadCaptureRevisions(descriptor: descriptor)
+        guard !revisions.contains(where: { !$0.metadata.segments.isEmpty || $0.metadata.gaps.contains(where: { $0.window.start != nil || $0.window.end != nil }) }) else { return false }
+        // Full canonical command/receipt verification is deliberately non-recursive here.
+        // The caller validates every exceptional transition after these original commands.
+        for history in start.history {
+            guard let row = try db.rows("SELECT request,request_hash,receipt,match_id FROM commands_v2 WHERE command_id=?", [.text(history.commandID)]).first else {
+                throw corruptCapture("capture_operation_history", key: start.record.operation.id, raw: try Canonical.data(history.record))
+            }
+            _ = try verifiedCommandV2(commandID: history.commandID, row: row, validateAbsence: false)
+        }
+        return true
+    }
+    private func validateAbsentCancellations(_ saved: [SavedOperation], descriptor: MatchDescriptor) throws {
+        for operation in saved {
+            for pair in zip(operation.history, operation.history.dropFirst()) where isAbsenceCancellation(pair.0.record, pair.1.record) {
+                guard try absenceProven(for: operation.record.operation, saved: saved, descriptor: descriptor) else {
+                    throw quarantine(.invalidOperationTransition, code: "capture-absence-proof-invalid", key: operation.record.operation.id, raw: try Canonical.data(pair.1.record))
+                }
+            }
+        }
+    }
+    private func rejectAbsenceContradictions(_ request: StoreCommitV2, saved: [SavedOperation], descriptor: MatchDescriptor) throws {
+        let absent = saved.filter { if case .notCreated = $0.record.observation?.outcome { return $0.record.operation.action == .start && $0.record.state == .failed }; return false }
+        func conflict(_ id: String, _ raw: Data, error:StoreError = .captureConflict) -> Quarantined {
+            quarantine(error, code: "capture-absence-contradiction", key: id, raw: raw)
+        }
+        for update in request.captureOperationUpdates {
+            guard let observation = update.observation else { continue }
+            if observation.hasPositiveCaptureEvidence, absent.contains(where: { $0.record.operation.externalToken == observation.externalToken && $0.record.operation.binding == observation.binding }) {
+                throw conflict(update.operationID, try Canonical.data(observation))
+            }
+            if case .notCreated = observation.outcome {
+                let history = saved.filter { $0.record.operation.externalToken == observation.externalToken }.flatMap(\.history)
+                if history.contains(where: { $0.record.observation?.hasPositiveCaptureEvidence == true }) {
+                    throw conflict(update.operationID, try Canonical.data(observation), error:.invalidOperationTransition)
+                }
+                if request.captureOperationUpdates.contains(where: { $0.observation?.externalToken == observation.externalToken && $0.observation?.hasPositiveCaptureEvidence == true }) {
+                    throw conflict(update.operationID, try Canonical.data(observation), error:.invalidOperationTransition)
+                }
+            }
+        }
+        let hasCancellation = saved.contains { operation in zip(operation.history,operation.history.dropFirst()).contains(where: { isAbsenceCancellation($0.0.record,$0.1.record) }) }
+        if hasCancellation {
+            for revision in request.captureRevisions where !revision.metadata.segments.isEmpty || revision.metadata.gaps.contains(where: { $0.window.start != nil || $0.window.end != nil }) {
+                throw conflict(revision.id, try Canonical.data(revision))
+            }
+            for operation in request.newCaptureOperations where operation.action == .recover && absent.contains(where: { $0.record.operation.externalToken == operation.externalToken }) {
+                throw conflict(operation.id, try Canonical.data(operation))
+            }
+        }
     }
     private func loadOperation(id: String, descriptor: MatchDescriptor, uncommittedCommandID: String? = nil) throws -> SavedOperation {
         guard let row = try db.rows("SELECT match_id,operation,checksum,record,record_checksum,history_count FROM capture_operations WHERE id=?", [.text(id)]).first else {
@@ -353,6 +439,8 @@ extension MatchStore {
         }
     }
     private func legalTransition(from: CaptureOperationRecord, to: CaptureOperationRecord) -> Bool {
+        // Shape only; all mutation/readback paths additionally require the durable proof.
+        if isAbsenceCancellation(from, to) { return true }
         guard (from.state == .pending && (to.state == .needsReconciliation || to.state == .cancelled) && to.observation == nil) ||
               (from.state == .needsReconciliation && (to.state == .needsReconciliation || to.state == .settled || to.state == .failed)) else { return false }
         if from.observation?.failure == .routeFailed, to.observation?.failure != .routeFailed { return false }
@@ -398,6 +486,12 @@ extension MatchStore {
         do { next = try CaptureOperationRecord(operation: current.operation, state: update.state, observation: update.observation) }
         catch { throw StoreError.invalidOperationTransition }
         guard legalTransition(from: current, to: next) else { throw StoreError.invalidOperationTransition }
+        if isAbsenceCancellation(current, next) {
+            let operations = try loadSavedOperations(matchID: descriptor.matchID, descriptor: descriptor)
+            guard try absenceProven(for: current.operation, saved: operations, descriptor: descriptor) else {
+                throw quarantine(.invalidOperationTransition, code: "capture-absence-proof-invalid", key: update.operationID, raw: try Canonical.data(update))
+            }
+        }
         if case .linked(let workoutID) = next.observation?.outcome {
             let revisions = try loadCaptureRevisions(descriptor: descriptor)
             guard revisions.contains(where: { $0.metadata.segments.contains(where: { $0.workoutID == workoutID && $0.binding == current.operation.binding }) }) else { throw StoreError.invalidCaptureRevision }
