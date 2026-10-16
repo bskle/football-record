@@ -129,6 +129,14 @@ import XCTest
     app.tabBars.buttons["历史"].tap(); XCTAssertTrue(app.staticTexts["历史"].firstMatch.exists); capture(app, "phone-history")
     app.tabBars.buttons["生涯"].tap(); XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "后续版本")).firstMatch.exists)
     app.tabBars.buttons["设置"].tap(); XCTAssertTrue(app.staticTexts["football-record"].exists)
+    app.tabBars.buttons["比赛"].tap()
+    tap("open-controls", in: app); tap("request-end", in: app); tap("confirm-end", in: app)
+    let status = app.staticTexts["match-status"].firstMatch
+    XCTAssertTrue(status.waitForExistence(timeout: 5)); XCTAssertTrue(status.label.contains("待同步"))
+    XCTAssertGreaterThanOrEqual(status.frame.minX, 0); XCTAssertLessThanOrEqual(status.frame.maxX, app.frame.width)
+    XCTAssertLessThan(status.frame.height, 150, "Long terminal status must not be squeezed beside the field label")
+    for _ in 0..<5 { if status.isHittable && status.frame.minY > 45 { break }; app.swipeDown() }
+    capture(app, "phone-large-ended-status")
   }
   #endif
 }

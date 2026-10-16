@@ -35,7 +35,12 @@ struct PhoneMatchView: View {
           TimelineView(.periodic(from: .now, by: 1)) { context in
             let p = MatchProjection(snapshot: s, now: context.date)
             VStack(alignment: .leading, spacing: 16) {
-              HStack { Label(p.status, systemImage: p.paused ? "pause.circle" : p.terminal ? "clock.badge.checkmark" : "record.circle").font(.subheadline).accessibilityIdentifier("match-status"); Spacer(); Text(p.onField ? "场上" : "场下").font(.subheadline.bold()) }
+              if typeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 8) {
+                  Label { Text(p.status.replacingOccurrences(of: " · ", with: "\n")) } icon: { Image(systemName: p.paused ? "pause.circle" : p.terminal ? "clock.badge.checkmark" : "record.circle") }.font(.subheadline).accessibilityLabel(p.status).accessibilityIdentifier("match-status")
+                  Text(p.onField ? "场上" : "场下").font(.subheadline.bold())
+                }.frame(maxWidth: .infinity, alignment: .leading)
+              } else { HStack { Label(p.status, systemImage: p.paused ? "pause.circle" : p.terminal ? "clock.badge.checkmark" : "record.circle").font(.subheadline).accessibilityIdentifier("match-status"); Spacer(); Text(p.onField ? "场上" : "场下").font(.subheadline.bold()) } }
               VStack(spacing: 12) {
                 HStack { Text("本场比分"); Spacer(); Text("球历") }.font(.caption).foregroundStyle(.white.opacity(0.7))
                 if typeSize.isAccessibilitySize {
