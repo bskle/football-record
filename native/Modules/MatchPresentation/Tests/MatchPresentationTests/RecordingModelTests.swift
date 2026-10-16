@@ -109,3 +109,29 @@ extension RecordingModelTests {
     XCTAssertEqual(m.snapshot?.store.business.generation, newer.store.business.generation)
   }
 }
+
+actor StaleOnceClient: SessionCommanding {
+  let underlying: MatchSession
+  var invalidated = false
+  init(_ s: MatchSession) { underlying = s }
+  func prepareStart(starter: Bool) async throws -> SessionRequest { try await underlying.prepareStart(starter: starter) }
+  func prepare(_ action: SessionAction, matchID: String) async throws -> SessionRequest { try await underlying.prepare(action, matchID: matchID) }
+  func execute(_ request: SessionRequest) async throws -> SessionReceipt {
+    if request.action == .quick(.myAssist), !invalidated { invalidated = true; throw StoreError.staleGeneration }
+    return try await underlying.execute(request)
+  }
+  func recover() async throws -> RecoverySelection { try await underlying.recover() }
+  func snapshot(matchID: String) async throws -> SessionSnapshot { try await underlying.snapshot(matchID: matchID) }
+  func updates(matchID: String) async -> AsyncStream<SessionSnapshot> { await underlying.updates(matchID: matchID) }
+}
+extension RecordingModelTests {
+  func testStaleRefreshThenDebouncedDoesNotLeavePendingRequestBlockingRecording() async throws {
+    let f = try Fixture(); let client = StaleOnceClient(f.session)
+    let m = RecordingModel(session: client, repository: f.repository, development: true)
+    await m.start(starter: true); try await Task.sleep(for: .milliseconds(40)); f.clock.advance(2)
+    await m.perform(.quick(.myGoal)); await m.perform(.quick(.myAssist))
+    XCTAssertNil(m.pendingRequest); XCTAssertTrue(m.canRecord)
+    XCTAssertEqual(m.snapshot?.replay.score.forTeam, 1); XCTAssertEqual(m.feedbackCount, 2)
+    await m.perform(.undoLastQuick); XCTAssertEqual(m.snapshot?.replay.score.forTeam, 0)
+  }
+}

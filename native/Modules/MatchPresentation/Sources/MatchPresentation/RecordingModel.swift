@@ -93,16 +93,17 @@ extension MatchSession: SessionCommanding {}
           pendingRequest = replacement
           acknowledge(try await session.execute(replacement)); return
         } catch {
-          issue = Self.message(error)
+          handleFailure(error)
           return
         }
       }
-      if error as? MatchCommandError == .debounced {
-        pendingRequest = nil
-      }
-      // Do not restore a click-time snapshot: a newer committed capture update may already be visible.
-      issue = Self.message(error)
+      handleFailure(error)
     }
+  }
+  private func handleFailure(_ error: any Error) {
+    if error as? MatchCommandError == .debounced { pendingRequest = nil }
+    // Do not restore a click-time snapshot: a newer committed capture update may already be visible.
+    issue = Self.message(error)
   }
   private func acknowledge(_ result: SessionReceipt) {
     accept(result.snapshot); pendingRequest = nil; issue = nil
