@@ -73,3 +73,11 @@ Phone与Watch回包都固定请求入口generation；身份变化、错误key/ep
 | 026 | 真账号/签名/SDK/设备验收，WC原HTTP控制relay与独立peer transport，所有ownedledger/staging删除聚合，当前身份变化停止旧actors，保留云恢复时显式新namespace；不得自动unfence旧文件。 |
 
 `URLSessionAuthorityRelay.shutdown()` 取消网络；`SQLiteSessionRepository.close()` / `SQLiteCloudLedger.close()` 在调用方停止自己的任务后关闭文件。Session 不拥有独立后台轮询服务；UI取消订阅/调用方任务后再关闭资源。真实Apple、iCloud、Keychain、CloudKit、HealthKit、物理Workout/WC与签名安装仍未验，最低SDK编译不能替代这些门槛。
+
+## 024 SDK 候选：设备 Keychain（未装配）
+
+`KeychainDeviceCredentialStore(configuration:executionEnabled:)` 默认拒绝执行；显式开启时才访问 Security。配置固定 service/account、当前设备 installationID、businessDatabaseURL、独立 controlDirectory 和可选 accessGroup。第一次创建须在真实业务 DB 不存在时进行；已有 DB 缺原控制 item/key 拒绝，不重生身份。Phone/Watch 各自生成并保存本机 Ed25519 key，不能复制私钥或把算法换成 P256。
+
+同一 item 内版本化保存 key/installation、单调 generation 与可选 credential；只有 `replace(_:expectedIdentityGeneration:)`。所有同 item 实例共享同步 gate，读/核 generation/整 item update 没有 await；更高 generation 同次写清 credential，相同 generation 保留已安装新 credential，旧 generation 拒绝。控制 item 不在登出时 delete/re-add。私有 Keychain 编码不为 `DeviceCredential` 添加 Codable，不进入业务 SQLite/日志。
+
+025 配置须让同 item 所有进程共用稳定 controlDirectory；若使用共享 accessGroup，目录须在同一受控 App Group 供 exclusive owner lease 使用，不能让另进程选择另一目录绕过所有权。跨实例 gate 与文件 lease 共同串行化实际 Keychain read/update；不把 SecItemUpdate 称任意 CAS。item 使用非 synchronizable、AfterFirstUnlockThisDeviceOnly；实际锁屏/重启/Keychain 可用性待026。
