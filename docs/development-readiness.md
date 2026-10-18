@@ -1,6 +1,8 @@
 # 原生开发准备检查
 
-当前检查日期：2026-10-16（上海；原检查为2026-10-14）。历史证据日期不改写。bootstrap见[NATIVE-000](native/tasks/NATIVE-000.md)，首次同步见[GIT-001](native/tasks/GIT-001.md)，M1 / M2快照见[GIT-002](native/tasks/GIT-002.md)、[GIT-003](native/tasks/GIT-003.md)，当前治理见[GIT-004](native/tasks/GIT-004.md)。
+当前检查日期：2026-10-18（上海；历史原检查为2026-10-14/16）。历史证据日期不改写。bootstrap见[NATIVE-000](native/tasks/NATIVE-000.md)，首次同步见[GIT-001](native/tasks/GIT-001.md)，M1 / M2快照见[GIT-002](native/tasks/GIT-002.md)、[GIT-003](native/tasks/GIT-003.md)，当前治理见[GIT-004](native/tasks/GIT-004.md)。
+
+M4已按用户继续无需本人协助部分的指令进入[NATIVE-020](native/tasks/NATIVE-020.md)工程规划，登记基线`dev=33c5664da5e8c6fbae78891cf15035768c6d6b56`。对应[子计划](superpowers/plans/2026-10-18-native-m4.md)/[冻结合同](native/contracts/m4-account-lock-cloud.md)先安排021真实HTTP/文件SQLite控制后台与022独立持久云台账并行，随后023唯一核心作者完成schema4、原StartIntent、签名控制、同Session云导入和双证据completion。024 SDK适配、025单工程/UI所有者和026实际环境/设备验收分层推进；本次六文档不实现M4能力，不改下列历史测试层次。
 
 结论：M1与M2的006/007/011/009/012、M3的013/014/015/017已双审集成并同步。本次核对时的已验证产品组合 `dev=origin/dev=b0070c90d91bf9d7741b7a7ed24165f1ad27383d`，实际merge单轮252项宿主测试（44 Core + 106 Store + 46 Session + 17 MatchSync + 39 Presentation）、8项最低SDK产品、2个无签名App及iOS / Watch各1项XCUI spot通过。后续本批纯文档合并会推进实际dev/origin HEAD，以Git现场为准。主线复用同一SQLite facade / Session / MatchSync，采集gateway、transport及生产trusted peer仍unavailable。017作者此前双端各9项XCUI及375pt深色最大字体1项视觉检查保留其输入层次，旧009证据不改写。历史M1的70项与M2的166项等证据仍只证明当时组合，见各任务验证卡及当前治理台账。
 
@@ -38,7 +40,8 @@
 | 原生工程 | 013/014/015/017已双审集成；当前实际merge252宿主/8SDK/2App及两端各1UI spot通过 | 主线unavailable采集/传输/生产trust；016已编译双审，018本机final已双审及331全量通过，真机门槛保留 |
 | Xcode / 运行环境 | Xcode 27.0（27A266a）/ Swift 6.4；上述产品组合自动验证与 iOS 27 / watchOS 27 模拟器复验通过；最低 iOS 17 / watchOS 10 已编译 | 未实际运行最低系统；无签名 SDK 构建不替代真机能力验收。历史 Desktop FinderInfo / codesign 失败及隔离重跑保留于 GIT-002 |
 | 签名与 CloudKit | 仅配置本地 Bundle ID 占位，未注册；本人Team/profile/能力签名与CloudKit容器未验收 | 010可审配置/指引本机部分完成；安装/授权待本人，CloudKit留M4 |
-| 唯一比赛锁后台 | 原方案定义了职责，尚无接口实现及运行环境 | 确定工程接口与供应商，开始比赛链路联调前部署 |
+| 唯一比赛锁后台 | M4合同冻结严格控制DTO、设备key持有证明、原子锁/当前状态证明及生命周期；尚无软件实现和已部署环境 | 021先交Node22.23.1内置HTTP/experimental SQLite的真实本地reference authority，worker并发/丢响应/重开；026再验Serverless适配/持久配置/TLS与真实服务，不能把本地SQLite称生产部署 |
+| 私有云与业务事务 | M4固定独立云queue、稳定account/cloudSpace私有zone、epoch写入fence与opaque token；尚未实现 | 022持久stage，023同业务facade事务合并facts/tombstone+token；024真实CloudKit/CKAsset、026账号/配额/冲突验收；peer ACK不代替云proof |
 | 真机行为 | 本人设备协助延期；真实采集/后台/锁屏/恢复及配对同步未验 | 008/010/016/018保留，不提前入dev。WC transferFile不支持Simulator，fake/SDK/两sim UI不替代真通信 |
 | Git 与远端 | 三永久分支；dev已同步b0070c90d91bf9d7741b7a7ed24165f1ad27383d；main/release仍59edac8原型，release尚无原生冻结候选 | 已授权public同步，PR/CI/server保护未配置；代码同步不等于发布 |
 
@@ -73,3 +76,9 @@
 | 待真机 | 用户暂不能连机，实际签名 / 安装、授权 / 采集 / 恢复及WC真通信均未验 | 018后续逐场景绑定设备 / OS / SHA / 时间 / 结果；008/010/016/018此前不入dev |
 
 生产开赛 provider 在 M4 前 unavailable；Debug 使用独立 DB / 专用入口并持续标注“开发模拟锁”，不能算真实锁或完整 E2E。本地普通结束保持 `endedPendingSync`，不释放后台锁、不制造 `completed`。iPhone17使用手动HKWorkoutBuilder+CoreLocation，Watch10使用live session；权限拒绝不撤销已存比赛，无样本不填0。完整赛后编辑/生涯/路线分析仍留M5，本轮不改产品范围。
+
+## M4 可继续事项与保留门槛
+
+021～023必须交付实际可运行、可关闭重开和故障验证的软件，不能用空接口覆盖整个M4。旧acquire receipt与fresh live-lock状态分开，已终结锁不复活；CloudKit proof先单独持久，正常后台释放且当前完整facts/captureDigest匹配后才创建CompletionProofV2。正常/丢失七天迁移、分项删号和默认关闭的匿名分析均有明确任务及验收；auth和delete的COMMIT丢响应恢复不能依赖已撤销凭据或重建账号。
+
+真实Apple登录/撤销、iCloud双身份、Team/签名/容器、Watch自身或手机代理联网、CloudKit保存与服务释放、两机迁移和删除分项仍待024/026实际环境。SDK编译、fake driver和本地HTTP不互相替代，也不替代008/010/016/018物理门槛。用户无需再次批准工程选择；涉及本人设备/账号步骤留清单后续集中验收，其他已授权工作继续。

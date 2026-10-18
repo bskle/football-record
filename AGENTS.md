@@ -2,7 +2,7 @@
 
 本仓库的原生开发以 [原生开发母计划](docs/superpowers/plans/2026-10-15-native-development.md) 为任务依据，以 [Git 与工作树治理方案](docs/git-workflow.md) 为分支、提交、验证、合并和清理规则。用户当前明确指令优先于历史工作流记录；历史 `.czy-workflow/runtime/` 不能替代实际 Git 状态。
 
-## 当前执行状态（2026-10-16，上海）
+## 当前执行状态（2026-10-18，上海；历史验证保留原日期）
 
 - 正式中文名为“球历”，英文名为 `football-record`；Xcode 工程技术名保留 `FootballRecord`。
 - 2026-10-15 规划启动时“尚未创建分支、worktree、标签”的快照已被 bootstrap 取代。永久分支为 `dev`、`release`、`main`；`main` / `release` 均保留浏览器原型基线 `59edac891ee3a1cbb79a30b396ad1902d0907a62`，annotated tag 为 `prototype-baseline-20261015`。release尚无原生冻结候选，尚无原生发布。
@@ -12,7 +12,8 @@
 - 用户已明确“先跳过需要我协助部分，往下推，后续再做相关测试”。[M3](docs/superpowers/plans/2026-10-16-native-m3.md)已交付完整v2快照/schema3、持久分片/ACK服务、同Session接收桥与状态UI；主线仍用unavailable采集gateway、transport和生产trust。016最终 `001f9a3bff46856fa7845c4243603f131f26f5bf` 已双审，21项host/四最低SDK编译通过，保留独立树待配对真机。018已在独立树普通合入016/010及019测试兼容修复，source `72846583e503349d117dac84e42fde746d384fee` 双审PASS；单次331host/14最低SDK/2simApp通过，两generic设备App及两端UI保留分层证据，最终 `891000e1842f21f4a594a1d29168974debed68b9` 已源码 / 最终双审PASS，作者clean停写；本人设备/账号/环境验收延期，008/010/016/018不提前合dev。
 - 用户已授权按计划推进及同步 GitHub，并以“公开就公开暂时没事”接受 public 仓库，覆盖先前 private 意向。`origin = https://github.com/bskle/football-record.git`；`gh` 登录、HTTPS 与 `PUBLIC` / `ADMIN` 已核对，远端只有三条永久分支，默认 `main`。PR、CI 与服务端保护规则尚未配置，本地双审持续执行；代码同步不等于原生发布。
 - 005/006/007/011/012/GIT-003及013/014/015已实际归档并安全`git branch -d`。旧002/003/004/GIT-002/009共五树仍queued且实际active；017归档请求也queued、实际active（当前attachment `01a14403-f412-7d11-8799-21b42f0884f4`），分支保留。必要ignored证据已另存，不盲重试、强删或绕过工具。008/010/016/018因验收依赖正常保留；019测试兼容任务已合入018、实际归档并安全删分支。
-- Xcode27.0 / Swift6.4可用，最低iOS17/watch10不升级。M4的Apple登录、生产可信peer、开赛锁与CloudKit尚未实施；生产provider保持unavailable。Debug使用独立数据库、稳定身份fixture及“开发模拟锁 / 开发配对”标识，不算生产锁/E2E。本地普通结束保持`endedPendingSync`，peer ACK不释放后台锁、不制造`completed`。
+- Xcode27.0 / Swift6.4可用，最低iOS17/watch10不升级。M4已进入[NATIVE-020工程规划](docs/native/tasks/NATIVE-020.md)，[子计划](docs/superpowers/plans/2026-10-18-native-m4.md)与[冻结合同](docs/native/contracts/m4-account-lock-cloud.md)按用户2026-10-18继续无需本人协助部分的指令拆为021～026；登记基线`dev=33c5664da5e8c6fbae78891cf15035768c6d6b56`，以实际Git为准。020只改六文档，未实现Apple登录、生产可信peer、开赛锁或CloudKit；生产provider保持unavailable。Debug使用独立数据库、稳定身份fixture及“开发模拟锁 / 开发配对”标识，不算生产锁/E2E。本地普通结束保持`endedPendingSync`，peer ACK不释放后台锁、不制造`completed`。
+- M4先交付021真实loopback HTTP/文件SQLite权威服务与022独立持久云台账，再由023唯一共享核心作者完成schema4、原Session和同facade纵向；024 SDK与025单工程/UI作者按交接推进。云token只随同事务业务事实推进；正常completion须当前完整云proof与正常后台释放双证据，旧acquire不得复活终结比赛。真实账号/签名/服务/设备门槛集中026，008/010/016/018与queued树不动；工程选择不新增产品审批，未测项不勾通过。
 
 ## 角色与派工
 

@@ -19,7 +19,7 @@
 5. 正式中文名为球历、英文名为 `football-record`；工程名保留 `FootballRecord`。用户已授权先跳过本人协助项继续推进。本次核对时的已验证产品组合 `dev=origin/dev=b0070c90d91bf9d7741b7a7ed24165f1ad27383d`，M2的006/007/011/009/012与M3的013/014/015/017已双审集成，实际merge单轮252宿主（44 Core + 106 Store + 46 Session + 17 MatchSync + 39 Presentation）、8最低SDK产品、2无签名App及两端各1UI spot通过。后续本批纯文档合并会推进实际dev/origin HEAD，以Git现场为准。原始505449规划基线及166项保留于[NATIVE-013](../../native/tasks/NATIVE-013.md)。008/010本机候选与016最终`001f9a3bff46856fa7845c4243603f131f26f5bf`已双审，018独立source `72846583e503349d117dac84e42fde746d384fee`已含016 / 010 / 019并双审，单次331host / 14最低SDK / 2simApp通过，设备App与UI分层证据见GIT-004，最终 `891000e1842f21f4a594a1d29168974debed68b9` 已源码 / 最终双审PASS；物理验收延期保留，008/010/016/018不提前合dev。010的212与017作者验证继续保留分层限定。
 6. 保留 `prototype/`、`打开足球记录.html`、现有 Node 测试和截图作为浏览器基线。原型 mock 的 41 项检查通过，只能证明原型行为；不能代替原生构建、真实联网锁、HealthKit、CloudKit 或真机验收。
 
-### 阶段进度（2026-10-16，上海）
+### 阶段进度（2026-10-18，上海；历史验证保留原日期）
 
 | 阶段 | 当前状态 | 下一门槛 |
 |---|---|---|
@@ -28,7 +28,7 @@
 | M1 工程/事件/本地可靠性 | 本地基础交付完成，NATIVE-001 至 004 已双审集成；组合提交 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试与四项 SDK / App 构建通过（[仓储证据](../../native/validation/NATIVE-003.md)、[采集合同证据](../../native/validation/NATIVE-004.md)、[组合台账](../../native/tasks/GIT-002.md)） | M1 历史证据保留；M2 元数据落盘、共享会话和记录页面已接入，真实采集仍待设备；M3 接入实际设备传输 |
 | M2 采集/恢复与原生 UI | 006/007/011/009/012已双审合入；M2历史166宿主/6SDK/2App证据保留，当前dev已扩展至M3组合 | 008/010本机候选已双审，018接入设备整包；实际签名/采集/恢复待真机，不提前入dev |
 | M3 设备同步 | [M3子计划](2026-10-16-native-m3.md)/[合同](../../native/contracts/m3-durable-sync.md)的013/014/015/017已实际合并同步；017实际merge单轮252宿主/8SDK/2App及两端各1UI spot通过 | 016自动验证双审留候选；018本机final双审及331全量通过；真实配对通信与本人协助项延期 |
-| M4 账号/锁/私有云/设备生命周期 | 未开始 | 真实签名能力与服务环境 |
+| M4 账号/锁/私有云/设备生命周期 | [NATIVE-020](../../native/tasks/NATIVE-020.md)工程规划已启动；[子计划](2026-10-18-native-m4.md)/[合同](../../native/contracts/m4-account-lock-cloud.md)冻结021～026任务与交接，本次仅六文档 | 先021真实HTTP/SQLite和022持久云台账，023同Session纵向；024/026真实Apple/签名/CloudKit/服务/设备门槛保留，未宣称能力完成 |
 | M5 纠错/历史/分析；M6 发布/三场实战 | 均未开始 | 前序交付与逐项验收 |
 
 ## 2. 已确认的交付边界
@@ -140,6 +140,8 @@
 **交付：** 协议文档、可靠outbox与同步状态UI、后续双设备断连/恢复记录。014/015纯协议与017 unavailable生产装配经双审及适用自动/模拟器验证可入dev；016/018真机门槛前留分支，不提前合dev/release/main。transferFile不支持Simulator，生产trusted peer留M4且当前unavailable；peer ACK不等于completed、后台终结或放锁。
 
 ### M4：账号、原子比赛锁、CloudKit、异常结束与设备生命周期
+
+**工程执行入口（2026-10-18）：** 用户明确继续无需本人协助部分；[M4子计划](2026-10-18-native-m4.md)与[冻结合同](../../native/contracts/m4-account-lock-cloud.md)由[NATIVE-020](../../native/tasks/NATIVE-020.md)在`dev=33c5664da5e8c6fbae78891cf15035768c6d6b56`基线规划。021后台与022云台账在合同双审合入后可独立并行；023串行独占共享核心包/schema4，完成真实loopback HTTP→原Session/SQLite纵向；024 SDK和025单工程/UI作者按交接推进，026再闭合实际服务/账号/设备验收。工程选择不重新发起产品审批；生产provider继续unavailable，008/010/016/018候选及queued旧树不动。下列V1清单保持未完成，不能由规划、fixture或编译勾通过。
 
 **依赖：** M1 契约；M3 的可靠业务传输用于完整联调。账号/后台代理与私有云代理可按固定契约并行。Apple Developer 配置及实际后台运行环境须在该阶段联调前就绪。
 
