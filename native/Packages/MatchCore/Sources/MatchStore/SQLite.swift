@@ -21,15 +21,16 @@ final class SQLite: @unchecked Sendable {
         do {
             try check(sqlite3_busy_timeout(handle, 5_000))
             let version = try scalar("PRAGMA user_version").number ?? -1
-            guard version == 0 || version == 1 || version == 2 || version == 3 else { throw StoreError.unsupportedSchema(version) }
+            guard version == 0 || version == 1 || version == 2 || version == 3 || version == 4 else { throw StoreError.unsupportedSchema(version) }
             // Check every existing schema before adding anything; all upgrades share one COMMIT.
             if version >= 1 { for sql in Self.schemaChecks { _ = try rows(sql) } }
             if version >= 2 { for sql in Self.schemaChecksV2 { _ = try rows(sql) } }
-            if version == 3 { for sql in Self.schemaChecksV3 { _ = try rows(sql) } }
+            if version >= 3 { for sql in Self.schemaChecksV3 { _ = try rows(sql) } }
             guard try scalar("PRAGMA quick_check(1)").string == "ok" else {
                 throw StoreError.sqlite(code: SQLITE_CORRUPT, message: "integrity check failed")
             }
-            if version < 3 {
+            if version == 4 { for sql in Self.schemaChecksV4 { _ = try rows(sql) } }
+            if version < 4 {
                 try transaction {
                     if version == 0 {
                         guard try rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").isEmpty else { throw StoreError.unsupportedSchema(0) }
@@ -46,13 +47,22 @@ final class SQLite: @unchecked Sendable {
                         if fault == .migrationAfterV2Version { throw StoreError.injectedFailure }
                     }
                     for sql in Self.schemaChecksV2 { _ = try rows(sql) }
+                    if version < 3 {
                     for sql in Self.schemaV3 { try execute(sql) }
                     if fault == .migrationAfterV3Schema || fault == .migrationBeforeV3Version { throw StoreError.injectedFailure }
                     try execute("PRAGMA user_version=3")
                     if fault == .migrationAfterV3Version { throw StoreError.injectedFailure }
+                    }
+                    for sql in Self.schemaChecksV3 { _ = try rows(sql) }
+                    for sql in Self.schemaV4 { try execute(sql) }
+                    if fault == .migrationAfterV4Schema || fault == .migrationBeforeV4Version { throw StoreError.injectedFailure }
+                    for sql in Self.schemaChecksV4 { _ = try rows(sql) }
+                    try execute("PRAGMA user_version=4")
+                    if fault == .migrationAfterV4Version { throw StoreError.injectedFailure }
                 }
             }
             for sql in Self.schemaChecksV3 { _ = try rows(sql) }
+            for sql in Self.schemaChecksV4 { _ = try rows(sql) }
             guard try scalar("PRAGMA quick_check(1)").string == "ok" else {
                 throw StoreError.sqlite(code: SQLITE_CORRUPT, message: "integrity check failed")
             }
@@ -213,5 +223,33 @@ final class SQLite: @unchecked Sendable {
         "SELECT packet_id,ack_id,match_id,record,checksum FROM sync_acknowledgements_v3 LIMIT 0",
         "SELECT ack_id,packet_id,match_id,raw,checksum FROM sync_ack_controls_v3 LIMIT 0",
         "SELECT source,target,match_id,record,checksum FROM sync_receive_progress_v3 LIMIT 0"
+    ]
+    private static let schemaV4 = [
+        "CREATE TABLE account_binding_v4 (id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE control_intents_v4 (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE authority_results_v4 (id TEXT PRIMARY KEY NOT NULL, request_id TEXT UNIQUE NOT NULL, match_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE authority_projection_v4 (match_id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE peer_grants_v4 (id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE lifecycle_steps_v4 (id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE cloud_applied_batches_v4 (scope TEXT NOT NULL, batch_id TEXT NOT NULL, digest TEXT NOT NULL, receipt BLOB NOT NULL, PRIMARY KEY(scope,batch_id))",
+        "CREATE TABLE cloud_checkpoints_v4 (id TEXT PRIMARY KEY NOT NULL, match_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE cloud_cursors_v4 (scope TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE cloud_deletions_v4 (scope TEXT NOT NULL, match_id TEXT NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL, PRIMARY KEY(scope,match_id))",
+        "CREATE TABLE peer_contexts_v4 (id TEXT PRIMARY KEY NOT NULL, payload BLOB NOT NULL, checksum TEXT NOT NULL)",
+        "CREATE TABLE peer_inbox_v4 (id TEXT PRIMARY KEY NOT NULL, digest TEXT NOT NULL, receipt BLOB NOT NULL)"
+    ]
+    private static let schemaChecksV4 = [
+        "SELECT id,payload,checksum FROM account_binding_v4 LIMIT 0",
+        "SELECT id,match_id,payload,checksum FROM control_intents_v4 LIMIT 0",
+        "SELECT id,request_id,match_id,payload,checksum FROM authority_results_v4 LIMIT 0",
+        "SELECT match_id,payload,checksum FROM authority_projection_v4 LIMIT 0",
+        "SELECT id,payload,checksum FROM peer_grants_v4 LIMIT 0",
+        "SELECT id,payload,checksum FROM lifecycle_steps_v4 LIMIT 0",
+        "SELECT scope,batch_id,digest,receipt FROM cloud_applied_batches_v4 LIMIT 0",
+        "SELECT id,match_id,payload,checksum FROM cloud_checkpoints_v4 LIMIT 0",
+        "SELECT scope,payload,checksum FROM cloud_cursors_v4 LIMIT 0",
+        "SELECT scope,match_id,payload,checksum FROM cloud_deletions_v4 LIMIT 0",
+        "SELECT id,payload,checksum FROM peer_contexts_v4 LIMIT 0",
+        "SELECT id,digest,receipt FROM peer_inbox_v4 LIMIT 0"
     ]
 }

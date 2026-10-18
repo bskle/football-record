@@ -100,6 +100,7 @@ public struct StoreSnapshot: Sendable {
 }
 
 enum StoreFault: Sendable { case migrationAfterSchema, migrationBeforeV2Version, migrationAfterV2Version
+    case migrationAfterV4Schema, migrationBeforeV4Version, migrationAfterV4Version
     case migrationAfterV3Schema, migrationBeforeV3Version, migrationAfterV3Version
     case afterRoute, afterInboundFacts, afterInboundReceipt, afterACK, afterFragment
     case afterEvents, afterCaptureRevisions, afterCaptureOperations, afterOutbox, afterReceipt, beforeCommit, afterCommit }

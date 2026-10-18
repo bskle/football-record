@@ -6,14 +6,14 @@ import SQLite3
 final class MigrationV3Tests: XCTestCase, @unchecked Sendable {
     func testNewDatabaseUsesSchemaThree() async throws {
         let url = TransactionTests().path(); let store = try MatchStore(url: url); try await store.close()
-        XCTAssertEqual(try MigrationV2Tests().rawInt(url, "PRAGMA user_version"), 3)
+        XCTAssertEqual(try MigrationV2Tests().rawInt(url, "PRAGMA user_version"), 4)
     }
     func testMigrationV3RollsBackAtEachFault() async throws {
         for fault in [StoreFault.migrationAfterV3Schema, .migrationBeforeV3Version, .migrationAfterV3Version] {
             let url = try LegacyCompatibilityTests().database()
             let v2 = try MatchStore(url: url); try await v2.close()
             let raw = try SQLite(url: url, fault: nil)
-            let tables = try raw.rows("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'sync_%'").compactMap { $0[0].string }
+            let tables = try raw.rows("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE 'sync_%' OR name LIKE '%_v4')").compactMap { $0[0].string }
             for table in tables { try raw.execute("DROP TABLE " + table) }; try raw.close()
             var db: OpaquePointer?; XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
             XCTAssertEqual(sqlite3_exec(db, "PRAGMA user_version=2", nil, nil, nil), SQLITE_OK); XCTAssertEqual(sqlite3_close(db), SQLITE_OK)
@@ -48,11 +48,11 @@ extension MigrationV3Tests {
             let s = try MatchStore(url: url); try await s.close()
         }
     }
-    func testFutureFourAndPartialThreeFailWithoutRepair() async throws {
+    func testFutureFiveAndPartialThreeFailWithoutRepair() async throws {
         for future in [false, true] {
             let url = TransactionTests().path(), store = try MatchStore(url: url); try await store.close()
             let raw = try SQLite(url: url, fault: nil)
-            if future { try raw.execute("PRAGMA user_version=4") } else { try raw.execute("ALTER TABLE sync_routes_v3 RENAME COLUMN record TO missing") }
+            if future { try raw.execute("PRAGMA user_version=5") } else { try raw.execute("ALTER TABLE sync_routes_v3 RENAME COLUMN record TO missing") }
             try raw.close(); let before = try Data(contentsOf: url)
             XCTAssertThrowsError(try MatchStore(url: url))
             XCTAssertEqual(try Data(contentsOf: url), before)

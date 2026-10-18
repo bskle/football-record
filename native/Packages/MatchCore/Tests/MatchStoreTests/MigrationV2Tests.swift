@@ -6,7 +6,7 @@ final class MigrationV2Tests: XCTestCase, @unchecked Sendable {
  func testNewDatabaseReachesVersionTwo() async throws {
   let url = TransactionTests().path(); let store = try MatchStore(url: url); try await store.close()
   let inspect = try SQLite(url: url, fault: nil)
-  XCTAssertEqual(try inspect.scalar("PRAGMA user_version").number, 3)
+  XCTAssertEqual(try inspect.scalar("PRAGMA user_version").number, 4)
   try inspect.close()
  }
  func rawInt(_ url:URL,_ sql:String) throws -> Int64 {
