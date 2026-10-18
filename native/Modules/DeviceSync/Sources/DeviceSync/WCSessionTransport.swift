@@ -8,7 +8,7 @@ private final class InvalidationGate: @unchecked Sendable {
     func invalidate() { lock.withLock { invalid = true } }
 }
 
-public actor WCSessionTransport: SyncTransport {
+public actor WCSessionTransport: SyncTransport, DeviceSyncLocalTransportErasing {
     let driver: any WCSessionDriving
     let inbox: DurableFileInbox
     let outgoing: OutgoingFileQueue
@@ -40,8 +40,22 @@ public actor WCSessionTransport: SyncTransport {
     func removeDeliverySubscriber(_ id: UUID) { deliveriesSubscribers[id] = nil }
     func removeEventSubscriber(_ id: UUID) { eventSubscribers[id] = nil }
     func publish(_ event: DeviceSyncEvent) { for c in eventSubscribers.values { c.yield(event) } }
-    func deliver(_ frame: SyncDelivery) { guard !gate.isInvalidated else { return }; for c in deliveriesSubscribers.values { c.yield(frame) } }
+    func deliver(_ frame: SyncDelivery) {
+        guard !gate.isInvalidated else { return }
+        try? inbox.storage.withActive { for c in deliveriesSubscribers.values { c.yield(frame) } }
+    }
+    func storageIsActive() -> Bool {
+        do { try inbox.storage.withActive {}; return true }
+        catch { active = false; publish(.failure(error as? DeviceSyncError ?? .unavailable)); return false }
+    }
+    public func erase(_ request: DeviceSyncLocalEraseRequest) async throws -> DeviceSyncEraseResult {
+        guard inbox.storage.managed, outgoing.storage.managed, inbox.storage.rootIdentity == outgoing.storage.rootIdentity else { throw DeviceSyncErasureError.unsupportedLayout }
+        notifyTrustInvalidated(.accountChanged)
+        let erasureDriver = (driver as? any DeviceSyncErasureDriving) ?? UnavailableDeviceSyncErasureDriver()
+        return try await DeviceSyncErasureService(context: inbox.storage, driver: erasureDriver).erase(request)
+    }
     public func activate() async {
+        guard storageIsActive() else { return }
         if let activation { await activation.1.value; return }
         let id = UUID(), task = Task { await self.installAndActivate() }
         activation = (id, task)
@@ -49,6 +63,7 @@ public actor WCSessionTransport: SyncTransport {
         if activation?.0 == id { activation = nil }
     }
     func installAndActivate() async {
+        guard storageIsActive() else { return }
         if !installed {
             let inbox = inbox, gate = gate
             let callbacks = DriverCallbacks(message: { [weak self] bytes in
@@ -76,11 +91,11 @@ public actor WCSessionTransport: SyncTransport {
                 Task { await self?.handle(event) }
             })
             await driver.install(callbacks)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, storageIsActive() else { return }
             installed = true
             await driver.activate()
         } else if !(await driver.snapshot()).activated { await driver.activate() }
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled, storageIsActive() else { return }
         if (await driver.snapshot()).activated {
             do { try outgoing.recoverOrphans(outstanding: await driver.outstandingFiles()) }
             catch { publish(.failure(error as? DeviceSyncError ?? .fileIO)) }
@@ -97,6 +112,7 @@ public actor WCSessionTransport: SyncTransport {
         publish(.trustInvalidated(reason))
     }
     func handle(_ event: DriverEvent) async {
+        guard storageIsActive() else { return }
         switch event {
         case .activationCompleted(let snapshot, let error):
             if let error { active = false; publish(.failure(error)); return }
@@ -135,12 +151,15 @@ public actor WCSessionTransport: SyncTransport {
     }
     func performSend(_ bytes: Data, id: String) async throws {
         try Task.checkCancellation()
+        try inbox.storage.withActive {}
         guard installed else { throw DeviceSyncError.inactive }
         let state = await driver.snapshot()
+        try inbox.storage.withActive {}
         guard invalidation == nil, !gate.isInvalidated else { throw DeviceSyncError.unavailable }
         guard state.activated else { throw DeviceSyncError.inactive }
         guard state.counterpartAvailable else { throw DeviceSyncError.unavailable }
         let existing = try outgoing.existing(id, bytes: bytes), outstanding = await driver.outstandingFiles().filter { $0.deliveryID == id }
+        try inbox.storage.withActive {}
         try Task.checkCancellation(); guard invalidation == nil, !gate.isInvalidated else { throw DeviceSyncError.unavailable }
         if !outstanding.isEmpty {
             guard outstanding.count == 1, let saved = existing, outstanding[0].checksum == saved.checksum, outstanding[0].token == saved.token else { throw DeviceSyncError.conflictingDelivery }
@@ -148,11 +167,13 @@ public actor WCSessionTransport: SyncTransport {
         }
         if existing == nil, state.reachable, bytes.count <= DeviceSyncPolicy.interactiveBytes {
             let reply = try await driver.sendMessage(bytes)
+            try inbox.storage.withActive {}
             guard reply != .unavailable else { throw DeviceSyncError.unavailable }
         } else {
             let transfer = try outgoing.stage(bytes, id: id)
             try Task.checkCancellation()
             try await driver.enqueueFile(transfer)
+            try inbox.storage.withActive {}
         }
     }
     public func didPersistDelivery(_ transportDeliveryID: String) async {

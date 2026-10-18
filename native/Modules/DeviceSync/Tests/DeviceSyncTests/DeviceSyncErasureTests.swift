@@ -83,7 +83,7 @@ final class DeviceSyncErasureTests: XCTestCase, @unchecked Sendable {
 
 extension DeviceSyncErasureTests {
     func testEveryFenceAndReceiptFaultReopensSameIntent() async throws {
-        let faults: [DeviceSyncErasureFault] = [.beforeFenceCommit, .afterFenceCommit, .afterUnlink(1), .afterUnlink(2), .beforeReceiptCommit, .afterReceiptCommit]
+        let faults: [DeviceSyncErasureFault] = [.beforeFenceCommit, .afterFenceCommit, .afterUnlink(1), .afterUnlink(2), .afterUnlink(3), .beforeReceiptCommit, .afterReceiptCommit]
         for fault in faults {
             let f = try ManagedErasureFixture(), inbox = try f.inbox(), queue = try f.queue(), raw = Data("original-\(fault)".utf8)
             let frame = try inbox.adoptData(raw), outgoing = try queue.stage(raw, id: "delivery")

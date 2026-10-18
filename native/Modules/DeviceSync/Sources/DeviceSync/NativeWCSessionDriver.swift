@@ -1,5 +1,40 @@
 import Foundation
 
+enum DeviceSyncTransferOwnership { case owned, foreign, unresolved }
+func deviceSyncDrainInventory<Handle>(current: () throws -> [Handle], ownership: (Handle) throws -> DeviceSyncTransferOwnership, cancel: (Handle) throws -> Void) throws -> DeviceSyncDrainStatus {
+    var unknown = false
+    for transfer in try current() {
+        switch try ownership(transfer) {
+        case .owned: try cancel(transfer)
+        case .foreign: break
+        case .unresolved: unknown = true
+        }
+    }
+    var pendingOwned = false
+    for transfer in try current() {
+        switch try ownership(transfer) {
+        case .owned: pendingOwned = true
+        case .foreign: break
+        case .unresolved: unknown = true
+        }
+    }
+    if unknown { return .unresolved }
+    return pendingOwned ? .pending : .drained
+}
+
+/// The same pure classification runs in host tests and the native cancellation path.
+func deviceSyncTransferOwnership(namespaceID: String?, ownerDigest: String?, transfer: DriverFileTransfer?, protocolMatches: Bool, sourceInsideRoot: Bool, request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) throws -> DeviceSyncTransferOwnership {
+    guard protocolMatches else { return sourceInsideRoot ? .unresolved : .foreign }
+    guard let transfer else { return .unresolved }
+    if let namespaceID {
+        guard UUID(uuidString: namespaceID) != nil, let ownerDigest, isDigest(ownerDigest) else { return .unresolved }
+        guard Data(namespaceID.utf8) == Data(request.binding.namespaceID.utf8) else { return .foreign }
+        guard ownerDigest == (try request.binding.ownerDigest) else { return .unresolved }
+    } else if ownerDigest != nil { return .unresolved }
+    guard let identity = try? DeviceSyncTransferIdentity(deliveryIDHash: digest(Data(transfer.deliveryID.utf8)), checksum: transfer.checksum, token: transfer.token) else { return .unresolved }
+    return expected.contains(identity) ? .owned : .unresolved
+}
+
 public extension WCSessionTransport {
     /// Application-owned durable storage must be supplied by the assembly owner.
     /// Host platforms do not construct or imitate a WCSession.
@@ -16,25 +51,29 @@ public extension WCSessionTransport {
 #if os(iOS) || os(watchOS)
 import WatchConnectivity
 
-/// The SDK objects stay in this lock-protected nonactor owner and its delegate proxy.
-/// No non-Sendable WC object, metadata dictionary, or native reply closure crosses a Task.
-public final class WCSessionDriver: WCSessionDriving, @unchecked Sendable {
+/// SDK objects stay in this synchronous owner. Lock order is storage -> driver;
+/// no WC object or native reply closure crosses an actor/Task boundary.
+public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, @unchecked Sendable {
     private let lock = NSLock()
     private let session: WCSession?
     private let proxy: WCDelegateProxy
+    private let storage: DeviceSyncStorageContext
     private var callbacks: DriverCallbacks?
     private var pending: [UUID: DriverSettlement<TransportReply>] = [:]
     private var activating = false
     private let pairing: PairingBaseline
     private var activationAccepted = false
     public init(stateDirectory: URL) throws {
+        storage = try DeviceSyncStorageContext.component(stateDirectory, role: "state")
         pairing = try PairingBaseline(directory: stateDirectory)
-        session = WCSession.isSupported() ? WCSession.default : nil
-        proxy = WCDelegateProxy()
-        proxy.owner = self // Strong owner retains the SDK's weak delegate.
+        session = try storage.withActive { WCSession.isSupported() ? WCSession.default : nil }
+        proxy = WCDelegateProxy(); proxy.owner = self
     }
-    public func install(_ callbacks: DriverCallbacks) async { lock.withLock { self.callbacks = callbacks } }
-    func values(_ session: WCSession) -> DriverSnapshot {
+    public func install(_ callbacks: DriverCallbacks) async {
+        do { try storage.withActive { lock.withLock { self.callbacks = callbacks } } }
+        catch { callbacks.event(.activationCompleted(DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false), error as? DeviceSyncError ?? .unavailable)) }
+    }
+    private func values(_ session: WCSession) -> DriverSnapshot {
         let active = session.activationState == .activated && activationAccepted && !pairing.isInvalidated
         #if os(iOS)
         let counterpart = active && session.isPaired && session.isWatchAppInstalled
@@ -43,26 +82,28 @@ public final class WCSessionDriver: WCSessionDriving, @unchecked Sendable {
         #endif
         return DriverSnapshot(activated: active, reachable: active && session.isReachable, counterpartAvailable: counterpart)
     }
-    func fingerprint(_ session: WCSession) -> String {
+    private func fingerprint(_ session: WCSession) -> String {
         #if os(iOS)
         return "\(session.isPaired):\(session.isWatchAppInstalled):" + (session.watchDirectoryURL?.path ?? "none")
         #else
         return "\(session.isCompanionAppInstalled)"
         #endif
     }
+    private var inactiveSnapshot: DriverSnapshot { DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false) }
     public func snapshot() async -> DriverSnapshot {
-        lock.withLock { session.map(values) ?? DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false) }
+        (try? storage.withActive { lock.withLock { session.map(values) ?? inactiveSnapshot } }) ?? inactiveSnapshot
     }
     public func activate() async {
-        let error: DriverCallbacks? = lock.withLock {
-            guard let session else { return callbacks }
-            guard !activating else { return nil }
-            activating = true
-            session.delegate = proxy
-            session.activate()
-            return nil
-        }
-        error?.event(.activationCompleted(DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false), .unavailable))
+        do {
+            try storage.withActive {
+                let native: WCSession? = try lock.withLock {
+                    guard let session else { throw DeviceSyncError.unavailable }
+                    guard !activating else { return nil }
+                    activating = true; return session
+                }
+                if let native { native.delegate = proxy; native.activate() }
+            }
+        } catch { lock.withLock { callbacks }?.event(.activationCompleted(inactiveSnapshot, error as? DeviceSyncError ?? .unavailable)) }
     }
     public func sendMessage(_ bytes: Data) async throws -> TransportReply {
         guard !bytes.isEmpty, bytes.count <= DeviceSyncPolicy.interactiveBytes else { throw DeviceSyncError.invalidFrame }
@@ -71,29 +112,31 @@ public final class WCSessionDriver: WCSessionDriving, @unchecked Sendable {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
                 result.install(continuation)
-                let failure: DeviceSyncError? = lock.withLock {
-                    guard !Task.isCancelled else { return .unavailable }
-                    guard let session else { return .unavailable }
-                    let status = values(session)
-                    guard status.activated, status.counterpartAvailable else { return .inactive }
-                    guard status.reachable else { return .unavailable }
-                    pending[id] = result
-                    session.sendMessageData(bytes, replyHandler: { [weak self, result] bytes in
-                        let reply: Result<TransportReply, any Error>
-                        do { reply = .success(try TransportReply(wireBytes: bytes)) }
-                        catch { reply = .failure(DeviceSyncError.invalidReply) }
-                        self?.complete(id, with: reply); result.finish(reply)
-                    }, errorHandler: { [weak self, result] _ in
-                        let failure: Result<TransportReply, any Error> = .failure(DeviceSyncError.deliveryFailed)
-                        self?.complete(id, with: failure); result.finish(failure)
-                    })
-                    return nil
-                }
-                if let failure { result.finish(.failure(failure)) }
+                do {
+                    try storage.withActive {
+                        let native: WCSession = try lock.withLock {
+                            guard !Task.isCancelled else { throw CancellationError() }
+                            guard let session else { throw DeviceSyncError.unavailable }
+                            let status = values(session)
+                            guard status.activated, status.counterpartAvailable else { throw DeviceSyncError.inactive }
+                            guard status.reachable else { throw DeviceSyncError.unavailable }
+                            pending[id] = result; return session
+                        }
+                        // Synchronous SDK call shares the fence gate, outside driver lock.
+                        native.sendMessageData(bytes, replyHandler: { [weak self, result] bytes in
+                            let reply: Result<TransportReply, any Error>
+                            do { reply = .success(try TransportReply(wireBytes: bytes)) }
+                            catch { reply = .failure(DeviceSyncError.invalidReply) }
+                            self?.complete(id, with: reply); result.finish(reply)
+                        }, errorHandler: { [weak self, result] _ in
+                            let failure: Result<TransportReply, any Error> = .failure(DeviceSyncError.deliveryFailed)
+                            self?.complete(id, with: failure); result.finish(failure)
+                        })
+                    }
+                } catch { self.complete(id, with: .failure(error)); result.finish(.failure(error)) }
             }
         }, onCancel: { [weak self, result] in
-            // sendMessageData has no SDK cancel handle. End local waiting now; a late
-            // native reply/error can only attempt the same exactly-once settlement.
+            // sendMessageData returns void: no SDK cancellation handle exists.
             self?.complete(id, with: .failure(CancellationError()))
             result.finish(.failure(CancellationError()))
         })
@@ -101,51 +144,81 @@ public final class WCSessionDriver: WCSessionDriving, @unchecked Sendable {
     private func complete(_ id: UUID, with result: Result<TransportReply, any Error>) {
         let value = lock.withLock { pending.removeValue(forKey: id) }; value?.finish(result)
     }
-    func fileValue(_ file: WCSessionFile) -> DriverFileTransfer? {
-        guard let metadata = file.metadata,
-              metadata["protocol"] as? String == "football-record.sync-fragment.v2",
-              let id = metadata["deliveryID"] as? String, !id.isEmpty, id.utf8.count <= 4096,
-              let checksum = metadata["checksum"] as? String, isDigest(checksum),
+    private func fileValue(_ file: WCSessionFile) -> DriverFileTransfer? {
+        guard let metadata = file.metadata, metadata["protocol"] as? String == "football-record.sync-fragment.v2",
+              let id = metadata["deliveryID"] as? String, validOpaqueID(id), let checksum = metadata["checksum"] as? String, isDigest(checksum),
               let token = metadata["token"] as? String, UUID(uuidString: token) != nil else { return nil }
         return DriverFileTransfer(deliveryID: id, checksum: checksum, token: token, url: file.fileURL)
     }
     public func outstandingFiles() async -> [DriverFileTransfer] {
-        lock.withLock { session?.outstandingFileTransfers.compactMap { fileValue($0.file) } ?? [] }
+        (try? storage.withActive { lock.withLock { session?.outstandingFileTransfers.compactMap { fileValue($0.file) } ?? [] } }) ?? []
     }
     public func enqueueFile(_ transfer: DriverFileTransfer) async throws {
         try Task.checkCancellation()
-        try lock.withLock {
-            guard let session else { throw DeviceSyncError.unavailable }
-            let state = values(session)
-            guard state.activated, state.counterpartAvailable else { throw DeviceSyncError.inactive }
-            let existing = session.outstandingFileTransfers.compactMap { fileValue($0.file) }.filter { $0.deliveryID == transfer.deliveryID }
-            if !existing.isEmpty {
-                guard existing.count == 1, existing[0].checksum == transfer.checksum, existing[0].token == transfer.token else { throw DeviceSyncError.conflictingDelivery }
-                return
+        try storage.withActive {
+            guard storage.managed, let owner = try storage.ledger.state().owner else { throw DeviceSyncError.unavailable }
+            let expectedURL = storage.root.appendingPathComponent("outbox/" + digest(Data(transfer.deliveryID.utf8)) + ".frame")
+            guard Data(transfer.url.resolvingSymlinksInPath().path.utf8) == Data(expectedURL.resolvingSymlinksInPath().path.utf8) else { throw DeviceSyncError.conflictingDelivery }
+            let bytes = try DeviceSyncStorageContext.readRegular(transfer.url, limit: DeviceSyncPolicy.maximumFrameBytes)
+            let queue = try OutgoingFileQueue(directory: storage.root.appendingPathComponent("outbox"))
+            guard let saved = try queue.existing(transfer.deliveryID, bytes: bytes), saved.checksum == transfer.checksum, saved.token == transfer.token else { throw DeviceSyncError.conflictingDelivery }
+            let native: WCSession? = try lock.withLock {
+                guard let session else { throw DeviceSyncError.unavailable }
+                let state = values(session)
+                guard state.activated, state.counterpartAvailable else { throw DeviceSyncError.inactive }
+                let existing = session.outstandingFileTransfers.compactMap { fileValue($0.file) }.filter { Data($0.deliveryID.utf8) == Data(transfer.deliveryID.utf8) }
+                if !existing.isEmpty {
+                    guard existing.count == 1, existing[0].checksum == transfer.checksum, existing[0].token == transfer.token else { throw DeviceSyncError.conflictingDelivery }
+                    return nil
+                }
+                return session
             }
-            _ = session.transferFile(transfer.url, metadata: ["protocol": "football-record.sync-fragment.v2", "deliveryID": transfer.deliveryID, "checksum": transfer.checksum, "token": transfer.token])
-            // Queue acceptance is enough to return to the service drain. A later native
-            // completion releases only this owned outgoing file, never a business ACK.
+            if let native {
+                try Task.checkCancellation()
+                _ = native.transferFile(transfer.url, metadata: ["protocol": "football-record.sync-fragment.v2", "deliveryID": transfer.deliveryID, "checksum": transfer.checksum, "token": transfer.token, "storageNamespace": owner.namespaceID, "storageOwner": try owner.ownerDigest])
+            }
         }
+    }
+    public func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus {
+        try storage.withFenced(request) {
+            let values = lock.withLock { () -> (WCSession?, [DriverSettlement<TransportReply>]) in
+                activationAccepted = false; activating = false
+                let results = Array(pending.values); pending = [:]; return (session, results)
+            }
+            for result in values.1 { result.finish(.failure(DeviceSyncError.erased)) }
+            guard let native = values.0 else { return .unresolved }
+            return try deviceSyncDrainInventory(current: { native.outstandingFileTransfers }, ownership: { try self.ownership($0, request: request, expected: expected) }, cancel: { $0.cancel() })
+        }
+    }
+    private func ownership(_ transfer: WCSessionFileTransfer, request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) throws -> DeviceSyncTransferOwnership {
+        let metadata = transfer.file.metadata
+        let path = Data(transfer.file.fileURL.standardizedFileURL.path.utf8), prefix = Data((storage.root.appendingPathComponent("outbox").path + "/").utf8)
+        return try deviceSyncTransferOwnership(namespaceID: metadata?["storageNamespace"] as? String, ownerDigest: metadata?["storageOwner"] as? String, transfer: fileValue(transfer.file), protocolMatches: metadata?["protocol"] as? String == "football-record.sync-fragment.v2", sourceInsideRoot: path.starts(with: prefix), request: request, expected: expected)
     }
     fileprivate func receivedMessage(_ bytes: Data) -> TransportReply {
-        let receiver = lock.withLock { callbacks }
-        guard bytes.count <= DeviceSyncPolicy.maximumFrameBytes else { return .unavailable }
-        return receiver?.message(bytes) ?? .unavailable
+        (try? storage.withActive {
+            guard bytes.count <= DeviceSyncPolicy.maximumFrameBytes else { return TransportReply.unavailable }
+            let receiver = lock.withLock { callbacks }; return receiver?.message(bytes) ?? .unavailable
+        }) ?? .unavailable
     }
-    fileprivate func receivedFile(_ url: URL) { lock.withLock { callbacks }?.file(url) }
+    fileprivate func receivedFile(_ url: URL) {
+        // Fence precedes stat/read/copy and failure audit in the synchronous inbox callback.
+        try? storage.withActive { let receiver = lock.withLock { callbacks }; receiver?.file(url) }
+    }
     fileprivate func activated(_ active: Bool, failed: Bool) {
-        let value = lock.withLock { () -> (DriverCallbacks?, DriverSnapshot, Bool, DeviceSyncError?) in
-            activating = false; activationAccepted = false
-            var changed = pairing.isInvalidated, issue: DeviceSyncError? = failed || !active ? .activationFailed : nil
-            if active, let session, session.activationState == .activated {
-                do { changed = try pairing.observe(fingerprint(session)) }
-                catch { issue = error as? DeviceSyncError ?? .fileIO; changed = true }
-                activationAccepted = !changed && issue == nil
-            }
-            let snapshot = session.map(values) ?? DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false)
-            return (callbacks, snapshot, changed, issue)
-        }
+        let value: (DriverCallbacks?, DriverSnapshot, Bool, DeviceSyncError?)
+        do {
+            value = try storage.withActive { lock.withLock {
+                activating = false; activationAccepted = false
+                var changed = pairing.isInvalidated, issue: DeviceSyncError? = failed || !active ? .activationFailed : nil
+                if active, let session, session.activationState == .activated {
+                    do { changed = try pairing.observe(fingerprint(session)) }
+                    catch { issue = error as? DeviceSyncError ?? .fileIO; changed = true }
+                    activationAccepted = !changed && issue == nil
+                }
+                return (callbacks, session.map(values) ?? inactiveSnapshot, changed, issue)
+            } }
+        } catch { lock.withLock { callbacks }?.event(.activationCompleted(inactiveSnapshot, error as? DeviceSyncError ?? .unavailable)); return }
         if value.2 {
             #if os(iOS)
             value.0?.event(.pairingChanged)
@@ -156,17 +229,17 @@ public final class WCSessionDriver: WCSessionDriving, @unchecked Sendable {
         value.0?.event(.activationCompleted(value.1, value.3))
     }
     fileprivate func changedReachability() {
-        let value = lock.withLock { (callbacks, session.map(values) ?? DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false)) }
+        guard let value = try? storage.withActive({ lock.withLock { (callbacks, session.map(values) ?? inactiveSnapshot) } }) else { return }
         value.0?.event(.stateChanged(value.1))
     }
     fileprivate func changedCounterpart() {
-        let value = lock.withLock { () -> (DriverCallbacks?, Bool) in
+        guard let value = try? storage.withActive({ lock.withLock { () -> (DriverCallbacks?, Bool) in
             guard let session, session.activationState == .activated else { return (callbacks, false) }
             let changed: Bool
             do { changed = try pairing.observe(fingerprint(session)) }
             catch { activationAccepted = false; return (callbacks, true) }
             if changed { activationAccepted = false }; return (callbacks, changed)
-        }
+        } }) else { return }
         #if os(iOS)
         if value.1 { value.0?.event(.pairingChanged) }
         #else

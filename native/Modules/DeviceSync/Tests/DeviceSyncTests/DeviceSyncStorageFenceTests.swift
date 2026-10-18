@@ -102,3 +102,55 @@ extension DeviceSyncStorageFenceTests {
     }
     #endif
 }
+
+extension DeviceSyncStorageFenceTests {
+    func testExistingSchemaZeroCannotReinitializeErasedNamespace() async throws {
+        let f = try ManagedErasureFixture()
+        _ = try await f.service().erase(f.request)
+        try controlSQL(f.root, "DROP TABLE control; PRAGMA user_version=0")
+        let database = f.root.appendingPathComponent(".control/control.sqlite"), before = try Data(contentsOf: database)
+        XCTAssertThrowsError(try DeviceSyncStorageContext(root: f.root))
+        XCTAssertEqual(try Data(contentsOf: database), before)
+    }
+}
+
+#if os(macOS)
+extension DeviceSyncStorageFenceTests {
+    func testReleasedContextsDoNotRetainUnboundedOwnerFileDescriptors() throws {
+        let before = try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        for _ in 0..<128 {
+            try autoreleasepool {
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("owner-release-" + UUID().uuidString).appendingPathComponent("DeviceSync")
+                let context = try DeviceSyncStorageContext(root: root)
+                XCTAssertGreaterThan(context.rootIdentity.inode, 0)
+            }
+        }
+        let after = try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        XCTAssertLessThanOrEqual(after, before + 8, "retained inode is a file, not a permanent FD leak after all handles close")
+    }
+}
+#endif
+
+extension DeviceSyncStorageFenceTests {
+    func testUnknownControlEntryCannotTurnLegacyIntoFreshBinding() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("DeviceSync")
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".control"), withIntermediateDirectories: true)
+        let file = root.appendingPathComponent(".control/unknown.bin"), original = Data("unknown-legacy-control".utf8)
+        try original.write(to: file)
+        do {
+            let context = try DeviceSyncStorageContext(root: root)
+            let binding = try DeviceSyncNamespaceBinding(namespaceID: UUID().uuidString, accountID: "a", cloudSpaceID: "s", zoneID: "z", activationEpoch: 1, catalogRevision: 1, catalogDigest: String(repeating: "a", count: 64), rootIdentity: context.rootIdentity)
+            XCTAssertThrowsError(try context.bind(binding))
+        } catch {}
+        XCTAssertEqual(try Data(contentsOf: file), original)
+    }
+    func testBadDatabaseHeaderPreservesUnknownBytesAndBusinessFile() throws {
+        let f = try ManagedErasureFixture(), inbox = try f.inbox(), raw = Data("original-canonical".utf8), frame = try inbox.adoptData(raw)
+        let database = f.root.appendingPathComponent(".control/control.sqlite"), corrupt = Data(repeating: 255, count: 128)
+        try corrupt.write(to: database, options: .atomic)
+        XCTAssertThrowsError(try DeviceSyncStorageContext(root: f.root))
+        XCTAssertThrowsError(try inbox.adoptData(Data("late".utf8)))
+        XCTAssertEqual(try Data(contentsOf: database), corrupt)
+        XCTAssertEqual(try Data(contentsOf: f.root.appendingPathComponent("inbox/" + frame.transportDeliveryID + ".frame")), raw)
+    }
+}

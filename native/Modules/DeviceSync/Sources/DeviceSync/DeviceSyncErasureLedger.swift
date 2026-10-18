@@ -14,7 +14,7 @@ struct DeviceSyncControlState {
 /// All access is serialized by the retained storage owner lock, including other processes.
 final class DeviceSyncErasureLedger: @unchecked Sendable {
     private var db: OpaquePointer?
-    init(url: URL) throws {
+    init(url: URL, creating: Bool) throws {
         guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { if db != nil { sqlite3_close(db) }; throw DeviceSyncErasureError.corruptControl }
         do {
             sqlite3_busy_timeout(db, 5000)
@@ -22,7 +22,7 @@ final class DeviceSyncErasureLedger: @unchecked Sendable {
             let version = try integerQuery("PRAGMA user_version")
             guard version <= 1 else { throw DeviceSyncErasureError.futureControl }
             if version == 0 {
-                guard try textQuery("SELECT name FROM sqlite_master WHERE type='table'").isEmpty else { throw DeviceSyncErasureError.corruptControl }
+                guard creating, try textQuery("SELECT name FROM sqlite_master WHERE type='table'").isEmpty else { throw DeviceSyncErasureError.corruptControl }
                 try transaction {
                     try exec("CREATE TABLE control(id INTEGER PRIMARY KEY CHECK(id=1), owner BLOB, request BLOB, receipt BLOB)")
                     try exec("INSERT INTO control(id) VALUES(1)")

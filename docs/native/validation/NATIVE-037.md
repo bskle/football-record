@@ -9,3 +9,9 @@
 ## durable control / filesystem checkpoint
 
 首个现有 late-file 行为测试实际红1失败→绿1/0。新增归属/擦除 API 初次为缺失类型编译红，运行实现后发现并修复系统 `/var` 别名、目录 URL 尾斜线、已存在 control 创建兼容。随后 owner/schema 两项具体 runtime 红（6项/2失败）→完整36项/0失败，日志 `slice2-host-1.log`。该36项单轮包含原21项、初始late-file及14项新的归属/文件/故障/进程检查，不等于018旧331或026整体验收。原生SDK同步dispatch/cancel尚待下一slice，不以该轮宣称完整037完成。
+
+## native dispatch checkpoint（非最终）
+
+第三slice实际dispatch红6项/4失败→绿6/0；shared native inventory分类红8项/4失败，shared排空与既存schema0保护红49项/8失败；owner FD释放及未知control绑定分别实际红1项/1失败。修后完整 `slice3-host-2.log` 为52项/0失败，含真实子进程与原21项。
+
+该checkpoint尚无四SDK通过，也不关闭root+m2对19a持久checkpoint的三项finding：receipt重放须当前zero、control编码budget、大小写别名探针。原日志保留，修复另行红绿；不声称全037 PASS。

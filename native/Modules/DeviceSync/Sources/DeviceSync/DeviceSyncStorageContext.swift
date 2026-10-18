@@ -17,13 +17,18 @@ private final class DeviceSyncOwnerLock: @unchecked Sendable {
         }
     }
 }
+private final class DeviceSyncWeakOwnerLock {
+    weak var value: DeviceSyncOwnerLock?
+    init(_ value: DeviceSyncOwnerLock) { self.value = value }
+}
 private final class DeviceSyncLockRegistry: @unchecked Sendable {
     static let shared = DeviceSyncLockRegistry()
     private let lock = NSLock()
     // The retained open owner inode is shared by every handle in this process.
-    private var values: [String: DeviceSyncOwnerLock] = [:]
+    private var values: [String: DeviceSyncWeakOwnerLock] = [:]
     func get(_ url: URL, create: Bool) throws -> (DeviceSyncOwnerLock, Bool) {
         try lock.withLock {
+            values = values.filter { $0.value.value != nil }
             var created = false
             var fd = open(url.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)
             if fd >= 0 { created = true }
@@ -32,8 +37,8 @@ private final class DeviceSyncLockRegistry: @unchecked Sendable {
             if created && !create { close(fd); throw DeviceSyncErasureError.ownerChanged }
             var st = stat(); guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { close(fd); throw DeviceSyncErasureError.ownerChanged }
             let identity = DeviceSyncRootIdentity(device: UInt64(UInt32(bitPattern: st.st_dev)), inode: st.st_ino), key = "\(identity.device):\(identity.inode)"
-            if let existing = values[key] { close(fd); return (existing, created) }
-            let value = DeviceSyncOwnerLock(fd: fd, identity: identity); values[key] = value; return (value, created)
+            if let existing = values[key]?.value { close(fd); return (existing, created) }
+            let value = DeviceSyncOwnerLock(fd: fd, identity: identity); values[key] = DeviceSyncWeakOwnerLock(value); return (value, created)
         }
     }
 }
@@ -61,7 +66,12 @@ public final class DeviceSyncStorageContext: @unchecked Sendable {
         let control = root.appendingPathComponent(".control", isDirectory: true), database = control.appendingPathComponent("control.sqlite"), owner = control.appendingPathComponent(".owner")
         guard mkdir(control.path, S_IRWXU) == 0 || errno == EEXIST else { throw DeviceSyncErasureError.fileIO }
         _ = try Self.identity(control, directory: true)
+        let entries = try FileManager.default.contentsOfDirectory(at: control, includingPropertiesForKeys: nil)
+        let allowed = [".owner", "control.sqlite", "control.sqlite-journal", "control.sqlite-wal", "control.sqlite-shm"]
+        guard entries.allSatisfy({ allowed.contains($0.lastPathComponent) }) else { throw DeviceSyncErasureError.unknownInventory }
+        for entry in entries { _ = try Self.identity(entry, directory: false) }
         let hadDatabase = FileManager.default.fileExists(atPath: database.path), hadOwner = FileManager.default.fileExists(atPath: owner.path)
+        guard entries.isEmpty || (hadDatabase && hadOwner) else { throw DeviceSyncErasureError.ownerChanged }
         guard !hadDatabase || hadOwner else { throw DeviceSyncErasureError.ownerChanged }
         if hadDatabase { _ = try Self.identity(database, directory: false) }
         let (gate, created) = try DeviceSyncLockRegistry.shared.get(owner, create: !hadDatabase && !hadOwner)
@@ -81,11 +91,14 @@ public final class DeviceSyncStorageContext: @unchecked Sendable {
                 guard try Self.readRegular(owner, limit: 8192) == marker else { throw DeviceSyncErasureError.ownerChanged }
                 guard FileManager.default.fileExists(atPath: database.path) else { throw DeviceSyncErasureError.ownerChanged }
             }
-            return try DeviceSyncErasureLedger(url: database)
+            return try DeviceSyncErasureLedger(url: database, creating: created)
         }
         databaseIdentity = try Self.identity(database, directory: false)
         identities = tracked
-        try withLocked { _ = try ledger.state() }
+        try withLocked {
+            _ = try ledger.state()
+            if created { try synchronize(control); try synchronize(root); try synchronize(root.deletingLastPathComponent()); try synchronize(root.deletingLastPathComponent().deletingLastPathComponent()) }
+        }
     }
     static func component(_ directory: URL, role: String) throws -> DeviceSyncStorageContext {
         let directory = canonicalURL(directory)
