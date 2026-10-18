@@ -154,3 +154,19 @@ extension DeviceSyncStorageFenceTests {
         XCTAssertEqual(try Data(contentsOf: f.root.appendingPathComponent("inbox/" + frame.transportDeliveryID + ".frame")), raw)
     }
 }
+
+extension DeviceSyncStorageFenceTests {
+    func testSupportedCaseAliasCannotBypassManagedNamespaceFence() async throws {
+        let f = try ManagedErasureFixture(), raw = Data("case-alias-late-canonical".utf8)
+        _ = try f.inbox().adoptData(Data("before".utf8))
+        _ = try await f.service().erase(f.request)
+        let alias = f.root.deletingLastPathComponent().appendingPathComponent("devicesync")
+        guard let actual = try? DeviceSyncStorageContext.identity(alias, directory: true), actual == f.context.rootIdentity else {
+            throw XCTSkip("Actual filesystem does not expose the same directory through this case alias")
+        }
+        print("S37-managed-alias-1 actual case alias resolves same device/inode: \(actual.device)/\(actual.inode)")
+        XCTAssertThrowsError(try DurableFileInbox(directory: alias.appendingPathComponent("inbox")).adoptData(raw))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("inbox/frame-" + digest(raw) + ".frame").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("inbox/.control").path), "no independent nested standalone gate")
+    }
+}

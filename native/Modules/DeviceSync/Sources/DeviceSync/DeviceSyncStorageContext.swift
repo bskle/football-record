@@ -104,6 +104,10 @@ public final class DeviceSyncStorageContext: @unchecked Sendable {
         let directory = canonicalURL(directory)
         var cursor = directory, managedRoot: URL?
         while cursor.path != "/" {
+            // On a case-insensitive volume an alias is the same actual managed root.
+            // Fail before constructing any standalone inner gate; callers use canonical spelling.
+            if cursor.lastPathComponent.caseInsensitiveCompare("DeviceSync") == .orderedSame,
+               Data(cursor.lastPathComponent.utf8) != Data("DeviceSync".utf8) { throw DeviceSyncErasureError.unsupportedLayout }
             if cursor.lastPathComponent == "DeviceSync" { managedRoot = cursor }
             cursor.deleteLastPathComponent()
         }
