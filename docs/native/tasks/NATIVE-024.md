@@ -25,3 +25,11 @@
 025 只消费两模块 README 的显式配置清单：container/environment、scene presentation anchor、本机installationID/keychain service/account/accessGroup、稳定且保留的owner controlDirectory、业务DBURL、asset root/control pair、当前generation与双身份显式admission。不得由候选推导Team/container/Bundle或自动启用SDK。026保留真实授权、Keychain可用性、CloudKit account/asset/token/partial/quota/删除与设备门槛，组合全部owned catalog，保护live owner inode及其父目录。
 
 作者不合dev、不push、不archive；后续实际审阅结论由两位非作者独立登记，当前不能把阶段局部PASS视为整项通过。
+
+## S24-manifest-binding-1 修复候选
+
+旧 source06ce / finalae8 的 whole PASS 因新增 P2 阻断失效；旧178/八SDK及原manifest保留为历史层，不能据其向026交付。新 source `59c82d482e8455d546eca0e950c176246d2cec90` 仅修 CloudKitDriver 与同名测试；仍基于已验证target fcf530，不改写旧历史、不推进长期分支。
+
+实际 host 红3项/2 assertion failures：实际 alias recordID/tag 配完整原manifestbytes可冒充未读的期望checkpoint，另一个top引用错配也被旧逻辑接受；正常原ID/tag通过。SDK canonical与host共享纯metadata binder，现按原UTF8绑定 actual CKRecord.recordID == top.manifestID == decoded.checkpointID，保留原scope/owner/digest与完整parts约束。readback再次guard实际ID等于upload.checkpointID，proof使用实际读回ID/tag。它没有通过凭空填写expectedID来证明读取。
+
+修复后driver13/0；新source完整 AccountKit72/0、CloudSync109/0，本轮相关两包181/0与八项fresh最低SDK均通过，207输入运行后无差异。此轮独立于旧178与其他历史，不累加。最终两卡收尾与新manifest位于树外 `NATIVE-024/S24-manifest-binding-1/final-59c82d4/`；待root+m2重新进行source/final整项双审。真实CloudKit行为仍未执行，SDK默认false，候选保持hold026。

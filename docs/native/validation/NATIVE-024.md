@@ -40,3 +40,15 @@ Git输入、207项相关产品/测试/后台fixture/脚本文件、23项实际SD
 诊断：Core LifecycleInboundCoordinator.swift23/33既有unused repository warning保留；Node22 experimental SQLite warning保留。完整AccountKit运行还输出系统CoreData/contactsd NSXPC4097连接诊断，72项仍0失败；源码/测试未调用Contacts API，不据该系统日志认定真实账号或权限能力已验。新增adapter无编译warning，slice4早期accountStatus warning已经换async接口并被最终八构建覆盖。53a7db6 body字面量换行保留历史，不amend/rebase。
 
 宿主只用受控Authorization/Keychain/CloudKit transport与受控文件SQLite；公共factory默认false。没有实际AS授权、Security item读写、CKContainer/CKUser请求、CloudKit query/save/delete、账号配置或设备行为。真实iCloud环境选择来自签名工程配置，enum不是服务器切换开关。未构建App、未签名安装、未把单staging receipt或SDK候选bool升级为全本地/账号/cloud/health完成。真实SDK行为和组合验收仍归026；候选独立保留待双审。
+
+## S24-manifest-binding-1：替代旧整项结论的新输入
+
+新增P2 finding使旧06ce/ae8 whole PASS失效。旧178/八SDK/原manifest保持未改；新目录 `native-validation/NATIVE-024/S24-manifest-binding-1/` 保存独立红绿和输入。
+
+`manifest-binding-runtime-red.log` 实际编译成功后运行3项/2 assertion failures；不是编译失败充当红。纯metadata seam先抽取旧SDK语义，actual alias ID/tag配原manifestbytes/parts仍产生期望ID证明，top引用错配同样未拒；正常actual ID/tag通过。修复后 `manifest-binding-targeted-green.log` driver13/0。SDK canonical实际从CKRecord取得recordID、owner、scope、tag和callback-owned bytes送同一binder；绑定实际ID、top引用和decoded checkpoint后才能取parts。readback再次核upload期望并返回实际ID/tag。host证明metadata边界，不能声称真实CloudKit取回或服务器条件已验。
+
+新源码 `59c82d482e8455d546eca0e950c176246d2cec90`（目标仍为已验证fcf530），完整fresh host AccountKit72/0、CloudSync109/0；本轮两包181/0。新目录 `final-59c82d4/` 的八个fresh SDK日志/两份results JSON分别覆盖AccountKit、CloudSync的最低iOS17/watch10 simulator/device四triples，全部exit0。AccountKit依赖变更的CloudSync产品，因此两产品八项均按新输入重跑；没有沿用旧scratch/日志。
+
+207项相关源/测试/fixture/脚本输入、23项实际SDK header/interface重新读取hash，post-runtime207项零差异。source后仅两张024卡收尾；最终SHA/manifesthash在树外。诊断仍为已审Core23/33 unused repository与Node实验SQLite warning；fullAccount系统CoreData/contactsd4097输出原样保留，72项零失败，无Contacts显式调用。新增binder未产生编译warning。
+
+真实AS/Security/CKContainer/CKUser、账号配置、设备与实际CloudKit query/save/delete均未调用；没有改变执行默认false或单组件删除边界。旧review记录不覆盖新source，必须root+m2重新exact source/final审阅；仍不合dev/push/archive。
