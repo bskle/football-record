@@ -1,8 +1,8 @@
 # Git 与多代理工作树治理方案
 
-状态快照：2026-10-19（上海）。当前M4交付基线 `dev=origin/dev=8d6ec935efa060ab462b2913ab8460734871ff40`：021 final `a55dab4d10bf2b10011c81a49a30128cd9f835ad` 实际merge `a15b8414c460026e5ea7725f9c17ea08ce9ed737`（Node56）；022 final `b648b730fbb9929453c32a43b12bc77bd2d67faf` 实际merge `8d6ec935efa060ab462b2913ab8460734871ff40`（Cloud42与新增两项最低simulator SDK编译）。root+m2双审、实际merge Node56+Cloud42复验并同步，020/021/022已实际归档及安全branch-d。它们是本地参考后台/未启用云模块，非真实Apple/CloudKit/删除/部署验收；023仍在独立树实现。本批治理六文档见[GIT-005](native/tasks/GIT-005.md)，历史M3治理见[GIT-004](native/tasks/GIT-004.md)。
+状态快照：2026-10-19（上海）。当前M4本地交付基线 `dev=origin/dev=225851d9c00feda5e1d4579293c881bdf89bb090`；027/029～033均已root+m2 exact双审、实际no-ff/相应merge复验/同步及实际归档/safe branch-d，完整final/merge/清理标识见[GIT-006](native/tasks/GIT-006.md)。033本轮实际Cloud80与两项fresh最低simulator SDK源编译输入相符；Node128只沿用032实际merge `aa9977805dfb172cf1ece605d1f575cf7684df72` 未改后端旧层，033未重跑，不合称一次全App验证。
 
-历史App产品组合 `b0070c90d91bf9d7741b7a7ed24165f1ad27383d` 的252宿主/8最低SDK/2无签名App与双端UI spot保留原层次，不加上新Node56/Cloud42称一次整包运行。008/010/016/018物理门槛与旧五树/017 queued但active状态保持；不因M4新任务强删或绕过归档。主线provider仍unavailable，main/release仍原型且无原生冻结候选。
+021/022的Node56/Cloud42、b0070c9的App252与018的331等保留原层次。028 final `0fa3dff4d3232e72257f6fa115ecada873f086db` 双审后29host/四SDK候选独立树仍保留，不入dev；023唯一作者收尾且未freeze/final/合入，024/025待正式接口交接。026真实账号/设备/签名/容器/服务门槛未验。008/010/016/018和旧五树/017 queued但active保持，不重试或删除；main/release仍原型，无原生冻结候选。M4职责历史补充见[GIT-005](native/tasks/GIT-005.md)，M3历史见[GIT-004](native/tasks/GIT-004.md)。
 
 ## 1. 事实基线与规则优先级
 
@@ -30,7 +30,7 @@
 
 ## 3. 实际开发前的 bootstrap
 
-以下保留 bootstrap 的执行顺序供核对。2026-10-15 文档已完成双审并以 `2d4616355221af0969e07e9b1f45852449cbb98e` 合入 `dev`，工程基础随后以 `b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入；原文档任务分支与 worktree 已不在活动列表。首次远端同步已在 GIT-001 双审合并后执行。初始任务卡不回写，M1历史核对见GIT-002，M2历史核对见GIT-003，M3历史Git核对见GIT-004，当前M4交付见[GIT-005](native/tasks/GIT-005.md)。
+以下保留 bootstrap 的执行顺序供核对。2026-10-15 文档已完成双审并以 `2d4616355221af0969e07e9b1f45852449cbb98e` 合入 `dev`，工程基础随后以 `b7729b75ff29fccb578ec204438aa37dc3ab2136` 合入；原文档任务分支与 worktree 已不在活动列表。首次远端同步已在 GIT-001 双审合并后执行。初始任务卡不回写，M1历史核对见GIT-002，M2历史核对见GIT-003，M3历史Git核对见GIT-004，当前M4交付见[GIT-006](native/tasks/GIT-006.md)。
 
 1. 主代理重新检查 Git 版本、仓库根、HEAD、分支、标签、remote、worktree、暂存区、修改、未跟踪及冲突文件，核对本节基线是否仍成立。发现他人改动时按所有权保留，不能用清理命令消除。
 2. 对基线提交创建不可移动的 annotated tag，建议名为 `prototype-baseline-20261015`，明确记录它只标记浏览器原型。若同名标签存在，验证指向，不覆盖。正式版本才使用 `vX.Y.Z`；原型标签不宣称原生版本已发布。
@@ -62,7 +62,7 @@
 
 ## 5. 临时分支与 worktree
 
-M4当前接口/所有权以[GIT-005](native/tasks/GIT-005.md)及[M4子计划](superpowers/plans/2026-10-18-native-m4.md)为准：023独占共享核心/AccountKit软件纵向，027可从含021的已验证dev独立持有`backend/**`，028只持有新`native/Modules/HealthKitDeletion/**`，均不得写他人树。024在023交接后持客户端AccountKit/CloudSync；025唯一持有Apps、project/scheme、entitlements和UI，026另建整包集成树映射删除saga及实际环境。027参考server的受控HTTP/身份匹配测试可按本地双审门槛入dev，但默认revoker仍unavailable，部署和真实撤销未验；024/028 SDK候选在真实门槛前保留独立树。新拆分没有新增产品决定或用户审批，尚未创建的树/分支不由规划当成已创建。
+M4接口责任沿用[GIT-005](native/tasks/GIT-005.md)，当前交付/候选门槛以[GIT-006](native/tasks/GIT-006.md)及[M4子计划](superpowers/plans/2026-10-18-native-m4.md)为准：023独占共享核心/AccountKit软件纵向，027及029～033原本地任务已实际归档/安全删分支，后续修复另登记；028只持有独立`native/Modules/HealthKitDeletion/**` SDK候选，均不得写他人树。024在023交接后持客户端AccountKit/CloudSync；025唯一持有Apps、project/scheme、entitlements和UI，026另建整包集成树映射删除saga及实际环境。027参考server的受控HTTP/身份匹配测试可按本地双审门槛入dev，但默认revoker仍unavailable，部署和真实撤销未验；024/028 SDK候选在真实门槛前保留独立树。新拆分没有新增产品决定或用户审批，尚未创建的树/分支不由规划当成已创建。
 
 | 任务 | 分支示例 | 起点 | 合并目标 |
 |---|---|---|---|
