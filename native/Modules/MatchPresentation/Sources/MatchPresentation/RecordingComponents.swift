@@ -80,7 +80,8 @@ public struct SyncStatusView: View {
   let model: RecordingModel
   let terminal: Bool
   let compact: Bool
-  public init(model: RecordingModel, terminal: Bool, compact: Bool = false) { self.model = model; self.terminal = terminal; self.compact = compact }
+  let lifecycle: LifecycleStatusModel?
+  public init(model: RecordingModel, terminal: Bool, compact: Bool = false, lifecycle: LifecycleStatusModel? = nil) { self.model = model; self.terminal = terminal; self.compact = compact; self.lifecycle = lifecycle }
   public var body: some View {
     let status = model.syncStatus.projection(terminal: terminal)
     VStack(alignment: .leading, spacing: compact ? 3 : 8) {
@@ -88,8 +89,13 @@ public struct SyncStatusView: View {
       Text(status.peer).accessibilityIdentifier("sync-peer-state")
       if let count = status.pendingCount, count > 0 { Text("待确认 \(count) 项").accessibilityIdentifier("sync-pending-count") }
       if let issue = status.issue { Text(issue).foregroundStyle(.orange).accessibilityIdentifier("sync-issue") }
-      Text(status.cloud).foregroundStyle(.secondary).accessibilityIdentifier("sync-cloud-state")
-      if let backend = status.backend { Text(backend).accessibilityIdentifier("sync-backend-state") }
+      Text(lifecycle?.cloudLabel ?? status.cloud).foregroundStyle(.secondary).accessibilityIdentifier("sync-cloud-state")
+      if let backend = lifecycle?.backendLabel ?? status.backend { Text(backend).accessibilityIdentifier("sync-backend-state") }
+      if lifecycle?.development == true { Text("开发账号 · 开发配对（私有邮箱）").foregroundStyle(.secondary).accessibilityIdentifier("development-account-transport-marker"); Text("开发云 · 文件台账演练 · 真实设备通信待验收").foregroundStyle(.secondary).accessibilityIdentifier("development-cloud-marker") }
+      if let lifecycle, let id = model.snapshot?.replay.matchID, lifecycle.available {
+        Button("保存到云并确认后台状态") { Task { await lifecycle.perform(.synchronize(id), matchID: id) } }.frame(minHeight: 44).disabled(lifecycle.busy).accessibilityIdentifier("sync-authority")
+        if let issue = lifecycle.issue { Text(issue).foregroundStyle(.orange).accessibilityIdentifier("lifecycle-issue") }
+      }
       if model.developmentPair { Text("开发配对 · 本机协议演练").foregroundStyle(.secondary).accessibilityIdentifier("development-pair-marker") }
       if !status.peerPersisted {
         Button("重试同步") { Task { await model.syncStatus.retry() } }

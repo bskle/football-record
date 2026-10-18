@@ -20,6 +20,9 @@ extension MatchSession: SessionCommanding {}
   public private(set) var busy = false
   public private(set) var readOnly = false
   public private(set) var feedbackCount = 0
+  public private(set) var authorityStatus: AuthorityStatusV4?
+  @ObservationIgnored private var authorityRead = UUID()
+  public var authorityTerminal: Bool { authorityStatus == .releasedAbnormal || authorityStatus == .releasedNormal || authorityStatus == .terminationPending || authorityStatus == .terminal }
   public private(set) var history: [SessionSnapshot] = []
   public var metrics = LiveMetrics()
   public let development: Bool
@@ -38,7 +41,7 @@ extension MatchSession: SessionCommanding {}
   @ObservationIgnored private var acknowledged = Set<String>()
   public var canRecord: Bool {
     guard !stopped, let snapshot else { return false }
-    return !busy && !readOnly && pendingRequest == nil && [.running, .paused].contains(snapshot.replay.state)
+    return !authorityTerminal && !busy && !readOnly && pendingRequest == nil && [.running, .paused].contains(snapshot.replay.state)
   }
   public func load() async {
     guard !busy, !stopped else { return }; busy = true; defer { busy = false }
@@ -69,6 +72,7 @@ extension MatchSession: SessionCommanding {}
       // Only a complete successful recovery may clear a previous recovery failure.
       readOnly = false
       issue = recoveredIssue
+      await refreshAuthority()
     } catch {
       guard lifecycle == lifetime, !stopped else { return }
       issue = Self.message(error)
@@ -80,8 +84,12 @@ extension MatchSession: SessionCommanding {}
       }
     }
   }
+  public var canStartNext: Bool {
+    guard !stopped, let snapshot else { return false }
+    return snapshot.replay.state == .completed || authorityStatus == .releasedAbnormal || (snapshot.replay.state == .incomplete && snapshot.store.business.descriptor.backendLockState == .releasedConfirmed)
+  }
   public func start(starter: Bool) async {
-    guard !busy, !readOnly, snapshot == nil, pendingRequest == nil else { return }
+    guard !stopped, !busy, !readOnly, snapshot == nil || canStartNext, pendingRequest == nil else { return }
     busy = true; defer { busy = false }
     do { pendingRequest = try await session.prepareStart(starter: starter); await submit() }
     catch { issue = Self.message(error) }
@@ -135,6 +143,7 @@ extension MatchSession: SessionCommanding {}
     guard !stopped else { return }
     if let snapshot, snapshot.replay.matchID == value.replay.matchID,
        snapshot.store.business.generation > value.store.business.generation { return }
+    if snapshot?.replay.matchID != value.replay.matchID { authorityStatus = nil; authorityRead = UUID() }
     snapshot = value
     guard observedMatch != value.replay.matchID else { return }
     observation?.cancel(); observedMatch = value.replay.matchID
@@ -147,6 +156,15 @@ extension MatchSession: SessionCommanding {}
         self?.accept(next)
       }
     }
+  }
+  public func refreshAuthority() async {
+    guard !stopped, let id = snapshot?.replay.matchID, let authority = repository as? any AuthorityRepository else { return }
+    let token = UUID(); authorityRead = token
+    do {
+      let state = try await authority.authorityStateV4(matchID: id, now: Date())
+      guard !stopped, authorityRead == token, snapshot?.replay.matchID == id else { return }
+      authorityStatus = state.status
+    } catch { /* A failed sync query cannot revoke a persisted terminal fence or a legal local command. */ }
   }
   public func shutdown() async {
     stopped = true; lifecycle = UUID(); readOnly = true

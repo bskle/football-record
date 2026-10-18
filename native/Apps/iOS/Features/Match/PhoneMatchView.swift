@@ -7,6 +7,9 @@ import UIKit
 struct PhoneMatchView: View {
   let model: RecordingModel
   let enterDevelopment: () -> Void
+  var context: AccountAppContext? = nil
+  var reloadAccount: () -> Void = {}
+  @State private var abnormal = false
   @Environment(\.colorScheme) private var scheme
   @Environment(\.dynamicTypeSize) private var typeSize
   @State private var choosingStart = false
@@ -23,6 +26,11 @@ struct PhoneMatchView: View {
       .sheet(isPresented: $choosingStart) { StartChoiceView { starter in Task { await model.start(starter: starter) } }.presentationDetents([.medium, .large]) }
       .sheet(isPresented: $controls) { MatchControlView(paused: model.snapshot?.replay.state == .paused) { action in Task { await model.perform(action) } }.presentationDetents([.medium, .large]) }
       .task { await model.load() }
+      .task(id: model.snapshot?.replay.matchID) { await context?.lifecycle.refresh(matchID: model.snapshot?.replay.matchID) }
+      .alert("异常终结本场？", isPresented: $abnormal) {
+        Button("继续保留", role: .cancel) {}
+        Button("确认异常终结", role: .destructive) { if let context, let id = model.snapshot?.replay.matchID { Task { await context.lifecycle.perform(.abnormal(id), matchID: id) } } }
+      } message: { Text("会请求后台释放比赛锁，并把比赛保留为不完整，不能当作完整同步成功。") }
       .onChange(of: model.feedbackCount) { old, new in if new > old { UINotificationFeedbackGenerator().notificationOccurred(.success) } }
   }
   private var match: some View {
@@ -32,8 +40,8 @@ struct PhoneMatchView: View {
           VStack(alignment: .leading, spacing: 8) { Text("比赛").font(.largeTitle.bold()); if model.development { DevelopmentMarker() } }
         } else { HStack { Text("比赛").font(.largeTitle.bold()); Spacer(); if model.development { DevelopmentMarker() } } }
         if let s = model.snapshot, s.replay.state != .notStarted {
-          TimelineView(.periodic(from: .now, by: 1)) { context in
-            let p = MatchProjection(snapshot: s, now: context.date)
+          TimelineView(.periodic(from: .now, by: 1)) { tick in
+            let p = MatchProjection(snapshot: s, now: tick.date, authorityStatus: model.authorityStatus)
             VStack(alignment: .leading, spacing: 16) {
               if typeSize.isAccessibilitySize {
                 VStack(alignment: .leading, spacing: 8) {
@@ -66,14 +74,16 @@ struct PhoneMatchView: View {
               }.padding(18).background(surface, in: RoundedRectangle(cornerRadius: 18)).accessibilityIdentifier("missing-metrics")
               if let warning = p.captureWarning { Text(warning).font(.subheadline).accessibilityIdentifier("capture-warning") }
               if p.terminal {
-                Text("本场已保留。完整同步确认前不能开始新比赛。").font(.subheadline).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(surface, in: RoundedRectangle(cornerRadius: 14))
+                Text(model.canStartNext ? "本场已终结，可以开始下一场。" : "本场已保留。完整同步确认前不能开始新比赛。").font(.subheadline).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(surface, in: RoundedRectangle(cornerRadius: 14))
+                if model.canStartNext { Button("开始下一场") { choosingStart = true }.frame(minHeight: 52).buttonStyle(.borderedProminent).accessibilityIdentifier("start-next-match") }
+                else if context?.lifecycle.available == true { Button("异常终结本场", role: .destructive) { abnormal = true }.frame(minHeight: 44).accessibilityIdentifier("abnormal-end") }
               } else {
                 HStack(spacing: 12) {
                   Button(p.onField ? "下场" : "上场") { Task { await model.perform(p.onField ? .leaveField : .enterField) } }.frame(maxWidth: .infinity, minHeight: 56).foregroundStyle(.white).background(MatchColors.forest, in: RoundedRectangle(cornerRadius: 14)).accessibilityIdentifier("field-toggle")
                   Button("比赛控制") { controls = true }.frame(maxWidth: .infinity, minHeight: 56).background(surface, in: RoundedRectangle(cornerRadius: 14)).accessibilityIdentifier("open-controls")
                 }.buttonStyle(.plain).font(.headline).disabled(!model.canRecord)
               }
-              SyncStatusView(model: model, terminal: p.terminal).padding(16).background(surface, in: RoundedRectangle(cornerRadius: 14))
+              SyncStatusView(model: model, terminal: p.terminal, lifecycle: context?.lifecycle).padding(16).background(surface, in: RoundedRectangle(cornerRadius: 14))
               VStack(alignment: .leading, spacing: 14) {
                 HStack { Text("最近操作").font(.headline); Spacer(); Text("已保存到本机").font(.caption).foregroundStyle(.secondary) }
                 ForEach(p.recent, id: \.eventID) { event in HStack { Text(MatchProjection.clock(event.matchElapsed)).font(.caption).monospacedDigit().foregroundStyle(.secondary); Text(MatchProjection.title(event)).font(.subheadline); Spacer() } }
@@ -107,8 +117,9 @@ struct PhoneMatchView: View {
       }.padding(20)
     }.background(paper)
   }
-  private var settings: some View {
-    ScrollView {
+  @ViewBuilder private var settings: some View {
+    if let context { AccountView(context: context, reload: reloadAccount) }
+    else { ScrollView {
       VStack(alignment: .leading, spacing: 16) {
         Text("设置").font(.largeTitle.bold()); Text("球历").font(.title2.bold()); Text("football-record").foregroundStyle(.secondary)
         Text("生产开赛服务、可信配对和真实运动采集仍在开发中。").font(.subheadline)
@@ -118,6 +129,7 @@ struct PhoneMatchView: View {
         #endif
       }.padding(20)
     }.background(paper)
+  }
   }
   private func placeholder(_ title: String, _ text: String) -> some View { ScrollView { VStack(alignment: .leading, spacing: 20) { Text(title).font(.largeTitle.bold()); Text(text).foregroundStyle(.secondary); if model.development { DevelopmentMarker() } }.frame(maxWidth: .infinity, alignment: .leading).padding(20) }.background(paper) }
   private func score(_ p: MatchProjection) -> some View { Text(p.score).font(.system(size: 48, weight: .bold, design: .rounded)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7).accessibilityLabel("本场比分 \(p.score)").accessibilityIdentifier("match-score") }

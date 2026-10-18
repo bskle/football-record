@@ -7,14 +7,17 @@ import WatchKit
 struct WatchMatchView: View {
   let model: RecordingModel
   let enterDevelopment: () -> Void
+  var context: AccountAppContext? = nil
+  var reloadAccount: () -> Void = {}
+  @State private var account = false
   @State private var choosingStart = false
   @State private var controls = false
   @State private var page = 0
   var body: some View {
     Group {
       if let snapshot = model.snapshot, snapshot.replay.state != .notStarted {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-          let p = MatchProjection(snapshot: snapshot, now: context.date)
+        TimelineView(.periodic(from: .now, by: 1)) { tick in
+          let p = MatchProjection(snapshot: snapshot, now: tick.date, authorityStatus: model.authorityStatus)
           TabView(selection: $page) {
             ScrollView { overview(p).padding(.horizontal, 4) }.contentMargins(.vertical, 0, for: .scrollContent).tag(0).accessibilityIdentifier("watch-overview")
             ScrollView { quickPage(p).padding(.horizontal, 4) }.contentMargins(.vertical, 0, for: .scrollContent).tag(1).accessibilityIdentifier("watch-quick-page")
@@ -28,6 +31,7 @@ struct WatchMatchView: View {
             if model.development { DevelopmentMarker() }
             Text("用事实留下每一次上场").font(.caption).foregroundStyle(.secondary)
             Button("开始比赛") { choosingStart = true }.frame(minHeight: 44).tint(MatchColors.accent).accessibilityIdentifier("start-match").disabled(model.busy || model.pendingRequest != nil || model.readOnly)
+            if context != nil { Button("账号与数据") { account = true }.accessibilityIdentifier("open-account") }
             RecordingIssueView(model: model)
             #if DEBUG
             if !model.development { Button("开发演练", action: enterDevelopment).frame(minHeight: 44).accessibilityIdentifier("enter-development") }
@@ -38,7 +42,9 @@ struct WatchMatchView: View {
     }
     .background(MatchColors.watch)
     .sheet(isPresented: $choosingStart) { StartChoiceView { starter in Task { await model.start(starter: starter) } } }
+    .sheet(isPresented: $account) { if let context { WatchAccountView(context: context, reload: reloadAccount) } }
     .task { await model.load() }
+    .task(id: model.snapshot?.replay.matchID) { await context?.lifecycle.refresh(matchID: model.snapshot?.replay.matchID) }
     .onChange(of: model.feedbackCount) { old, new in if new > old { WKInterfaceDevice.current().play(.success) } }
   }
   @ViewBuilder private func overview(_ p: MatchProjection) -> some View {
@@ -64,7 +70,8 @@ struct WatchMatchView: View {
       }.accessibilityIdentifier("missing-metrics")
       if p.terminal {
         Text(p.capture).font(.caption2).foregroundStyle(.secondary)
-        Text("完整同步前保留本场").font(.caption2)
+        Text(model.canStartNext ? "本场已终结" : "完整同步前保留本场").font(.caption2)
+        if model.canStartNext { Button("开始下一场") { choosingStart = true }.accessibilityIdentifier("start-next-match") }
       } else {
         HStack(spacing: 6) {
           Button(p.onField ? "下场" : "上场") { Task { await model.perform(p.onField ? .leaveField : .enterField) } }
@@ -72,7 +79,8 @@ struct WatchMatchView: View {
           Button("比赛控制") { controls = true }.frame(maxWidth: .infinity, minHeight: 44).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10)).accessibilityIdentifier("open-controls")
         }.buttonStyle(.plain).font(.system(size: 13, weight: .semibold)).disabled(!model.canRecord)
       }
-      SyncStatusView(model: model, terminal: p.terminal, compact: true)
+      SyncStatusView(model: model, terminal: p.terminal, compact: true, lifecycle: context?.lifecycle)
+      if context != nil { Button("账号与数据") { account = true }.accessibilityIdentifier("open-account") }
       if let warning = p.captureWarning { Text(warning).font(.caption2).accessibilityIdentifier("capture-warning") }
       if model.issue != nil { RecordingIssueView(model: model) }
       if model.readOnly { Text("另一台设备记录 · 仅可查看").font(.caption2) }

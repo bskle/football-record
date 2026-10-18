@@ -55,3 +55,23 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHON
 Debug UI 参数 `--ui-scenario sync-pending|sync-retry|sync-saved|sync-terminal` 使用两个实际隔离的本机 SQLite 和稳定 identity 文件；`--ui-dataset` 相同则重开同一组。持续显示开发模拟锁/开发配对；这是本机 fake transport 协议演练，不能证明真实 WatchConnectivity 通信。原 `other-device` 是同库只读观察情景，不能作为双库证据。
 
 UI 验证仍使用实际已存在 simulator UDID；可通过 `NATIVE_UI_TEST_FILTER=FootballRecord-iOS-UITests/NativeRecordingUITests/testPersistentSyncPendingRetryAndPeerSaved`（Watch 对应 target）执行定点复验。最低 iOS17/watchOS10 仅编译，当前 iOS27/watchOS27 模拟器不替代最低系统运行、真人 VoiceOver、触觉或真机验收。
+
+## M4 账号与生命周期界面（NATIVE-025）
+
+默认账号入口保持服务尚未接通。`AppBootstrap.accountContext` 的账号、生命周期、录制模型共用原 facade 与具体 Session；生产不接受开发配置替换 provider。Phone 设置提供账号、迁移、四组删除与默认关闭的统计；Watch 显示紧凑登记状态。删除结果独立展示后台与 Apple 撤销、CloudKit、本地数据和本 App 健康运动；本地一项必须包含 Store 和已登记 transport。重开后查询原 saga / 原 scope，不能重新拼出删除范围。
+
+Debug 的本机纵向测试必须由 Mac 监督已审 Node HTTP fixture；App 只读取私有配置并使用公开 auth、Watch submit/recover、原 Session 和受控文件云台账。配置与凭据不进入发布资源、日志、URL 或业务数据库。每次监督进程使用新独立 dataset；同进程内重开复用持久身份、原请求与固定 receipt pin。原 key 丢失但已有记录时拒绝重建。监督进程死亡时不换 pin 复用旧数据。
+
+```sh
+NATIVE_M4_UI=1 NATIVE_UI_TEST_FILTER=FootballRecord-iOS-UITests/NativeAccountLifecycleUITests \
+  NATIVE_UI_BUILD_ROOT=/tmp/football-record-m4-ui \
+  scripts/native/ui-test.sh iOS IPHONE_SIMULATOR_UDID
+NATIVE_M4_UI=1 NATIVE_M4_PHONE_DEVICE=IPHONE_SIMULATOR_UDID \
+  NATIVE_UI_TEST_FILTER=FootballRecord-Watch-UITests/NativeAccountLifecycleUITests \
+  NATIVE_UI_BUILD_ROOT=/tmp/football-record-m4-ui \
+  scripts/native/ui-test.sh Watch WATCH_SIMULATOR_UDID
+```
+
+Watch 演练由 Mac 私有邮箱转交到真正的 Phone AccountKit 登记服务，非真实 WC。开发账号、配对、模拟锁与开发云标识持续可见。文件云保存回读只证明已登记演练范围；Health 删除 unavailable、未登记其他安装 / ledger / staging 不算全设备完成。正常结束先保留 endedPendingSync，当前完整云 proof 与后台原正常释放均确认后才 completed；peer ACK 不替代任一 proof。异常释放显示不完整，后续新开赛仍经 Session 的 fresh authority 检查。
+
+配置字段及真实门槛见 [M4 capability handoff](Configuration/M4-capability-handoff.md)。最低 iOS17 / watchOS10 仍仅编译；实际 Apple / CloudKit / 签名、本人设备、后台、真人 VoiceOver 和触觉由026继续验收。

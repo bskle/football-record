@@ -49,6 +49,7 @@ import SQLite3
     XCTAssertNotNil(saved.lastPeerACKAt)
     XCTAssertEqual(saved.pendingACKCount + saved.unroutedCount + saved.receivedGapCount, 0)
     XCTAssertEqual(model.feedbackCount, feedback)
+    XCTAssertFalse(model.canStartNext, "A real peer ACK is not authority release")
     let remote = try await pair.remoteRepository.snapshotV2(matchID: id)
     XCTAssertEqual(remote.business.events, model.snapshot?.store.business.events)
     await model.shutdown()
