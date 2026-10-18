@@ -89,3 +89,11 @@ test('GET proof binds original request path and empty body and live status uses 
  assert.equal(verifySigned(f.receiptPublicKey,status,'football-record.authority.live-lock.v1'),true);assert.equal(verifySigned(f.receiptPublicKey,status),false);
  assert.equal(status.body.nonce,'fresh-nonce');assert.equal(status.body.expiresAt-status.body.observedAt,60);
 });
+
+test('challenge lost response reconstructs same secret and expiry; altered intent conflicts and consumed ID is terminal',async t=>{
+ const f=await startFixtureAuthority();t.after(()=>f.close());let a=await authSetup(f);const d=a.device(),r={version:1,requestID:'stable-challenge',deviceID:d.deviceID,devicePublicKey:d.devicePublicKey};
+ const first=a.auth.challenge(r);f.clock.advance(10);await f.restart();a=await authSetup(f);assert.deepEqual(a.auth.challenge(r),first);
+ assert.throws(()=>a.auth.challenge({...r,deviceID:'altered-device'}),e=>e.code==='idempotencyConflict');
+ const login=a.request(d);await a.auth.authenticate(login.r);
+ const terminal=a.auth.challenge({version:1,requestID:login.challenge.requestID,deviceID:d.deviceID,devicePublicKey:d.devicePublicKey});assert.equal(terminal.status,'consumed');assert.equal(terminal.challenge,undefined);
+});

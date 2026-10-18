@@ -1,3 +1,4 @@
+import {installLifecycle} from './lifecycle.mjs';
 import {randomUUID} from 'node:crypto';
 import {authorityConfig} from './config.mjs';
 import {openDatabase,transaction,fail} from './database.mjs';
@@ -21,7 +22,7 @@ export function createAuthority(options) {
   function persist(ctx,r,op,result){const bytes=Buffer.from(canonicalJSON(result));db.prepare('INSERT INTO requests VALUES(?,?,?,?,?)').run(ctx.accountID,r.requestID,op,sha256(canonicalJSON(r)),bytes);return JSON.parse(bytes);}
   function write(ctx,r,op,body,{active=true}={}){return transaction(db,config,()=>{const auth=validate(ctx,{active}); const old=stored(ctx,r,op);if(old)return old;return persist(ctx,r,op,body(auth));});}
   function acquire(ctx,r){return write(ctx,r,'acquire',({a})=>{
-    if(a.migration_id)fail('migrationBlocked');
+    if(a.migration_id||db.prepare('SELECT 1 FROM deletions WHERE account_id=?').get(ctx.accountID))fail('migrationBlocked');
     if(r.activationEpoch!==ctx.activationEpoch)fail('activationMismatch',403);
     const recorder=db.prepare('SELECT * FROM devices WHERE account_id=? AND device_id=? AND activation_epoch=?').get(ctx.accountID,r.recordingDeviceID,ctx.activationEpoch);
     if(!recorder||recorder.role==='waiting'||(ctx.deviceID!==r.recordingDeviceID&&ctx.deviceID!==a.active_phone_id))fail('activationMismatch',403);
@@ -56,5 +57,6 @@ export function createAuthority(options) {
   });}
   function requestBytes(ctx,id){return transaction(db,config,()=>{validate(ctx,{active:false});const row=db.prepare('SELECT result FROM requests WHERE account_id=? AND request_id=?').get(ctx.accountID,id);if(!row)fail('notFound',404);return Buffer.from(row.result);});}
   const api={acquire,terminate,liveStatus,requestBytes,close:()=>db.close()};
-  states.set(api,{db,config,validate,stored,persist,write});return api;
+  const state={db,config,validate,stored,persist,write,transientReauthCodes:new Map()};
+  states.set(api,state);installLifecycle(api,state);return api;
 }

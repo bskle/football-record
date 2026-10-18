@@ -13,7 +13,17 @@ export function createDeviceAuth({authority,appleVerifier}){
  function credential(s){return {token:tokenFor(s),sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};}
  function session(ctx){const s={session_id:randomUUID(),account_id:ctx.accountID,device_id:ctx.deviceID,key_id:ctx.keyID,activation_epoch:ctx.activationEpoch,expires_at:config.clock.now()+2592000};db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(s.session_id,s.account_id,s.device_id,s.key_id,s.activation_epoch,s.expires_at,sha256(tokenFor(s)));return s;}
  function consumeNonce(sessionID,nonce){if(db.prepare('SELECT 1 FROM nonces WHERE session_id=? AND nonce=?').get(sessionID,nonce))fail('unauthorized',401);db.prepare('INSERT INTO nonces VALUES(?,?)').run(sessionID,nonce);}
- function challenge(r){return transaction(db,config,()=>{try{edPublicKey(r.devicePublicKey);}catch{fail('invalidPayload',422);}const secret=randomBytes(32).toString('base64url'),id=randomUUID(),expiresAt=config.clock.now()+300;db.prepare('INSERT INTO challenges VALUES(?,?,?,?,?,0)').run(id,sha256(secret),r.deviceID,sha256(r.devicePublicKey),expiresAt);return {version:1,requestID:r.requestID,challengeID:id,challenge:secret,expiresAt};});}
+ function challenge(r){return transaction(db,config,()=>{
+   try{edPublicKey(r.devicePublicKey);}catch{fail('invalidPayload',422);}
+   const digest=sha256(canonicalJSON(r)),prior=db.prepare('SELECT * FROM challenge_requests WHERE request_id=?').get(r.requestID);
+   let c;if(prior){if(prior.request_digest!==digest)fail('idempotencyConflict');c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(prior.challenge_id);}
+   else{c={challenge_id:randomUUID(),device_id:r.deviceID,key_fingerprint:sha256(r.devicePublicKey),expires_at:config.clock.now()+300,consumed:0};}
+   const claims={challengeID:c.challenge_id,requestID:r.requestID,deviceID:c.device_id,keyFingerprint:c.key_fingerprint,expiresAt:c.expires_at};
+   const secret=createHmac('sha256',config.tokenDerivationKey).update('football-record.challenge.v1\n'+canonicalJSON(claims)).digest('base64url');
+   if(!prior){db.prepare('INSERT INTO challenges VALUES(?,?,?,?,?,0)').run(c.challenge_id,sha256(secret),r.deviceID,c.key_fingerprint,c.expires_at);db.prepare('INSERT INTO challenge_requests VALUES(?,?,?)').run(r.requestID,digest,c.challenge_id);}
+   const response={version:1,requestID:r.requestID,challengeID:c.challenge_id,expiresAt:c.expires_at};
+   if(c.consumed)return {...response,status:'consumed'};if(c.expires_at<config.clock.now())return {...response,status:'expired'};return {...response,challenge:secret};
+ });}
  function checkChallenge(r,publicKey,deviceID){const c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(r.challengeID);if(!c||c.consumed||c.expires_at<config.clock.now()||c.device_id!==deviceID||c.key_fingerprint!==sha256(publicKey))fail('unauthorized',401);const proof={...r,challengeSHA256:c.challenge_hash};delete proof.deviceProof;if(!signatureOK(publicKey,'football-record.device.challenge.v1',proof,r.deviceProof))fail('unauthorized',401);return c;}
  function output(record,s){return {...JSON.parse(Buffer.from(record)),credential:credential(s),context:{accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch}};}
  async function authenticate(r){
@@ -24,16 +34,18 @@ export function createDeviceAuth({authority,appleVerifier}){
     const accountID=createHmac('sha256',config.accountHMACKey).update(verified.issuer+'\n'+verified.subject).digest('hex');
     let a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(accountID);
     const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.deviceID);
-    if(prior&&(prior.account_id!==accountID||prior.public_key!==r.devicePublicKey))fail('unauthorized',401);
+    if(prior&&(prior.account_id!==accountID||prior.public_key!==r.devicePublicKey||prior.role==='watch'))fail('unauthorized',401);
     if(a&&a.cloud_space_id!==r.cloudSpaceID)fail('cloudIdentityMismatch',403);
     if(!a){const epoch=nextEpoch(db);db.prepare('INSERT INTO accounts(account_id,cloud_space_id,active_phone_id,activation_epoch) VALUES(?,?,?,?)').run(accountID,r.cloudSpaceID,r.deviceID,epoch);a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(accountID);}
     const role=a.active_phone_id===r.deviceID?'phone':'waiting',keyID=sha256(r.devicePublicKey);
     if(!prior)db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(r.deviceID,accountID,keyID,r.devicePublicKey,role,a.activation_epoch);
+    else db.prepare('UPDATE devices SET role=?,activation_epoch=? WHERE device_id=? AND account_id=? AND public_key=?').run(role,a.activation_epoch,r.deviceID,accountID,r.devicePublicKey);
     const ctx={accountID,deviceID:r.deviceID,keyID,activationEpoch:a.activation_epoch};
     const first=stored(ctx,r,'authApple');if(first)fail('unauthorized',401);
     db.prepare('UPDATE challenges SET consumed=1 WHERE challenge_id=?').run(r.challengeID);
     const s=session(ctx),result={receipt:makeReceipt(config,ctx,r,'authApple',role==='phone'?'registered':'waitingMigration'),sessionClaims:{sessionID:s.session_id,expiresAt:s.expires_at}};
-    if(prior){const id=randomUUID();db.prepare('INSERT INTO reauthentications VALUES(?,?,?,?,?,?,0)').run(id,accountID,r.deviceID,keyID,verified.issuedAt,verified.issuedAt+300);result.reauthenticationID=id;}
+    if(prior){const id=randomUUID();db.prepare('INSERT INTO reauthentications VALUES(?,?,?,?,?,?,0)').run(id,accountID,r.deviceID,keyID,verified.issuedAt,verified.issuedAt+300);result.reauthenticationID=id;state.transientReauthCodes.set(id,r.authorizationCode);
+      db.prepare("UPDATE deletions SET reauthentication_id=? WHERE account_id=? AND device_id=? AND state IN ('requested','lockReconciled')").run(id,accountID,r.deviceID);}
     const bytes=Buffer.from(canonicalJSON(result));persist(ctx,r,'authApple',result);db.prepare('INSERT INTO auth_records VALUES(?,?,?,?,?,?,?)').run(r.requestID,r.deviceID,accountID,sha256(canonicalJSON(r)),r.devicePublicKey,s.session_id,bytes);
     return output(bytes,s);
    });
@@ -64,8 +76,9 @@ export function createDeviceAuth({authority,appleVerifier}){
    const old=stored(ctx,r,'registerWatch');if(old){const s=db.prepare('SELECT * FROM sessions WHERE session_id=?').get(old.sessionClaims.sessionID);return {...old,credential:credential(s)};}
    checkChallenge(r,r.watchPublicKey,r.watchID);
    const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.watchID),keyID=sha256(r.watchPublicKey);
-   if(prior&&(prior.account_id!==ctx.accountID||prior.public_key!==r.watchPublicKey))fail('unauthorized',401);
+   if(prior&&(prior.account_id!==ctx.accountID||prior.public_key!==r.watchPublicKey||prior.role!=='watch'))fail('unauthorized',401);
    if(!prior)db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(r.watchID,ctx.accountID,keyID,r.watchPublicKey,'watch',ctx.activationEpoch);
+   else db.prepare("UPDATE devices SET role='watch',activation_epoch=? WHERE device_id=? AND account_id=? AND public_key=?").run(ctx.activationEpoch,r.watchID,ctx.accountID,r.watchPublicKey);
    db.prepare('UPDATE challenges SET consumed=1 WHERE challenge_id=?').run(r.challengeID);
    const s=session({...ctx,deviceID:r.watchID,keyID});const result={receipt:makeReceipt(config,ctx,r,'registerWatch','registered',{}, {registration:{watchID:r.watchID,watchPublicKey:r.watchPublicKey}}),sessionClaims:{sessionID:s.session_id,expiresAt:s.expires_at}};persist(ctx,r,'registerWatch',result);return {...result,credential:credential(s)};
  });}
