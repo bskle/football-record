@@ -182,6 +182,7 @@ public protocol CloudImportRepository:Sendable {
     func commitCloudBatchV4(_ batch:ValidatedCloudBatchV1) async throws->CloudImportReceiptV4
     func authorizeCloudHistoryV4(_ grant:VerifiedCloudHistoryGrantV1) async throws
     func cloudHistoryV4(scope:CloudScopeV1) async throws->[CloudHistorySnapshotV4]
+    func cloudDeletionsV4(scope:CloudScopeV1) async throws->[CloudDeletionV1]
     func saveCloudCheckpointV4(_ proof:VerifiedCloudSaveV1) async throws->CloudCheckpointReceiptV4
     func matchingCloudSaveV4(matchID:String) async throws->VerifiedCloudSaveV1?
     func completeNormallyV4(release:VerifiedAuthorityReceiptV1,cloud:VerifiedCloudSaveV1,expectedGeneration:Int64,now:Date) async throws

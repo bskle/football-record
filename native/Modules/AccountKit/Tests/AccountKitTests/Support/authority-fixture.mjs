@@ -12,6 +12,14 @@ for await (const line of createInterface({input:process.stdin})) {
  if(r.op==='fault'){f.f.faults.dropResponseAfterOperation=r.value;emit({ok:true});}
  else if(r.op==='restart'){await f.restart();emit({baseURL:f.baseURL});}
  else if(r.op==='clock'){f.f.clock.set(r.now);emit({now:f.f.clock.now()});}
+ else if(r.op==='watch'){
+   const d=f.a.device(r.deviceID??'relay-watch'),challenge=await f.raw('/v1/auth/challenges',JSON.stringify({version:1,requestID:crypto.randomUUID(),deviceID:d.deviceID,devicePublicKey:d.devicePublicKey}));
+   const request={version:1,requestID:crypto.randomUUID(),watchID:d.deviceID,watchPublicKey:d.devicePublicKey,challengeID:challenge.data.challengeID};
+   request.deviceProof=support.challengeSignature(request,challenge.data.challenge,d.privateKey);
+   const result=await f.call(login,'/v1/devices/watches',request);
+   if(result.status!==200)throw Error();
+   emit({credential:result.data.credential,privateKey:d.privateKey.export({format:'der',type:'pkcs8'}).subarray(-32).toString('base64url')});
+ }
  else if(r.op==='apple'){emit({identityToken:support.appleJWT({iss:'https://appleid.apple.com',sub:r.subject??'fixture-subject-never-stored',aud:'test.football',nonce:r.nonce,iat:f.f.clock.now(),exp:f.f.clock.now()+300})});}
  else if(r.op==='inspect'){emit({rows:f.f.inspect(r.sql)});}
  }catch{emit({error:'fixtureFailure'});}

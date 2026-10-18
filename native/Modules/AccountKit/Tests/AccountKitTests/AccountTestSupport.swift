@@ -3,15 +3,18 @@ import MatchCore
 import MatchStore
 import MatchSession
 import AccountKit
+import XCTest
 
 final class NodeAuthorityFixture: @unchecked Sendable {
     let process=Process(),input=Pipe(),output=Pipe()
+    let terminated=DispatchSemaphore(value:0)
     let metadata:Metadata
     struct Metadata:Decodable { let baseURL,publicKey,keyID,privateKey:String;let credential:DeviceCredential;let now:Int64 }
     init() throws {
         let source=URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         process.executableURL=URL(fileURLWithPath:"/usr/bin/env");process.arguments=["node",Bundle.module.url(forResource:"authority-fixture",withExtension:"mjs",subdirectory:"Support")!.path,source.path]
         process.standardInput=input;process.standardOutput=output;process.standardError=FileHandle.standardError
+        let done=terminated;process.terminationHandler={_ in done.signal()}
         try process.run();metadata=try JSONDecoder().decode(Metadata.self,from:Self.line(output.fileHandleForReading))
     }
     static func line(_ handle:FileHandle) throws -> Data {
@@ -23,13 +26,18 @@ final class NodeAuthorityFixture: @unchecked Sendable {
         try input.fileHandleForWriting.write(contentsOf:JSONSerialization.data(withJSONObject:object)+Data([10]))
         return try JSONSerialization.jsonObject(with:Self.line(output.fileHandleForReading)) as! [String:Any]
     }
-    func close() { if process.isRunning { _=try? command(["op":"close"]);process.waitUntilExit() } }
+    func close() {
+        if process.isRunning {
+            _=try? command(["op":"close"])
+            if terminated.wait(timeout:.now()+3) == .timedOut,process.isRunning {process.terminate();XCTFail("Node fixture did not terminate within three seconds")}
+        }
+    }
     deinit { if process.isRunning { process.terminate() } }
-    func client() throws -> AuthorityClient {
+    func client(credential:DeviceCredential?=nil,privateKey:String?=nil) throws -> AuthorityClient {
         let trust=try AuthorityTrustConfiguration(environment:.development,publicKeys:[metadata.keyID:metadata.publicKey])
-        let signer=try DevelopmentDeviceSigner(namespace:"account-tests",rawRepresentation:AuthorityWire.decodeBase64URL(metadata.privateKey,count:32))
+        let signer=try DevelopmentDeviceSigner(namespace:"account-tests",rawRepresentation:AuthorityWire.decodeBase64URL(privateKey ?? metadata.privateKey,count:32))
         let fixed=Date(timeIntervalSince1970:Double(metadata.now))
-        return AuthorityClient(relay:try URLSessionAuthorityRelay(baseURL:URL(string:metadata.baseURL)!,environment:.development),vault:MemoryDeviceCredentialVault(metadata.credential),signer:signer,trust:trust,now:{fixed})
+        return AuthorityClient(relay:try URLSessionAuthorityRelay(baseURL:URL(string:metadata.baseURL)!,environment:.development),vault:MemoryDeviceCredentialVault(credential ?? metadata.credential),signer:signer,trust:trust,now:{fixed})
     }
 }
 struct FixedClock:SessionClock { let date:Date;func now()->Date {date} }

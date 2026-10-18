@@ -40,9 +40,9 @@ public actor MatchSession {
     self.workout = workout
     self.environment = environment
   }
-  func validateEnvironment() async throws {
+  func validateEnvironment(allowSuspendedRead:Bool=false) async throws {
     let namespace = await store.databaseNamespace()
-    if let authority = store as? any AuthorityRepository, let binding = try await authority.accountBindingV4(), binding.suspended { throw AuthorityError.identityChanged }
+    if !allowSuspendedRead, let authority = store as? any AuthorityRepository, let binding = try await authority.accountBindingV4(), binding.suspended { throw AuthorityError.identityChanged }
     guard SQLiteSessionRepository.isCanonicalNamespace(namespace) else {
       throw SessionError.developmentIsolationRequired
     }

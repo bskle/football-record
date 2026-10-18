@@ -37,3 +37,14 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - 当前完整 Core 包单轮 235/0（Core44 / Store127 / Session47 / Sync17），原始日志 `023-3-core-checkpoint.log`。schema0～3、fault、partial4/future5 与原 canonical 回归均在本轮。
 - 未知云比赛仅写同 facade 的只读 `cloud_history_v4`；原 acquire 验签只授原 match/recorder 历史读取，保留原 epoch，无合成 permit，不进入 matchIDs/录制恢复候选。此为历史恢复，不是原 Workout 恢复；025 应通过 `cloudHistoryV4(scope:)` 展示。
 - AccountKit CloudLedger bridge / normal HTTP / abnormal 本地事务和完整纵向尚在后续执行，本 checkpoint 不表示 023.3 全部完成。
+
+## 023.3 同 facade 云 / 控制纵向
+
+- 已普通 no-ff 合入 root 已验证 dev `204ea7a8c2b0d6f514fc6d4653aec9b6379a2a15`（GIT005 / NATIVE029），本树 merge `0c2d02b631b23ca3107463feaffe389839292737`。
+- AccountKit 完整单轮 17/0（真实 Node HTTP 10 / CloudLedger + Session 桥 7）；Core 完整单轮 236/0（44 / 128 / 47 / 17）。日志 `023-3-account-final.log` / `023-3-core-final.log`。
+- normal 双 proof、服务 terminate COMMIT 丢响应、文件 DB 重开、同 ID 恢复、下一场及旧 terminate 重放不碰新锁；normal raw Watch PoP 经手机 opaque HTTP relay，手机自身 PoP 被拒，原 nonce 重放拒。真正 WC relay 仍属 026。
+- abnormal 在 HTTP 前把本地 incomplete、稳定 control intent、v2 command receipt 与 business outbox 放同一事务；六故障点 close/reopen 证明全有或全无，同 Session 原 token 收尾。
+- terminal 仅来自 signed live-status、无 terminate receipt 时可开始下一场，但不造 normal release/completed；新 Session 普通 quick 在未 recover 前也读持久 terminal 拒绝。
+- 云历史真实 HTTP 查询原 acquire，原 receipt 已 terminal 仍只读；缺原 receipt 整批停 token；显式 tombstone 不复活，`cloudDeletionsV4(scope:)` 给 025 同 facade 展示删除状态。已提交 receipt 在身份暂停后只读重放，新 batch 仍停写。
+- 保留测试错误记录：原测试 SQL 误用不存在的 locks 表造成 fixture unwrap trap；修为 active_locks + checked unwrap。完整回归曾挂测试 Process.waitUntilExit，经自身进程采样确认后改三秒有界 terminationHandler；这些轮次未计通过。新增 SQL fault fixture 曾遗漏业务 outbox，修为原 v2 完整 seed 后全绿。
+- 生产 Bootstrap、原 v2 canonical / 路由 / ACK 未变；真实 Apple / CloudKit / Keychain / Workout / 配对设备未验。

@@ -12,3 +12,5 @@
 - 真机：本任务仅文件 SQLite、真实 loopback HTTP 与最低 SDK 软件范围；真实 Apple / iCloud / Keychain / CloudKit / 配对设备留 024/026，不能标通过。
 - 两位非作者、source / final SHA、actual merge / 清理：待主代理。
 - 证据：`native-validation/NATIVE-023`，详见验证卡。
+
+- 023.1 / 023.2 / 023.3 软件切片已提交；236 Core + 17 AccountKit 的确切单轮及限制见验证卡。023.4 独立 peer 等待已审 NATIVE030 角色签名 wire，023.5 auth/lifecycle 继续执行；未请求审阅/合并通过。

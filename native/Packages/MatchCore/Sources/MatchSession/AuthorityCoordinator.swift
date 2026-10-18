@@ -54,7 +54,7 @@ extension MatchSession {
         let repository=try authorityRepository()
         guard let b=try await repository.accountBindingV4(),!b.suspended else {throw AuthorityError.identityChanged}
         let state=try await repository.authorityStateV4(matchID:snapshot.business.descriptor.matchID,now:clock.now())
-        if [.terminal,.releasedNormal,.releasedAbnormal].contains(state.status) {authorityTerminalMatches.insert(snapshot.business.descriptor.matchID);return}
+        if [.terminationPending,.terminal,.releasedNormal,.releasedAbnormal].contains(state.status) {authorityTerminalMatches.insert(snapshot.business.descriptor.matchID);return}
         if snapshot.business.descriptor.startPermit != nil {
             guard let acquire=state.acquire,acquire.body.accountID==b.accountID,acquire.body.activationEpoch==b.activationEpoch,
                   acquire.body.matchID==snapshot.business.descriptor.matchID,acquire.body.recordingDeviceID==snapshot.business.descriptor.recordingDeviceID else {throw AuthorityError.identityChanged}

@@ -50,16 +50,17 @@ extension MatchStore {
         return try checkedV4(ControlIntentV1.self,row:row,table:"control_intents_v4",key:id)
     }
     public func prepareControlV4(_ intent: ControlIntentV1) throws -> ControlIntentReceiptV4 {
-        let result=try db.transaction {
-            let b=try activeBindingV4()
-            if let prior=try controlV4(intent.requestID) { guard prior==intent else { throw AuthorityError.conflict };return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest) }
-            if let epoch=intent.fields.activationEpoch { guard epoch==b.activationEpoch else { throw AuthorityError.identityChanged } }
-            if intent.operation == .acquire { guard b.role != .waiting else { throw AuthorityError.identityChanged } }
-            let raw=try Canonical.data(intent)
-            try db.execute("INSERT INTO control_intents_v4 VALUES (?,?,?,?)",[.text(intent.requestID),.text(intent.matchID),.blob(raw),.text(Canonical.hash(raw))]);try fail(.beforeCommit)
-            return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest)
-        }
-        if fault == .afterCommit { throw StoreError.responseLost };return result
+        let result=try db.transaction {try prepareControlLockedV4(intent)}
+        if fault == .afterCommit {throw StoreError.responseLost};return result
+    }
+    func prepareControlLockedV4(_ intent:ControlIntentV1)throws->ControlIntentReceiptV4 {
+        let b=try activeBindingV4()
+        if let prior=try controlV4(intent.requestID) { guard prior==intent else { throw AuthorityError.conflict };return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest) }
+        if let epoch=intent.fields.activationEpoch { guard epoch==b.activationEpoch else { throw AuthorityError.identityChanged } }
+        if intent.operation == .acquire { guard b.role != .waiting else { throw AuthorityError.identityChanged } }
+        let raw=try Canonical.data(intent)
+        try db.execute("INSERT INTO control_intents_v4 VALUES (?,?,?,?)",[.text(intent.requestID),.text(intent.matchID),.blob(raw),.text(Canonical.hash(raw))]);try fail(.beforeCommit)
+        return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest)
     }
     public func pendingControlsV4() throws -> [ControlIntentV1] {
         try db.rows("SELECT i.payload,i.checksum FROM control_intents_v4 i LEFT JOIN authority_results_v4 r ON r.request_id=i.id WHERE r.id IS NULL ORDER BY i.rowid").map { try checkedV4(ControlIntentV1.self,row:$0,table:"control_intents_v4",key:"pending") }

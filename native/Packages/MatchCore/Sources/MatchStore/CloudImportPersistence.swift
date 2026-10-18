@@ -36,7 +36,11 @@ extension MatchStore {
     }
     public func cloudHistoryV4(scope:CloudScopeV1)throws->[CloudHistorySnapshotV4] {
         let b=try activeBindingV4();guard scope.accountID==b.accountID,scope.cloudSpaceID==b.cloudSpaceID else {throw CloudImportError.identityMismatch}
-        return try db.rows("SELECT payload,checksum FROM cloud_history_v4 WHERE scope=? ORDER BY match_id",[.text(scope.stableZoneKey)]).map {try checkedV4(CloudHistorySnapshotV4.self,row:$0,table:"cloud_history_v4",key:scope.stableZoneKey)}
+        return try db.rows("SELECT h.payload,h.checksum FROM cloud_history_v4 h WHERE h.scope=? AND NOT EXISTS(SELECT 1 FROM cloud_deletions_v4 d WHERE d.scope=h.scope AND d.match_id=h.match_id) ORDER BY h.match_id",[.text(scope.stableZoneKey)]).map {try checkedV4(CloudHistorySnapshotV4.self,row:$0,table:"cloud_history_v4",key:scope.stableZoneKey)}
+    }
+    public func cloudDeletionsV4(scope:CloudScopeV1)throws->[CloudDeletionV1] {
+        let b=try activeBindingV4();guard scope.accountID==b.accountID,scope.cloudSpaceID==b.cloudSpaceID else {throw CloudImportError.identityMismatch}
+        return try db.rows("SELECT payload,checksum FROM cloud_deletions_v4 WHERE scope=? ORDER BY match_id",[.text(scope.stableZoneKey)]).map {try checkedV4(CloudDeletionV1.self,row:$0,table:"cloud_deletions_v4",key:scope.stableZoneKey)}
     }
     public func commitCloudBatchV4(_ batch:ValidatedCloudBatchV1)throws->CloudImportReceiptV4 {
         let validated=try ValidatedCloudBatchV1(canonicalBytes:batch.raw),scope=batch.scope,key=try scope.key

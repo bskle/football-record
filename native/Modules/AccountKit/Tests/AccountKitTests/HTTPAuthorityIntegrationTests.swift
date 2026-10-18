@@ -14,13 +14,13 @@ final class HTTPAuthorityIntegrationTests:XCTestCase,@unchecked Sendable {
         let session:MatchSession
         let date:Date
     }
-    func harness(_ f:NodeAuthorityFixture,root:URL?=nil,gateway:any WorkoutGateway=UnavailableWorkoutGateway()) async throws -> Harness {
-        let client=try f.client(),meta=f.metadata,date=Date(timeIntervalSince1970:Double(meta.now))
+    func harness(_ f:NodeAuthorityFixture,root:URL?=nil,gateway:any WorkoutGateway=UnavailableWorkoutGateway(),credential:DeviceCredential?=nil,privateKey:String?=nil,role:AccountBindingV4.Role = .phone) async throws -> Harness {
+        let client=try f.client(credential:credential,privateKey:privateKey),meta=f.metadata,c=credential ?? meta.credential,date=Date(timeIntervalSince1970:Double(meta.now))
         let root=root ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        let repo=try SQLiteSessionRepository(rootDirectory:root,databaseNamespace:"http-session",authorityTrust:client.trust)
-        try await repo.bindAccountV4(AccountBindingV4(accountID:meta.credential.accountID,cloudSpaceID:"fixture-cloud",deviceID:meta.credential.deviceID,activationEpoch:meta.credential.activationEpoch,role:.phone,environment:.development))
+        let repo=try SQLiteSessionRepository(rootDirectory:root,databaseNamespace:"http-session",authorityTrust:client.trust,cloudSavePolicy:.development(databaseNamespace:"http-session"))
+        try await repo.bindAccountV4(AccountBindingV4(accountID:c.accountID,cloudSpaceID:"fixture-cloud",deviceID:c.deviceID,activationEpoch:c.activationEpoch,role:role,environment:.development))
         let provider=AuthorityStartPermitProvider(client:client,repository:repo,now:{date})
-        let session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:meta.credential.deviceID),clock:FixedClock(date:date),ids:UUIDSessionIDFactory(),permits:provider,workout:gateway,environment:.development(databaseNamespace:"http-session"))
+        let session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:c.deviceID),clock:FixedClock(date:date),ids:UUIDSessionIDFactory(),permits:provider,workout:gateway,environment:.development(databaseNamespace:"http-session"))
         try await provider.attach(session)
         return Harness(fixture:f,client:client,root:root,repo:repo,provider:provider,session:session,date:date)
     }
@@ -134,7 +134,7 @@ final class HTTPAuthorityIntegrationTests:XCTestCase,@unchecked Sendable {
     func testOriginalSessionStartsThroughRealNodeHTTPAndPersistsOriginalIDs() async throws {
         let f=try NodeAuthorityFixture();defer { f.close() }
         let client=try f.client(),meta=f.metadata,date=Date(timeIntervalSince1970:Double(meta.now))
-        let repo=try SQLiteSessionRepository(rootDirectory:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),databaseNamespace:"http-session",authorityTrust:client.trust)
+        let repo=try SQLiteSessionRepository(rootDirectory:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),databaseNamespace:"http-session",authorityTrust:client.trust,cloudSavePolicy:.development(databaseNamespace:"http-session"))
         try await repo.bindAccountV4(AccountBindingV4(accountID:meta.credential.accountID,cloudSpaceID:"fixture-cloud",deviceID:meta.credential.deviceID,activationEpoch:meta.credential.activationEpoch,role:.phone,environment:.development))
         let provider=AuthorityStartPermitProvider(client:client,repository:repo,now:{date})
         let session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:meta.credential.deviceID),clock:FixedClock(date:date),ids:UUIDSessionIDFactory(),permits:provider,workout:UnavailableWorkoutGateway(),environment:.development(databaseNamespace:"http-session"))
@@ -145,4 +145,22 @@ final class HTTPAuthorityIntegrationTests:XCTestCase,@unchecked Sendable {
         let state=try await repo.authorityStateV4(matchID:request.matchID,now:date)
         XCTAssertEqual(state.status,.held);XCTAssertEqual(state.latestLive?.body.status,.held)
     }
+    func testAbnormalCommitsLocalIncompleteAndStableControlBeforeNetworkThenReopensRetry() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()};let h=try await harness(f,gateway:TrackingGateway())
+        let start=try await h.session.prepareStart(starter:true);_=try await h.session.execute(start);try await waitForCapture(h.repo,matchID:start.matchID)
+        let service=AuthorityControlService(client:h.client,repository:h.repo,coordinator:h.session)
+        _=try f.command(["op":"fault","value":"terminate"])
+        do {_=try await service.abnormal(matchID:start.matchID,requestID:"abnormal-control");XCTFail()}catch{}
+        let local=try await h.repo.snapshotV2(matchID:start.matchID),pending=try await h.repo.pendingControlsV4()
+        XCTAssertEqual(try local.business.replay(now:h.date).state,.incomplete)
+        let intent=try XCTUnwrap(pending.first(where:{$0.requestID=="abnormal-control"}))
+        XCTAssertEqual(local.business.events.filter {$0.type == .matchTerminated}.count,1)
+        try await h.repo.close();_=try f.command(["op":"fault","value":NSNull()])
+        let after=TrackingGateway(),reopened=try await harness(f,root:h.root,gateway:after),retry=AuthorityControlService(client:reopened.client,repository:reopened.repo,coordinator:reopened.session)
+        let release=try await retry.reconcile(intent);XCTAssertEqual(release.body.result,.releasedAbnormal)
+        _=try await reopened.session.recover();try await Task.sleep(for:.milliseconds(40))
+        let actions=await after.operations;XCTAssertTrue(actions.allSatisfy({$0.action == .finish && $0.externalToken==start.captureOperationID}))
+        let result=try await reopened.repo.snapshotV2(matchID:start.matchID);XCTAssertEqual(try result.business.replay(now:h.date).state,.incomplete)
+    }
+
 }
