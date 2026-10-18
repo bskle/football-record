@@ -178,3 +178,72 @@ public struct CloudUploadEntry: Sendable, Equatable {
     public let issue: CloudIssue?
     public let nextAttemptAt: Date?
 }
+
+
+/// Opaque archive bytes. Token contents have no ordering or timestamp semantics here.
+public struct CloudCursor: Codable, Sendable, Equatable {
+    public let appliedToken: Data?
+    public let fetchGeneration: Int64
+    public init(appliedToken: Data?, fetchGeneration: Int64) throws {
+        guard fetchGeneration >= 0, appliedToken.map({ $0.count <= 1024*1024 }) != false else { throw CloudError(.invalidPayload) }
+        self.appliedToken = appliedToken; self.fetchGeneration = fetchGeneration
+    }
+    private enum CodingKeys: String, CodingKey { case appliedToken, fetchGeneration }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(appliedToken: c.decodeIfPresent(Data.self, forKey: .appliedToken), fetchGeneration: c.decode(Int64.self, forKey: .fetchGeneration))
+    }
+}
+public struct CloudFetchBatch: Codable, Sendable, Equatable {
+    public let scope: CloudScope
+    public let batchID: String
+    public let records: [CloudRecord]
+    public let expectedAppliedToken, nextToken: Data?
+    public let fetchGeneration: Int64
+    public let moreComing: Bool
+    public var digest: String { get throws { try CloudCodec.hash(self, domain: "batch") } }
+    public init(scope: CloudScope, batchID: String, records: [CloudRecord], expectedAppliedToken: Data?, nextToken: Data?, fetchGeneration: Int64, moreComing: Bool) throws {
+        try CloudCodec.id(batchID)
+        _ = try CloudCursor(appliedToken: expectedAppliedToken, fetchGeneration: fetchGeneration)
+        _ = try CloudCursor(appliedToken: nextToken, fetchGeneration: fetchGeneration)
+        guard records.count <= 64, Set(records.map(\.recordID)).count == records.count else { throw CloudError(.invalidPayload) }
+        // Epoch fences current writes; legitimate history is read from the same stable zone.
+        guard records.allSatisfy({ $0.scope.stableZoneKey == scope.stableZoneKey }) else { throw CloudError(.accountChanged) }
+        self.scope = scope; self.batchID = batchID; self.records = records; self.expectedAppliedToken = expectedAppliedToken
+        self.nextToken = nextToken; self.fetchGeneration = fetchGeneration; self.moreComing = moreComing
+        guard try CloudCodec.encode(self).count <= CloudCodec.maximumEnvelopeBytes else { throw CloudError(.payloadTooLarge) }
+    }
+    public func canonicalBytes() throws -> Data { try CloudCodec.encode(self) }
+    private enum CodingKeys: String, CodingKey { case scope, batchID, records, expectedAppliedToken, nextToken, fetchGeneration, moreComing }
+    public init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(scope: c.decode(CloudScope.self, forKey: .scope), batchID: c.decode(String.self, forKey: .batchID), records: c.decode([CloudRecord].self, forKey: .records), expectedAppliedToken: c.decodeIfPresent(Data.self, forKey: .expectedAppliedToken), nextToken: c.decodeIfPresent(Data.self, forKey: .nextToken), fetchGeneration: c.decode(Int64.self, forKey: .fetchGeneration), moreComing: c.decode(Bool.self, forKey: .moreComing))
+    }
+}
+public struct CloudImportAcknowledgement: Codable, Sendable, Equatable {
+    public let scope: CloudScope
+    public let batchID, batchDigest: String
+    public let appliedToken: Data?
+    public let fetchGeneration: Int64
+    public init(batch: CloudFetchBatch) throws {
+        scope = batch.scope; batchID = batch.batchID; batchDigest = try batch.digest
+        appliedToken = batch.nextToken; fetchGeneration = batch.fetchGeneration
+    }
+    public func matches(_ batch: CloudFetchBatch) throws -> Bool {
+        let digest = try batch.digest
+        return scope == batch.scope && batchID == batch.batchID && batchDigest == digest && appliedToken == batch.nextToken && fetchGeneration == batch.fetchGeneration
+    }
+}
+public struct CloudBatchEntry: Sendable, Equatable {
+    public let batch: CloudFetchBatch
+    public let originalBytes: Data
+    public let state: CloudDeliveryState
+    public let attemptCount: Int
+    public let issue: CloudIssue?
+    public let nextAttemptAt: Date?
+}
+public struct CloudSyncOutcome: Sendable, Equatable {
+    public let importedBatchIDs: [String]
+    public let issue: CloudIssue?
+    public init(importedBatchIDs: [String] = [], issue: CloudIssue? = nil) { self.importedBatchIDs = importedBatchIDs; self.issue = issue }
+}

@@ -65,7 +65,7 @@ public actor SQLiteCloudLedger: CloudLedger {
         let sql = try CloudSQL(url: url)
         do {
             let version = try sql.rows("PRAGMA user_version").first?.first?.number ?? -1
-            guard version == 0 || version == 1 else { throw CloudError(.unsupportedSchema) }
+            guard version == 0 || version == 1 || version == 2 else { throw CloudError(.unsupportedSchema) }
             guard try sql.rows("PRAGMA quick_check(1)").first?.first?.string == "ok" else { throw CloudError(.storageUnavailable) }
             if version == 0 {
                 guard try sql.rows("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").isEmpty else { throw CloudError(.unsupportedSchema) }
@@ -74,6 +74,13 @@ public actor SQLiteCloudLedger: CloudLedger {
                     try sql.execute("PRAGMA user_version=1")
                 }
             }
+            if version < 2 {
+                try sql.transaction {
+                    try sql.execute("CREATE TABLE cloud_batches(scope TEXT NOT NULL,id TEXT NOT NULL,digest TEXT NOT NULL,original BLOB NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL,issue TEXT,retry_ms INTEGER,attempted_ms INTEGER,ack BLOB,PRIMARY KEY(scope,id)) STRICT")
+                    try sql.execute("PRAGMA user_version=2")
+                }
+            }
+            _ = try sql.rows("SELECT scope,id,digest,original,state,attempts,issue,retry_ms,attempted_ms,ack FROM cloud_batches LIMIT 0")
             _ = try sql.rows("SELECT id,scope,digest,original,state,attempts,issue,retry_ms,attempted_ms FROM cloud_uploads LIMIT 0")
             guard try sql.rows("PRAGMA journal_mode=WAL").first?.first?.string?.lowercased() == "wal" else { throw CloudError(.storageUnavailable) }
             try sql.execute("PRAGMA synchronous=FULL")
@@ -112,4 +119,40 @@ public actor SQLiteCloudLedger: CloudLedger {
             try sql.execute("UPDATE cloud_uploads SET attempts=attempts+1,issue=?,retry_ms=?,attempted_ms=? WHERE id=?", [.text(issue.rawValue), try nextAttemptAt.map { .integer(try CloudCodec.milliseconds($0)) } ?? .null, .integer(try CloudCodec.milliseconds(at)), .text(id)])
         }
     }
+    public func stage(_ batch: CloudFetchBatch) throws {
+        let raw = try batch.canonicalBytes(), digest = try batch.digest, scopeKey = try batch.scope.key
+        try transaction {
+            if let row = try sql.rows("SELECT digest,original FROM cloud_batches WHERE scope=? AND id=?", [.text(scopeKey), .text(batch.batchID)]).first {
+                guard row[0].string == digest, row[1].data == raw else { throw CloudError(.identityConflict) }; return
+            }
+            try sql.execute("INSERT INTO cloud_batches(scope,id,digest,original,state,attempts) VALUES(?,?,?,?,?,0)", [.text(scopeKey),.text(batch.batchID),.text(digest),.blob(raw),.text(CloudDeliveryState.pending.rawValue)])
+        }
+    }
+    public func batches(scope: CloudScope) throws -> [CloudBatchEntry] {
+        try sql.rows("SELECT original,state,attempts,issue,retry_ms,digest FROM cloud_batches WHERE scope=? ORDER BY rowid", [.text(try scope.key)]).map { row in
+            guard let raw = row[0].data, let state = row[1].string.flatMap(CloudDeliveryState.init(rawValue:)), let count = row[2].number, count >= 0 else { throw CloudError(.invalidPayload) }
+            let batch = try CloudCodec.decode(CloudFetchBatch.self, raw)
+            guard batch.scope == scope, try batch.digest == row[5].string else { throw CloudError(.invalidPayload) }
+            return CloudBatchEntry(batch: batch, originalBytes: raw, state: state, attemptCount: Int(count), issue: row[3].string.flatMap(CloudIssue.init(rawValue:)), nextAttemptAt: row[4].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
+        }
+    }
+    public func acknowledge(_ acknowledgement: CloudImportAcknowledgement) throws {
+        try transaction {
+            guard let row = try sql.rows("SELECT original,ack FROM cloud_batches WHERE scope=? AND id=?", [.text(try acknowledgement.scope.key),.text(acknowledgement.batchID)]).first, let raw = row[0].data else { throw CloudError(.invalidPayload) }
+            let batch = try CloudCodec.decode(CloudFetchBatch.self, raw)
+            guard try acknowledgement.matches(batch) else { throw CloudError(.invalidPayload) }
+            let ackBytes = try CloudCodec.encode(acknowledgement)
+            if let existing = row[1].data { guard existing == ackBytes else { throw CloudError(.identityConflict) }; return }
+            try sql.execute("UPDATE cloud_batches SET state=?,issue=NULL,retry_ms=NULL,ack=? WHERE scope=? AND id=?", [.text(CloudDeliveryState.confirmed.rawValue),.blob(ackBytes),.text(try acknowledgement.scope.key),.text(acknowledgement.batchID)])
+        }
+    }
+    public func failBatch(scope: CloudScope, id: String, issue: CloudIssue, at: Date, nextAttemptAt: Date?) throws {
+        try CloudCodec.date(at); if let nextAttemptAt { try CloudCodec.date(nextAttemptAt) }
+        let state: CloudDeliveryState = [.cursorMismatch,.staleGeneration,.invalidPayload,.conflict].contains(issue) ? .blocked : .pending
+        try transaction {
+            guard try !sql.rows("SELECT id FROM cloud_batches WHERE scope=? AND id=? AND state!=?", [.text(try scope.key),.text(id),.text(CloudDeliveryState.confirmed.rawValue)]).isEmpty else { throw CloudError(.invalidPayload) }
+            try sql.execute("UPDATE cloud_batches SET state=?,attempts=attempts+1,issue=?,retry_ms=?,attempted_ms=? WHERE scope=? AND id=?", [.text(state.rawValue),.text(issue.rawValue),try nextAttemptAt.map { .integer(try CloudCodec.milliseconds($0)) } ?? .null,.integer(try CloudCodec.milliseconds(at)),.text(try scope.key),.text(id)])
+        }
+    }
+
 }
