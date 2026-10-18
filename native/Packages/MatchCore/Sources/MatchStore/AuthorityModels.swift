@@ -108,7 +108,7 @@ public struct AuthorityMigrationV1: Codable, Sendable, Equatable {
     public let oldActivationEpoch, requestedAt, eligibleAt: Int64
 }
 public struct AuthorityPeerGrantV1: Codable, Sendable, Equatable {
-    public let grantID, pairingID, localDeviceID, remoteDeviceID, localPublicKey, remotePublicKey: String
+    public let grantID, pairingID, localDeviceID, remoteDeviceID, localPublicKey, remotePublicKey, localRole, remoteRole, activePhoneID: String
     public let expiresAt: Int64
 }
 public struct AuthorityWatchRegistrationV1: Codable, Sendable, Equatable { public let watchID, watchPublicKey: String }

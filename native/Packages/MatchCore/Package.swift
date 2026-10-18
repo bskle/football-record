@@ -11,5 +11,5 @@ let package = Package(
               .testTarget(name: "MatchSyncTests", dependencies: ["MatchSync", "MatchSession", "MatchStore", "MatchCore"]),
               .target(name: "MatchSession", dependencies: ["MatchCore", "MatchStore"]),
               .testTarget(name: "MatchSessionTests", dependencies: ["MatchSession", "MatchStore", "MatchCore"]),
-              .testTarget(name: "MatchStoreTests", dependencies: ["MatchStore", "MatchCore"], resources: [.copy("Fixtures")])]
+              .testTarget(name: "MatchStoreTests", dependencies: ["MatchStore", "MatchCore", "MatchSession", "MatchSync"], resources: [.copy("Fixtures")])]
 )

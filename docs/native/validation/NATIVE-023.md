@@ -82,3 +82,11 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - 选测Auth9 + Migration4 + Lifecycle4单轮17/0；StoreLifecycle6/0，含两个文件连接与旧记录重开。证据 `023-5-auth-gates-red.log`、`023-5-auth-identity-fence-red.log`、`023-5-auth-identity-fence-green.log`、`023-5-auth-store-gates-green.log`。whole回归/peer仍后续。
 
 - S23-cloud-scope-1：合法Unicode zone两个proof正例及仅manifest改为规范等价但UTF8不同zone实际红1项/4断言→绿1/0。CloudScopeV1既有Equatable/Hashable现精确三个ID原UTF8与epoch，canonical/wire/hash domain/key/legacy不改；CloudSync相同边界由独立033负责，未越权。日志 `023-3-cloud-scope-red.log` / `green.log`。
+
+## 023.4 独立 production peer Core
+
+- 固定production keyset下backend grant必备signed localRole/remoteRole/activePhoneID，恰一phone一watch且phone为active；缺字段、dev域、错key/epoch/role/expiry停用。Verified grant/envelope无public init或Codable旁路，Store用自身keyset重验。
+- 独立device签名envelope只封装原v2 packet/ACK bytes；原M3入口仍只development。原facts/ancestry/capture/ACK校验共用，生产独立route/inbox/ACK表域，不改旧singleton/route/packet/ACK。原acquire真实签名sidecar只授原permit，不产生fresh start/释放/完成。
+- ProductionPeerTests聚焦6/0：四SQL fault close/reopen、同packet ID异bytes隔离、换pair暂停且不改旧target、同grant刷新保持原packet、原ACK只确认交付；同facade/Session/受控transport纵向phone无Workout，Watch peer terminal仅finish原token且authority仍held、无normal/completed。日志 `023-4-peer-runtime-red.log` / `023-4-peer-session-green.log`。
+- 原始测试构造API/捕获pending→dispatch→settled顺序错误均已修正。外层设备签名可重建，验证不变的是原v2 payload bytes；不把外层签名随机性当原payload变化。
+- 当前整包检查点Core252/0（Core44/Store144/Session47/Sync17）及AccountKit37/0包含后续控制队列WIP，见`023-4-core-checkpoint.log` / `023-4-account-checkpoint.log`，不代表whole023冻结。实际WC/Keychain/设备/生产bootstrap仍未启用。
