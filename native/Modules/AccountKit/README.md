@@ -81,3 +81,9 @@ Phone与Watch回包都固定请求入口generation；身份变化、错误key/ep
 同一 item 内版本化保存 key/installation、单调 generation 与可选 credential；只有 `replace(_:expectedIdentityGeneration:)`。所有同 item 实例共享同步 gate，读/核 generation/整 item update 没有 await；更高 generation 同次写清 credential，相同 generation 保留已安装新 credential，旧 generation 拒绝。控制 item 不在登出时 delete/re-add。私有 Keychain 编码不为 `DeviceCredential` 添加 Codable，不进入业务 SQLite/日志。
 
 025 配置须让同 item 所有进程共用稳定 controlDirectory；若使用共享 accessGroup，目录须在同一受控 App Group 供 exclusive owner lease 使用，不能让另进程选择另一目录绕过所有权。跨实例 gate 与文件 lease 共同串行化实际 Keychain read/update；不把 SecItemUpdate 称任意 CAS。item 使用非 synchronizable、AfterFirstUnlockThisDeviceOnly；实际锁屏/重启/Keychain 可用性待026。
+
+owner lease 的 controlDirectory、锁文件必须归025/026的保留控制 catalog，位于业务/asset staging 删除集合之外。活跃 owner 期间不得 unlink 或替换锁文件，也不能递归删除其父目录；否则文件名相同的新 inode 会破坏 flock 的排他含义。
+
+`AppleSignInAdapter(executionEnabled:)` 默认只返回 disabled。iOS/macOS 显式SDK构造还须提供当前scene的MainActor presentationAnchor；watchOS不暴露该不可用类型。nonce是已由服务算好的lowerhex SHA256，原值传入、不二次hash。请求state/operation与identityGeneration绑定；取消/身份推进使旧值回调失效并retire SDK操作，watchOS只逻辑取消，不能调用不可用cancel API。授权token/code只transient，不收集姓名/email，不由adapter自动admit。调用方负责取消其持有任务。
+
+`CloudIdentityProvider(containerIdentifier:environment:executionEnabled:)` 默认disabled；显式开启后只由指定CKContainer的available当前user record计算opaque cloudSpaceID，不保存原user。snapshot的 `zoneID(accountID:)` 对账号和cloudSpace稳定，epoch不参与。身份通知只触发调用方停止旧actor和显式重新核验，不能把通知当认证。025不得从默认container/普通URL/Debugfactory推导生产身份；真实两账号/容器留026。
