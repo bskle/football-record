@@ -27,7 +27,7 @@ final class CloudIssueDecodingTests: XCTestCase, @unchecked Sendable {
   try await initial.close()
   let raw = try CloudSQL(url:url)
   try raw.execute("UPDATE " + table + " SET issue=?",[.text("future-unknown-issue")])
-  XCTAssertEqual(try raw.rows("PRAGMA user_version").first?.first?.number,3)
+  XCTAssertEqual(try raw.rows("PRAGMA user_version").first?.first?.number,4)
   XCTAssertEqual(try raw.rows("PRAGMA quick_check(1)").first?.first?.string,"ok")
   let originalUploads = try raw.rows("SELECT original FROM cloud_uploads").compactMap { $0.first?.data }
   let originalBatches = try raw.rows("SELECT original FROM cloud_batches").compactMap { $0.first?.data }

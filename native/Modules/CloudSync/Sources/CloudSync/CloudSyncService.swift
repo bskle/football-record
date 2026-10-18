@@ -39,6 +39,7 @@ public actor CloudSyncService {
         do {
             // The business transaction is the sole authority for both token and generation.
             let cursor = try await sink.appliedCursor(scope: scope)
+            try await ensureActive()
             let batch: CloudFetchBatch
             do { batch = try await driver.fetch(scope: scope, cursor: cursor) }
             catch {
@@ -54,6 +55,7 @@ public actor CloudSyncService {
             try await ledger.stage(batch)
             return try await importStaged(batch)
         } catch {
+            if try await ledger.scopeState(scope: scope).issue == .accountChanged { return CloudSyncOutcome(issue: .accountChanged) }
             let code = issue(error)
             try await persistScopeIssue(code)
             return CloudSyncOutcome(issue: code)
@@ -69,6 +71,7 @@ public actor CloudSyncService {
             try await ledger.clearScopeIssue(scope: scope)
             return CloudSyncOutcome(importedBatchIDs: [batch.batchID])
         } catch {
+            if try await ledger.scopeState(scope: scope).issue == .accountChanged { return CloudSyncOutcome(issue: .accountChanged) }
             let code = issue(error)
             let entries = try await ledger.batches(scope: scope)
             // A transport COMMIT may have succeeded even if its response was lost.
@@ -87,6 +90,7 @@ public actor CloudSyncService {
     }
     private func persistScopeIssue(_ code: CloudIssue) async throws {
         let state = try await ledger.scopeState(scope: scope)
+        if state.issue == .accountChanged { return }
         let effective: CloudIssue = state.issue == .accountChanged ? .accountChanged : code
         let next = try retryPolicy.nextAttempt(issue: effective, attempt: state.attemptCount + 1, now: clock())
         try await ledger.recordScopeIssue(scope: scope, issue: effective, at: clock(), nextAttemptAt: next)
@@ -110,6 +114,7 @@ public actor CloudSyncService {
                 return CloudSyncOutcome()
             }
         } catch {
+            if try await ledger.scopeState(scope: scope).issue == .accountChanged { return CloudSyncOutcome(issue: .accountChanged) }
             let code = issue(error), rows = try await ledger.uploads(scope: scope)
             if rows.first(where: { $0.upload.id == upload.id })?.state != .confirmed {
                 let next = try retryPolicy.nextAttempt(issue: code, attempt: entry.attemptCount + 1, now: clock())

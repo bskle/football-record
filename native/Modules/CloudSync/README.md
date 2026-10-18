@@ -10,7 +10,7 @@
 
 每份业务 payload 上限 8 MiB。Data/base64 的外层 envelope 单独限为 64 MiB；一个下载批次最多 64 records 且仍受 envelope 总量限制，超限显式失败，不截断。合法近 8 MiB typed payload 已测试 enqueue、close/reopen 原 bytes 相等。时间写入使用 checked Int64 毫秒转换，超范围有限 Date 也会被拒绝。
 
-`SQLiteCloudLedger` 用独立文件、参数化 SQL、BEGIN IMMEDIATE、WAL / synchronous FULL。cloud ledger schema 3 与 MatchStore 的版本无关。升级前先验证已有结构；所有升级 DDL、最终结构检查和版本在同一事务中提交。不兼容/损坏文件保留。上传、staged batch、失败次数/重试时间、双方冲突原 facts、changeTag 与首次 development save evidence 均持久化。相同 ID 异 bytes 拒绝；peer 路由/ACK 不影响独立云队列。
+`SQLiteCloudLedger` 用独立文件、参数化 SQL、BEGIN IMMEDIATE、WAL / synchronous FULL。cloud ledger schema 4 与 MatchStore 的版本无关。升级前先验证已有结构与 canonical 归属；所有升级 DDL、最终结构检查和版本在同一事务中提交。不兼容/损坏文件保留。上传、staged batch、失败次数/重试时间、双方冲突原 facts、changeTag 与首次 development save evidence 均持久化。相同 ID 异 bytes 拒绝；peer 路由/ACK 不影响独立云队列。
 
 ## Driver 与业务 sink
 
@@ -51,6 +51,18 @@ CloudRecord 的 typed / raw canonical / Codable 导入边界都检查控制锚�
 迁移提交绑定的是该控制 **CloudRecord.recordID + CloudRecord.digest（canonical bytes 摘要）**。`CloudCheckpoint.checkpointID` 是稳定控制 UUID；`CloudUpload.checkpointID` 仍是既有 asset manifest ID，与迁移提交 ID 不同。普通非空 match checkpoint 的 canonical bytes、recordID 与 digest 编码规则不变。031 的六项回归与原47项在同一轮完成53/53；两项 fresh 最低 simulator target 编译通过，详见 [031验证卡](../../../docs/native/validation/NATIVE-031.md)。
 
 ## 验证与交接
+
+### 单 ledger 本地传输清理（NATIVE-033）
+
+`CloudLocalTransportErasing` 是独立可选协议，原 `CloudLedger` required 方法不变。默认 `UnavailableCloudLocalTransportEraser` 返回 storageUnavailable；025/026 必须显式注入拥有具体文件的 SQLiteCloudLedger。调用 `eraseLocalTransport(CloudLocalTransportEraseRequest(requestID:scope:))` 使用稳定 requestID，按 scope 的 accountID/cloudSpaceID/zoneID 精确选择该文件中所有 epoch，清理 upload、staged batch（含ACK）、conflict双方原内容与save evidence的canonical副本。026在业务擦除前保存稳定requestID和完整原scope供重试，不能换成重开时的新epoch重建同ID请求。
+
+一次 BEGIN IMMEDIATE 内先重放相同 requestID / 完整请求摘要的首次 receipt，否则严格解码并核对原 bytes、scope key、digest、batch ACK，再写永久 stable-zone fence、删除目标、读回核实目标 canonical 零、保存最小 receipt。同 ID 异请求拒绝；无法判断归属、未知状态、坏原bytes或NUL/非法UTF8文本时整次失败，保留文件和原数据。其他账号、空间或 zone 的原 bytes 不变。两个控制表只保存稳定scope hash及requestID/摘要，不保存业务原bytes、saga capability或Health选择。
+
+fence在所有canonical写事务中检查；旧连接及迟到 save/fetch/conflict 回调不能复活数据。scopeState将该稳定zone永久呈现为 accountChanged 阻断，clearScopeIssue和新epoch都不能解除；服务开始/await返回后停止新进度。COMMIT前失败全回滚；COMMIT后丢响应以同一请求重开重放首次receipt。没有in-file unfence API。
+
+033 receipt只证明**该ledger文件四表的逻辑清理**，不是整个本地数据完成、物理介质/备份擦除或CloudKit删除证明。026仍须遍历完整owned ledger catalog，处理024 CKAsset staging文件和023业务Store，并保留独立saga/capability/028 selection恢复控制。恢复保留云时先使旧actors失效，再由026明确选择新ledger namespace/文件和已授权业务cursor初始化；旧文件永久fence继续拦旧实例。生产装配仍默认unavailable，内部表名不作为产品UI文案。
+
+033的完整host与最低SDK实际结果见 [033验证卡](../../../docs/native/validation/NATIVE-033.md)。
 
 ```sh
 swift test --package-path native/Modules/CloudSync --scratch-path /private/tmp/football-m4-022-host
