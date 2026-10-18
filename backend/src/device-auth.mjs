@@ -1,3 +1,4 @@
+import {isAppleVerifier,isVerifiedApple} from './apple-verifier.mjs';
 import {validatePayload} from './codec.mjs';
 import {createHmac,randomBytes,randomUUID,sign,verify,timingSafeEqual} from 'node:crypto';
 import {authorityState} from './authority.mjs';
@@ -9,7 +10,7 @@ export function signRecover(privateKey,request){const r={...request};delete r.de
 function signatureOK(key,domain,body,signature){try{return verify(null,input(domain,body),edPublicKey(key),decodeBase64URL(signature,64));}catch{return false;}}
 export function createDeviceAuth({authority,appleVerifier}){
  const state=authorityState(authority);if(!state)throw Error('authority required');const {db,config,validate,stored,persist}=state;
- if(appleVerifier.environment!==config.environment)throw Error('authority and verifier environment mismatch');
+ if(appleVerifier?.environment!==config.environment||(config.environment==='production'&&!isAppleVerifier(appleVerifier,'production')))throw Error('authority and verifier environment mismatch');
  function tokenFor(s){const claims={sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};return createHmac('sha256',config.tokenDerivationKey).update('football-record.session.v1\n'+canonicalJSON(claims)).digest('base64url');}
  function credential(s){return {token:tokenFor(s),sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};}
  function session(ctx){const s={session_id:randomUUID(),account_id:ctx.accountID,device_id:ctx.deviceID,key_id:ctx.keyID,activation_epoch:ctx.activationEpoch,expires_at:config.clock.now()+2592000};db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(s.session_id,s.account_id,s.device_id,s.key_id,s.activation_epoch,s.expires_at,sha256(tokenFor(s)));return s;}
@@ -31,6 +32,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    validatePayload('authApple',r);
    const c=checkChallenge(r,r.devicePublicKey,r.deviceID);
    const verified=await appleVerifier.verify(r.identityToken,c.challenge_hash);
+   if(config.environment==='production'&&(!isVerifiedApple(verified,'production')||verified.environment!=='production'))fail('unauthorized',401);
    state.pruneReauthMaterial();let createdReauthenticationID;
    try{return transaction(db,config,()=>{
     checkChallenge(r,r.devicePublicKey,r.deviceID);
