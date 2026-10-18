@@ -28,6 +28,7 @@ extension MatchSession {
         // The ordinary empty scan stays outside the queue. Only a terminal hint enters
         // the locked preflight, which rechecks current facts before any SDK dispatch.
         let hint = try await store.snapshotV2(matchID: match)
+        try await updateAuthorityFence(hint)
         if terminal(hint) {
           while let token = try await planTerminalCleanup(match, excluding: attemptedFinishes) { attemptedFinishes.insert(token) }
         }
@@ -43,6 +44,7 @@ extension MatchSession {
           if pending.operation.action == .finish {
             attemptedFinishes.insert(pending.operation.externalToken)
           }
+          if terminal(snapshot),pending.state == .needsReconciliation,pending.operation.action != .start,pending.operation.action != .finish { continue }
           if let dispatch = try await planDispatch(pending.operation, match: match) {
             // Gateway work is outside both SQL and the business queue. End can commit here.
             let observation =
@@ -85,6 +87,7 @@ extension MatchSession {
     await acquire(match)
     defer { release(match) }
     var s = try await store.snapshotV2(matchID: match)
+    try await updateAuthorityFence(s)
     let device = try await identity()
     try requireWritable(s, device: device)
     guard let current = s.captureOperations.first(where: { $0.operation.id == operation.id }),
@@ -157,6 +160,7 @@ extension MatchSession {
         // A replacement/first Workout stays unstarted until a real resume fact commits.
         return nil
       }
+      if operation.action == .start, !s.captureOperations.contains(where: { $0.observation?.hasPositiveCaptureEvidence == true }) { try await requireAuthorityStart(s.business.descriptor.startIntent) }
       let marker = try CaptureOperationUpdate(
         operationID: operation.id, expectedState: .pending, state: .needsReconciliation,
         observation: nil)
@@ -244,6 +248,7 @@ extension MatchSession {
     await acquire(match)
     defer { release(match) }
     let s = try await store.snapshotV2(matchID: match)
+    try await updateAuthorityFence(s)
     guard let current = s.captureOperations.first(where: { $0.operation.id == operation.id }),
       current.operation == operation
     else { throw StoreError.operationConflict }
@@ -348,6 +353,7 @@ extension MatchSession {
   /// Caller owns the same-match queue. No SDK or network await occurs in this planner.
   func planTerminalCleanupLocked(_ match: String, excluding attempted: Set<String>) async throws -> String? {
     var s = try await store.snapshotV2(matchID: match)
+    try await updateAuthorityFence(s)
     guard terminal(s), s.business.descriptor.recordingDeviceID == (try await identity()) else { return nil }
     try requireWritable(s, device: s.business.descriptor.recordingDeviceID)
     let pendingControls = s.captureOperations.filter { $0.state == .pending && $0.operation.action != .finish }
@@ -384,6 +390,7 @@ extension MatchSession {
     await acquire(match)
     defer { release(match) }
     let s = try await store.snapshotV2(matchID: match)
+    try await updateAuthorityFence(s)
     guard !terminal(s), let start = currentStart(s),
       !recoveredTokens.contains(start.operation.externalToken),
       !s.captureOperations.contains(where: {

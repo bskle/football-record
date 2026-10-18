@@ -1,0 +1,69 @@
+import CryptoKit
+import Foundation
+import MatchStore
+import MatchSession
+
+/// Credentials remain in the injected vault; no business SQLite DTO serializes this type.
+public struct DeviceCredential: Decodable, Sendable, Equatable {
+    public let token,sessionID,accountID,deviceID,keyID:String
+    public let activationEpoch,expiresAt:Int64
+    public init(token:String,sessionID:String,accountID:String,deviceID:String,keyID:String,activationEpoch:Int64,expiresAt:Int64) {
+        self.token=token;self.sessionID=sessionID;self.accountID=accountID;self.deviceID=deviceID;self.keyID=keyID;self.activationEpoch=activationEpoch;self.expiresAt=expiresAt
+    }
+}
+public protocol DeviceCredentialVault: Sendable {
+    func credential() async throws -> DeviceCredential
+    /// Atomic across the actual credential write; a late SDK callback cannot lower this fence.
+    func advanceIdentityFence(to generation:Int64) async throws
+    func replace(_ credential:DeviceCredential?,expectedIdentityGeneration:Int64) async throws
+}
+public actor MemoryDeviceCredentialVault: DeviceCredentialVault {
+    private var generation:Int64=0
+    private var current:DeviceCredential?
+    public init(_ credential:DeviceCredential?=nil) { current=credential }
+    public func credential() throws -> DeviceCredential { guard let current else { throw AuthorityError.unavailable };return current }
+    public func advanceIdentityFence(to value:Int64)throws {guard value>=generation else {throw AuthorityError.identityChanged};if value>generation {generation=value;current=nil}}
+    public func replace(_ credential:DeviceCredential?,expectedIdentityGeneration:Int64)throws {guard generation==expectedIdentityGeneration else {throw AuthorityError.identityChanged};current=credential}
+}
+public protocol DeviceProofSigner: Sendable {
+    var publicKey:String { get }
+    func sign(_ bytes:Data) async throws -> Data
+}
+/// Controlled development only; production Keychain implementation belongs to 024.
+public struct DevelopmentDeviceSigner: DeviceProofSigner {
+    private let privateKey:Curve25519.Signing.PrivateKey
+    public var publicKey:String { AuthorityWire.base64URL(privateKey.publicKey.rawRepresentation) }
+    public init(namespace:String,rawRepresentation:Data?=nil) throws {
+        guard !namespace.isEmpty,namespace != "production",namespace.utf8.allSatisfy({(97...122).contains($0)||(48...57).contains($0)||$0==45||$0==95}) else { throw AuthorityError.identityChanged }
+        privateKey = try rawRepresentation.map { try Curve25519.Signing.PrivateKey(rawRepresentation:$0) } ?? Curve25519.Signing.PrivateKey()
+    }
+    public func sign(_ bytes:Data) async throws -> Data { try privateKey.signature(for:bytes) }
+}
+public struct AuthorityHTTPRequest: Sendable {
+    public let method,path:String
+    public let body:Data
+    public let authorization,deviceProof:String?
+    public static func opaqueRelay(method:String,path:String,body:Data,authorization:String,deviceProof:String)throws->Self {
+        guard ["GET","POST"].contains(method),path.hasPrefix("/v1/"),path.utf8.count<=512,path.utf8.allSatisfy({(48...57).contains($0)||(65...90).contains($0)||(97...122).contains($0)||[45,46,47,58,95].contains($0)}),body.count<=16384,method != "GET" || body.isEmpty,authorization.hasPrefix("Bearer "),authorization.utf8.count<=2048,deviceProof.utf8.count<=8192 else {throw AuthorityError.invalidWire}
+        _=try AuthorityWire.decodeBase64URL(String(authorization.dropFirst(7)));_=try AuthorityWire.decodeBase64URL(deviceProof)
+        return Self(method:method,path:path,body:body,authorization:authorization,deviceProof:deviceProof)
+    }
+    init(method:String,path:String,body:Data,authorization:String?=nil,deviceProof:String?=nil) { self.method=method;self.path=path;self.body=body;self.authorization=authorization;self.deviceProof=deviceProof }
+}
+public struct AuthorityHTTPResponse: Sendable {
+    public let status:Int
+    public let body:Data
+    public init(status:Int,body:Data) { self.status=status;self.body=body }
+}
+/// Phone proxies forward the original request unchanged, including recorder credential and PoP.
+/// No Codable conformance: tokens and signatures are transient, never a durable control intent.
+public protocol AuthorityHTTPRelay: Sendable { func send(_ request:AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse }
+public struct AuthorityHTTPFailure: Error, Decodable, Sendable {
+    public let code,requestID:String
+    public let retryable:Bool
+    public let retryAfterSeconds:Int?
+}
+
+extension AuthorityHTTPFailure:AuthorityTransientFailure {
+    public var permitsOfflineContinuation:Bool {retryable || code == "unavailable"}
+}

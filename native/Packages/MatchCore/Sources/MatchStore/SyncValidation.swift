@@ -17,6 +17,12 @@ extension MatchStore {
               pair.contains(d.recordingDeviceID), d.backendLockState == .unknown || d.backendLockState == .held,
               d.startPermit == DevelopmentStartFixture.permit(for: d.startIntent),
               b.events.allSatisfy({ pair.contains($0.sourceDeviceID) && $0.matchID == d.matchID }) else { throw StoreError.invalidPacket }
+        try validatePeerSnapshotFactsV4(packet,pair:pair)
+    }
+
+    func validatePeerSnapshotFactsV4(_ packet:MatchPacketV2,pair:Set<String>)throws {
+        try packet.validate();let b=packet.body,d=b.descriptor
+        guard b.events.allSatisfy({pair.contains($0.sourceDeviceID) && $0.matchID==d.matchID}) else {throw StoreError.invalidPacket}
         for event in b.events {
             try SyncWire.id(event.eventID); try SyncWire.id(event.sourceDeviceID)
             if let parent = event.correctionOfEventID { try SyncWire.id(parent) }
