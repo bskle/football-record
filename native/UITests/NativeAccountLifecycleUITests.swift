@@ -110,7 +110,7 @@ import XCTest
   func testSmallDarkLargeAccountActionsAreReachable() {
     continueAfterFailure = false
     let app = XCUIApplication(); app.launchArguments = ["--m4-development"]; app.launch()
-    XCTAssertTrue(app.buttons["account-sign-in"].waitForExistence(timeout: 15))
+    XCTAssertTrue(app.staticTexts["account-status"].waitForExistence(timeout: 15))
     func tap(_ id: String) {
       let button = app.buttons[id].firstMatch
       for _ in 0..<30 {
