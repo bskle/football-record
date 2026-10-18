@@ -77,7 +77,7 @@ public struct CloudMatchFacts: Codable, Sendable, Equatable {
         for event in events {
             for id in [event.eventID, event.sourceDeviceID] { try CloudCodec.id(id) }
             for date in [event.occurredAt, event.createdAt, event.updatedAt] { try CloudCodec.date(date) }
-            guard event.matchID == startIntent.matchID, event.sequence > 0,
+            guard event.matchID == startIntent.matchID, event.sequence >= 0,
                   event.matchElapsed.map({ $0.isFinite && $0 >= 0 }) != false,
                   event.correctionOfEventID.map(ids.contains) != false else { throw CloudError(.invalidPayload) }
         }
