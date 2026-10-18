@@ -13,6 +13,8 @@ export function createDeviceAuth({authority,appleVerifier}){
  if(appleVerifier?.environment!==config.environment||(config.environment==='production'&&!isAppleVerifier(appleVerifier,'production')))throw Error('authority and verifier environment mismatch');
  function recoveryHash(domain,values){return createHmac('sha256',config.tokenDerivationKey).update(domain+'\n'+canonicalJSON(values)).digest('hex');}
  const absenceKey=(authRequestID,deviceID,keyID)=>recoveryHash('football-record.auth-absence.v1',[authRequestID,deviceID,keyID]);
+ const watchFenceKey=(ctx,r)=>recoveryHash('football-record.watch-registration-closed.v1',[ctx.accountID,r.requestID,sha256(canonicalJSON(r)),r.watchID,sha256(r.watchPublicKey)]);
+ function checkWatchFence(ctx,r){if(db.prepare('SELECT 1 FROM auth_absence_fences WHERE fence_id=?').get(watchFenceKey(ctx,r)))fail('unauthorized',401);}
  function tokenFor(s){const claims={sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};return createHmac('sha256',config.tokenDerivationKey).update('football-record.session.v1\n'+canonicalJSON(claims)).digest('base64url');}
  function credential(s){return {token:tokenFor(s),sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};}
  function session(ctx){const s={session_id:randomUUID(),account_id:ctx.accountID,device_id:ctx.deviceID,key_id:ctx.keyID,activation_epoch:ctx.activationEpoch,expires_at:config.clock.now()+2592000};db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(s.session_id,s.account_id,s.device_id,s.key_id,s.activation_epoch,s.expires_at,sha256(tokenFor(s)));return s;}
@@ -28,7 +30,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    const response={version:1,requestID:r.requestID,challengeID:c.challenge_id,expiresAt:c.expires_at};
    if(c.consumed)return {...response,status:'consumed'};if(c.expires_at<config.clock.now())return {...response,status:'expired'};return {...response,challenge:secret};
  });}
- function checkChallenge(r,publicKey,deviceID){const c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(r.challengeID);if(!c||c.consumed||c.expires_at<config.clock.now()||c.device_id!==deviceID||c.key_fingerprint!==sha256(publicKey))fail('unauthorized',401);const proof={...r,challengeSHA256:c.challenge_hash};delete proof.deviceProof;if(!signatureOK(publicKey,'football-record.device.challenge.v1',proof,r.deviceProof))fail('unauthorized',401);return c;}
+ function checkChallenge(r,publicKey,deviceID,closing=false){const c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(r.challengeID);if(!c||(!closing&&(c.consumed||c.expires_at<config.clock.now()))||c.device_id!==deviceID||c.key_fingerprint!==sha256(publicKey))fail('unauthorized',401);const proof={...r,challengeSHA256:c.challenge_hash};delete proof.deviceProof;if(!signatureOK(publicKey,'football-record.device.challenge.v1',proof,r.deviceProof))fail('unauthorized',401);return c;}
  function output(record,s){return {...JSON.parse(Buffer.from(record)),credential:credential(s),context:{accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch}};}
  async function authenticate(r){
    validatePayload('authApple',r);
@@ -87,9 +89,25 @@ export function createDeviceAuth({authority,appleVerifier}){
    const ctx={accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,sessionID:s.session_id};
    return transaction(db,config,()=>{const current=db.prepare('SELECT revoked FROM sessions WHERE session_id=?').get(s.session_id);if(!current||current.revoked)fail('unauthorized',401);validate(ctx,{active:false});consumeNonce(s.session_id,proof.nonce);return ctx;});
  }
+ function watchResult(old){
+   if(old.status==='knownAbandoned')return old;
+   const s=db.prepare('SELECT * FROM sessions WHERE session_id=?').get(old.sessionClaims.sessionID);if(!s)fail('unauthorized',401);
+   return {...old,credential:credential(s)};
+ }
+ function recoverWatch(ctx,r){validatePayload('recoverWatch',r);return transaction(db,config,()=>{
+   const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
+   const old=stored(ctx,r,'registerWatch');if(old)return watchResult(old);
+   checkWatchFence(ctx,r);
+   const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.watchID);
+   if(prior&&(prior.account_id!==ctx.accountID||prior.public_key!==r.watchPublicKey||prior.role!=='watch'))fail('unauthorized',401);
+   checkChallenge(r,r.watchPublicKey,r.watchID,true);
+   db.prepare('INSERT INTO auth_absence_fences VALUES(?)').run(watchFenceKey(ctx,r));
+   return persist(ctx,r,'registerWatch',{status:'knownAbandoned',receipt:makeReceipt(config,ctx,r,'registerWatch','knownAbandoned',{}, {registration:{watchID:r.watchID,watchPublicKey:r.watchPublicKey}})});
+ });}
  function registerWatch(ctx,r){validatePayload('registerWatch',r);return transaction(db,config,()=>{
    const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
-   const old=stored(ctx,r,'registerWatch');if(old){const s=db.prepare('SELECT * FROM sessions WHERE session_id=?').get(old.sessionClaims.sessionID);return {...old,credential:credential(s)};}
+   const old=stored(ctx,r,'registerWatch');if(old)return watchResult(old);
+   checkWatchFence(ctx,r);
    checkChallenge(r,r.watchPublicKey,r.watchID);
    const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.watchID),keyID=sha256(r.watchPublicKey);
    if(prior&&(prior.account_id!==ctx.accountID||prior.public_key!==r.watchPublicKey||prior.role!=='watch'))fail('unauthorized',401);
@@ -98,6 +116,6 @@ export function createDeviceAuth({authority,appleVerifier}){
    db.prepare('UPDATE challenges SET consumed=1 WHERE challenge_id=?').run(r.challengeID);
    const s=session({...ctx,deviceID:r.watchID,keyID});const result={receipt:makeReceipt(config,ctx,r,'registerWatch','registered',{}, {registration:{watchID:r.watchID,watchPublicKey:r.watchPublicKey}}),sessionClaims:{sessionID:s.session_id,expiresAt:s.expires_at}};persist(ctx,r,'registerWatch',result);return {...result,credential:credential(s)};
  });}
- authority.registerWatch=registerWatch;
- return {challenge,authenticate,recover,authenticateRequest,registerWatch,credential};
+ authority.registerWatch=registerWatch;authority.recoverWatch=recoverWatch;
+ return {challenge,authenticate,recover,authenticateRequest,registerWatch,recoverWatch,credential};
 }
