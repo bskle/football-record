@@ -16,10 +16,11 @@ export function openDatabase(config) {
       CREATE TABLE IF NOT EXISTS active_locks(account_id TEXT PRIMARY KEY,lock_id TEXT NOT NULL UNIQUE,match_id TEXT NOT NULL,recorder_id TEXT NOT NULL,activation_epoch INTEGER NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS terminal_locks(account_id TEXT NOT NULL,lock_id TEXT NOT NULL,match_id TEXT NOT NULL,recorder_id TEXT NOT NULL,activation_epoch INTEGER NOT NULL,result TEXT NOT NULL,PRIMARY KEY(account_id,lock_id)) STRICT;
       CREATE TABLE IF NOT EXISTS requests(account_id TEXT NOT NULL,request_id TEXT NOT NULL,operation TEXT NOT NULL,request_digest TEXT NOT NULL,result BLOB NOT NULL,PRIMARY KEY(account_id,request_id)) STRICT;
-      PRAGMA user_version=1; COMMIT;`);
+      PRAGMA user_version=1;`);
     const fingerprint=db.prepare('SELECT value FROM metadata WHERE key=?').get('configuration');
     if(fingerprint&&fingerprint.value!==config.fingerprint)throw new Error('persistent key configuration mismatch');
     db.prepare('INSERT OR IGNORE INTO metadata VALUES(?,?)').run('configuration',config.fingerprint);
+    db.exec('COMMIT');
     return db;
   }catch(e){if(db.isTransaction)db.exec('ROLLBACK');db.close();throw e;}
 }

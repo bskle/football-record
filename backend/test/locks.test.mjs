@@ -54,3 +54,17 @@ test('clock and grant expiry do not release locks; normal release binds opaque a
   assert.notEqual(release.body.requestDigest,r.body.requestDigest);
   assert.throws(()=>f.authority.terminate(f.context,{...end,contentCommitment:'b'.repeat(64)}),e=>e.code==='idempotencyConflict');
 });
+
+
+test('concurrent first initialization accepts exactly one persistent key configuration',async()=>{
+  const {Worker}=await import('node:worker_threads');
+  for(let round=0;round<40;round++){
+    const path=tempDB(),barrier=new SharedArrayBuffer(4),view=new Int32Array(barrier);
+    let ready=0;
+    const results=await Promise.all([1,2].map(n=>new Promise((resolve,reject)=>{
+      const w=new Worker(new URL('./startup-worker.mjs',import.meta.url),{workerData:{path,barrier,n}});
+      w.on('error',reject);w.on('message',m=>{if(m.ready){if(++ready===2){Atomics.store(view,0,1);Atomics.notify(view,0);}}else resolve(m);});
+    })));
+    assert.equal(results.filter(r=>r.accepted).length,1,'both configurations accepted in round '+round);
+  }
+});
