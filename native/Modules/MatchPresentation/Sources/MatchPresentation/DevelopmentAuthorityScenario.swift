@@ -260,7 +260,7 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
   }
   func accountAction(_ action: AccountUserAction) async throws {
     if action == .identityChanged {
-      accountModel?.pauseIdentity(); try await ensureServices(); try await lifecycleService?.identityChanged(); await recording.shutdown(); return
+      accountModel?.pauseIdentity(); try await ensureServices(); try await lifecycleService?.identityChanged(); await recording.shutdown(); accountModel?.requireReload(); return
     }
     let result: AccountAuthentication
     if configuration.role == "watch" {

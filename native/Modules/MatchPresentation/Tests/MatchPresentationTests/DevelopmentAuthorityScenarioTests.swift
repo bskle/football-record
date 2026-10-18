@@ -39,6 +39,24 @@ import CloudSync
     XCTAssertEqual(context.recording.feedbackCount, feedback + 1)
     await context.shutdown()
   }
+  func testIdentityRenewalCannotReadmitStoppedRecordingUntilExplicitContextReload() async throws {
+    let host = try DevelopmentFixtureHost(); defer { host.close() }; host.serve()
+    let first = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+    await first.account.perform(.signIn); XCTAssertTrue(first.account.canEnterRecording)
+    await first.account.perform(.identityChanged)
+    XCTAssertFalse(first.account.canEnterRecording)
+    await first.account.perform(.renew)
+    XCTAssertNil(first.account.issue)
+    XCTAssertFalse(first.account.canEnterRecording, "A stopped RecordingModel must not be admitted by renewed identity")
+    await first.refreshRecording(); await first.recording.start(starter: true)
+    XCTAssertNil(first.recording.snapshot)
+    await first.shutdown()
+    let second = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+    XCTAssertTrue(second.account.canEnterRecording)
+    await second.recording.start(starter: true)
+    XCTAssertEqual(second.recording.snapshot?.replay.state, .running)
+    await second.shutdown()
+  }
   func testSignedOutStatisticsFailureAndAccountFailureRemainIndependent() async throws {
     let host = try DevelopmentFixtureHost(); defer { host.close() }
     let context = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)

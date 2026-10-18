@@ -7,11 +7,20 @@ import XCTest
     reveal(control, id, app); control.tap()
   }
   private func reveal(_ control: XCUIElement, _ id: String, _ app: XCUIApplication) {
+    #if os(watchOS)
+    for _ in 0..<24 {
+      let frame = control.exists ? control.frame : .zero
+      if control.exists && control.isHittable && frame.height > 0 && frame.minY >= app.frame.minY + 36 && frame.maxY <= app.frame.maxY - 4 { return }
+      let down = frame.height > 0 && frame.minY < app.frame.minY + 36
+      app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.40 : 0.72)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.72 : 0.40)))
+    }
+    #else
     for attempt in 0..<24 {
       if control.exists && control.isHittable && control.frame.height > 0 && control.frame.midY > app.frame.minY + 24 && control.frame.midY < app.frame.maxY - 24 { return }
       let upward = control.exists ? control.frame.midY > app.frame.midY : attempt % 16 < 8
       app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.77 : 0.36)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: upward ? 0.40 : 0.73)))
     }
+    #endif
     capture(app, "unreachable-" + id); XCTFail("Control must be actually reachable: " + id)
   }
   private func capture(_ app: XCUIApplication, _ name: String) {
@@ -59,7 +68,7 @@ import XCTest
     app.terminate(); app.launch()
     XCTAssertTrue(app.buttons["start-next-match"].waitForExistence(timeout: 15))
     #if os(watchOS)
-    tap("open-account", app); capture(app, "watch-registered-account")
+    tap("open-account", app); reveal(app.staticTexts["account-device-id"].firstMatch, "account-device-id", app); capture(app, "watch-registered-account")
     #else
     app.tabBars.buttons["设置"].tap()
     let analytics = app.switches["analytics-toggle"].firstMatch
@@ -119,6 +128,40 @@ import XCTest
     tap("request-account-delete"); capture("375-dark-maxfont-delete-confirmation")
     app.buttons["保留账号"].firstMatch.tap()
     capture("375-dark-maxfont-independent-choices")
+  }
+}
+#endif
+
+#if os(iOS)
+@MainActor final class NativeAccountRecoveryUITests: XCTestCase {
+  func testRenewedIdentityMustExplicitlyReloadBeforeRecording() {
+    continueAfterFailure = false
+    let app = XCUIApplication(); app.launchArguments = ["--m4-development"]; app.launch()
+    func tap(_ id: String) {
+      let button = app.buttons[id].firstMatch
+      for attempt in 0..<24 {
+        let frame = button.exists ? button.frame : .zero
+        if button.exists && button.isHittable && frame.height > 0 && frame.midY > 40 && frame.midY < app.frame.maxY - 30 { button.tap(); return }
+        let up = frame.height > 0 ? frame.midY > app.frame.midY : attempt % 16 < 8
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.77 : 0.36)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: up ? 0.40 : 0.73)))
+      }
+      XCTFail("Recovery control is not reachable: " + id)
+    }
+    XCTAssertTrue(app.buttons["account-sign-in"].waitForExistence(timeout: 15)); tap("account-sign-in")
+    XCTAssertTrue(app.buttons["start-match"].waitForExistence(timeout: 20)); app.tabBars.buttons["设置"].tap()
+    tap("account-identity-change"); app.buttons["确认身份变化"].firstMatch.tap()
+    XCTAssertTrue(app.buttons["account-renew"].waitForExistence(timeout: 10)); tap("account-renew")
+    let status = app.staticTexts["account-status"].firstMatch
+    let verified = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "身份已验证，请重新载入记录"), object: status)
+    XCTAssertEqual(XCTWaiter.wait(for: [verified], timeout: 15), .completed)
+    XCTAssertFalse(app.buttons["start-match"].exists)
+    let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "renewed-identity-requires-context-reload"; shot.lifetime = .keepAlways; add(shot)
+    let ax = XCTAttachment(string: app.debugDescription); ax.name = "renewed-identity-requires-context-reload-accessibility"; ax.lifetime = .keepAlways; add(ax)
+    tap("account-reload")
+    XCTAssertTrue(app.buttons["start-match"].waitForExistence(timeout: 15))
+    tap("start-match"); tap("choose-starter"); tap("confirm-start")
+    XCTAssertTrue(app.staticTexts["match-status"].waitForExistence(timeout: 12))
+    XCTAssertTrue(app.staticTexts["match-status"].label.contains("记录中"))
   }
 }
 #endif

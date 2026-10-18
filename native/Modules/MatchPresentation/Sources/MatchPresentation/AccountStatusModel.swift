@@ -15,6 +15,7 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
   public private(set) var pendingWatchIDs: [String] = []
   public private(set) var issue: String?
   public private(set) var busy = false
+  public private(set) var requiresReload = false
   public let development: Bool
   @ObservationIgnored let repository: SQLiteSessionRepository
   private var identityVerified: Bool
@@ -24,9 +25,10 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
   public init(repository: SQLiteSessionRepository, development: Bool = false, identityVerified: Bool = false, action: (@MainActor (AccountUserAction) async throws -> Void)? = nil) {
     self.repository = repository; self.development = development; self.identityVerified = identityVerified; self.action = action
   }
-  public var canEnterRecording: Bool { !stopped && identityVerified && phase == .ready }
+  public var canEnterRecording: Bool { !stopped && !requiresReload && identityVerified && phase == .ready }
   public var title: String {
-    switch phase {
+    if requiresReload && identityVerified { return "身份已验证，请重新载入记录" }
+    return switch phase {
     case .unavailable: "账号服务尚未接通"
     case .signedOut: "登录后开始记录"
     case .pending: "正在确认原登录或登记"
@@ -37,7 +39,8 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
     }
   }
   public var detail: String {
-    switch phase {
+    if requiresReload && identityVerified { return "请使用下方“重新载入本机记录”，再继续录制。原记录会保留。" }
+    return switch phase {
     case .unavailable: "本机数据会保留。真实账号与云服务将在完成环境验证后接通。"
     case .waitingMigration: "完成正常迁移，或按丢失设备流程验证后，才能在这台手机录制。"
     case .suspended: "旧数据已保留；核对当前 Apple 与 iCloud 身份后再继续。"
@@ -85,6 +88,7 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
     guard !stopped, generation == refresh else { return }
     if let failure { issue = failure }
   }
+  func requireReload() { requiresReload = true }
   func confirmIdentity() { identityVerified = true }
   public func pauseIdentity() { identityVerified = false; phase = .suspended; generation = UUID() }
   public func stop() { stopped = true; generation = UUID(); binding = nil; phase = .unavailable }
