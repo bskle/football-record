@@ -1,3 +1,4 @@
+import {assertAppleRevoker} from './apple-revoker.mjs';
 import {validatePayload} from './codec.mjs';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
 import {transaction,fail,nextEpoch} from './database.mjs';
@@ -85,7 +86,7 @@ export function installLifecycle(api,state){
    });
  }
  async function deleteAccount(ctx,r){
-   validatePayload('deleteAccount',r);
+   validatePayload('deleteAccount',r);state.pruneReauthMaterial();
    const saga=transaction(db,config,()=>{
      const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
      stored(ctx,r,'deleteAccount');if(a.migration_id)fail('migrationBlocked');
@@ -99,10 +100,16 @@ export function installLifecycle(api,state){
    if(stage.state==='lockReconciled'){
      const id=stage.reauthentication_id;
      if(typeof config.appleRevoker!=='function')fail('unavailable',503,true);
-     transaction(db,config,()=>{validate(ctx);reauth(ctx,id);if(!state.transientReauthCodes.has(id))fail('reauthenticationRequired',403);consume(id);});
-     const code=state.transientReauthCodes.get(id);state.transientReauthCodes.delete(id);
-     try{const answer=await config.appleRevoker({authorizationCode:code});if(answer?.revoked!==true)throw Error();}catch{fail('reauthenticationRequired',403);}
-     transaction(db,config,()=>{validate(ctx);const pending=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);if(!pending||pending.delete_request_id!==r.requestID||pending.request_digest!==sha256(canonicalJSON(r))||pending.state!=='lockReconciled'||pending.reauthentication_id!==id)fail('reauthenticationRequired',403);if(config.faults?.lifecycleStep==='appleRevocation')fail('unavailable',503,true);db.prepare("UPDATE deletions SET state='appleRevocation' WHERE account_id=?").run(ctx.accountID);});
+     try{assertAppleRevoker(config.appleRevoker,config.environment);}catch{fail('unavailable',503,true);}
+     let material;
+     try {
+       transaction(db,config,()=>{validate(ctx);reauth(ctx,id);material=state.takeReauthMaterial(id,ctx);consume(id);});
+       try {
+         const answer=await config.appleRevoker({authorizationCode:material.authorizationCode,expectedApple:material.expectedApple,reauthenticationID:id});
+         if(answer?.revoked!==true)throw Error();
+       }catch{fail('reauthenticationRequired',403);}
+       transaction(db,config,()=>{validate(ctx);const pending=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);if(!pending||pending.delete_request_id!==r.requestID||pending.request_digest!==sha256(canonicalJSON(r))||pending.state!=='lockReconciled'||pending.reauthentication_id!==id)fail('reauthenticationRequired',403);if(config.faults?.lifecycleStep==='appleRevocation')fail('unavailable',503,true);db.prepare("UPDATE deletions SET state='appleRevocation' WHERE account_id=?").run(ctx.accountID);});
+     } finally {state.disposeReauthMaterial(material);}
    }
    return transaction(db,config,()=>{
      validate(ctx);if(activeLock(ctx.accountID))fail('activeMatchExists');const s=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);if(s.state!=='appleRevocation')fail('reauthenticationRequired',403);
@@ -113,7 +120,7 @@ export function installLifecycle(api,state){
      db.prepare('DELETE FROM challenges WHERE device_id IN (SELECT device_id FROM devices WHERE account_id=?)').run(ctx.accountID);
      db.prepare('DELETE FROM nonces WHERE session_id IN (SELECT session_id FROM sessions WHERE account_id=?)').run(ctx.accountID);
      for(const table of ['accounts','devices','active_locks','terminal_locks','requests','auth_records','sessions','reauthentications','migrations','lost_grants','peer_grants','deletions','qualifications','restrictions','analytics_events'])db.prepare('DELETE FROM '+table+' WHERE account_id=?').run(ctx.accountID);
-     for(const [id]of state.transientReauthCodes)if(!db.prepare('SELECT 1 FROM reauthentications WHERE reauthentication_id=?').get(id))state.transientReauthCodes.delete(id);
+     state.pruneReauthMaterial();
      if(config.faults?.afterDeleteCommitResponseLost){db.exec('COMMIT');fail('responseLost',503,true);}
      return result;
    });
