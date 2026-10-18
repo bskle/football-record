@@ -50,6 +50,9 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
   public func refresh() async {
     guard !stopped else { return }
     let token = UUID(); generation = token
+    await readStatus(token: token)
+  }
+  private func readStatus(token: UUID) async {
     do {
       let value = try await repository.accountBindingV4()
       let auth = try await repository.pendingAuthAttemptsV4()
@@ -72,10 +75,13 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
   public func perform(_ value: AccountUserAction) async {
     guard !stopped, !busy, let action else { return }; busy = true
     defer { busy = false }
+    let observation = generation
     var failure: String?
     do { try await action(value) } catch { failure = AccountMessages.message(error) }
-    guard !stopped else { return }
-    await refresh()
+    guard !stopped, generation == observation else { return }
+    let refresh = UUID(); generation = refresh
+    await readStatus(token: refresh)
+    guard !stopped, generation == refresh else { return }
     if let failure { issue = failure }
   }
   public func pauseIdentity() { identityVerified = false; phase = .suspended; generation = UUID() }

@@ -19,6 +19,7 @@ public struct DeletionStatusRow: Sendable {
   }
 }
 @MainActor @Observable public final class LifecycleStatusModel {
+  public private(set) var matchID: String?
   public private(set) var migration: AuthorityMigrationV1?
   public private(set) var deletions: [DeletionSagaV4] = []
   public private(set) var analyticsEnabled: Bool?
@@ -78,7 +79,10 @@ public struct DeletionStatusRow: Sendable {
      DeletionStatusRow(id: "health", title: "App 创建的健康运动", progress: saga.healthProgress)]
   }
   public func refresh(matchID: String? = nil) async {
-    guard !stopped else { return }; let token = UUID(); generation = token
+    guard !stopped else { return }; let token = UUID(); generation = token; self.matchID = matchID
+    await readStatus(matchID: matchID, token: token)
+  }
+  private func readStatus(matchID: String?, token: UUID) async {
     do {
       let m = try await repository.latestMigrationV4(), d = try await repository.deletionSagasV4()
       let analytics = try await repository.analyticsEnabledV4(), queue = try await repository.controlQueueV4()
@@ -96,9 +100,13 @@ public struct DeletionStatusRow: Sendable {
   }
   public func perform(_ value: LifecycleUserAction, matchID: String? = nil) async {
     guard !stopped, !busy, let action else { return }; busy = true; defer { busy = false }
+    let observation = generation
     var failure: String?
     do { try await action(value) } catch { failure = AccountMessages.message(error) }
-    guard !stopped else { return }; await refresh(matchID: matchID)
+    guard !stopped, generation == observation else { return }
+    let refresh = UUID(); generation = refresh; self.matchID = matchID
+    await readStatus(matchID: matchID, token: refresh)
+    guard !stopped, generation == refresh else { return }
     if let failure { issue = failure }
   }
   public func stop() { stopped = true; generation = UUID(); cloudSaved = nil; backendStatus = nil; analyticsEnabled = nil }

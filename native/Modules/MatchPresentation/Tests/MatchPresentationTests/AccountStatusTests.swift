@@ -6,6 +6,21 @@ import MatchSession
 @testable import MatchPresentation
 
 @MainActor final class AccountStatusTests: XCTestCase {
+  func testOldFailureCannotPublishAfterCurrentIdentityWasPaused() async throws {
+    let repo = try accountRepository("account-action-gate")
+    let b = try binding(.phone); try await repo.bindAccountV4(b)
+    let entered = expectation(description: "Account action entered")
+    let gate = AccountActionGate(entered)
+    let model = AccountStatusModel(repository: repo, development: true, identityVerified: true, action: { _ in await gate.hold(); throw AuthorityError.unavailable })
+    await model.refresh()
+    let old = Task { await model.perform(.recover) }
+    await fulfillment(of: [entered], timeout: 2)
+    model.pauseIdentity(); await model.refresh()
+    XCTAssertEqual(model.phase, .suspended); XCTAssertNil(model.issue)
+    await gate.release(); await old.value
+    XCTAssertEqual(model.phase, .suspended); XCTAssertNil(model.issue)
+    try await repo.close()
+  }
   func testProductionIsUnavailableEvenWithPersistedBinding() async throws {
     let repo = try accountRepository("production-gate")
     try await repo.bindAccountV4(try binding(.phone))
@@ -57,4 +72,12 @@ func accountRepository(_ namespace: String, root: URL? = nil) throws -> SQLiteSe
   let key = Curve25519.Signing.PrivateKey()
   let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["fixture": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
   return try SQLiteSessionRepository(rootDirectory: root ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), databaseNamespace: namespace, authorityTrust: trust, cloudSavePolicy: .development(databaseNamespace: namespace))
+}
+
+private actor AccountActionGate {
+  let entered: XCTestExpectation
+  var continuation: CheckedContinuation<Void,Never>?
+  init(_ entered: XCTestExpectation) { self.entered = entered }
+  func hold() async { await withCheckedContinuation { continuation = $0; entered.fulfill() } }
+  func release() { continuation?.resume(); continuation = nil }
 }
