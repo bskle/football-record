@@ -44,6 +44,27 @@ enum CloudChangeTokenEnvelope {
         guard e.version==1,e.containerIdentifier.utf8.elementsEqual(configuration.containerIdentifier.utf8),e.environment==configuration.environment.rawValue,e.stableZoneKey==scope.stableZoneKey,!e.archive.isEmpty,e.archive.count<=512*1024 else {throw CloudError(.invalidPayload)};return e.archive
     }
 }
+// Pure values copied from the actual fetched manifest record, never expected upload fields.
+struct CloudManifestReadbackMetadata:Sendable {
+    let actualRecordID,changeTag,ownerRecordID:String
+    let scope:CloudScope
+    let bytes:Data
+}
+enum CloudManifestBinding {
+    static func manifest(_ metadata:CloudManifestReadbackMetadata,referencedID:String,recordID:String,recordDigest:String,scope:CloudScope) throws->CloudSaveManifest {
+        let decoded=try CloudAssetCodec.boundedManifest(metadata.bytes,scope:scope)
+        guard metadata.actualRecordID.utf8.elementsEqual(referencedID.utf8),
+              metadata.actualRecordID.utf8.elementsEqual(decoded.checkpointID.utf8),
+              metadata.scope==scope,metadata.ownerRecordID.utf8.elementsEqual(recordID.utf8),
+              decoded.recordID.utf8.elementsEqual(recordID.utf8),decoded.recordDigest==recordDigest,decoded.scope==scope else {throw CloudError(.invalidPayload)}
+        return decoded
+    }
+    static func readback(upload:CloudUpload,record:CloudRecord,manifest:CloudManifestReadbackMetadata,parts:[CloudSavedPart],recordChangeTag:String) throws->CloudSaveReadback {
+        guard record==upload.record,manifest.actualRecordID.utf8.elementsEqual(upload.checkpointID.utf8) else {throw CloudError(.conflict)}
+        _=try self.manifest(manifest,referencedID:manifest.actualRecordID,recordID:record.recordID,recordDigest:record.digest,scope:record.scope)
+        return CloudSaveReadback(scope:upload.scope,recordID:record.recordID,manifestRecordID:manifest.actualRecordID,manifestBytes:manifest.bytes,manifestChangeTag:manifest.changeTag,manifestCondition:.ifServerRecordUnchanged,parts:parts,confirmationID:UUID().uuidString.lowercased(),recordChangeTag:recordChangeTag,recordCondition:.ifServerRecordUnchanged)
+    }
+}
 private struct DisabledCloudKitTransport:CloudKitTransport {
     func currentCloudSpaceID() async throws->String {throw CloudError(.accountUnavailable)}
     func fetch(scope:CloudScope,cursor:CloudCursor,context:CloudKitIOContext) async throws->CloudFetchBatch {throw CloudError(.networkUnavailable)}
@@ -237,9 +258,10 @@ private final class CloudKitSDKTransport:CloudKitTransport,@unchecked Sendable {
     private func canonical(_ top:CloudSDKRecord,scope:CloudScope,context:CloudKitIOContext) async throws->(CloudRecord,CloudSDKRecord,[CloudSDKRecord]) {
         guard let manifestID=top.record["manifestID"] as? String,let expectedDigest=top.record["digest"] as? String else {throw CloudError(.invalidPayload)}
         let manifests=try await fetched([manifestID],scope:scope,context:context)
-        guard let manifest=manifests[manifestID],manifest.record.recordType==CloudSDKSchema.manifest,manifest.scope==top.scope,manifest.record["owner"] as? String==top.record.recordID.recordName,let bytes=manifest.assetBytes else {throw CloudError(.invalidPayload)}
-        let decoded=try CloudAssetCodec.boundedManifest(bytes,scope:scope)
-        guard decoded.recordID==top.record.recordID.recordName,decoded.recordDigest==expectedDigest,decoded.scope==top.scope,!decoded.parts.isEmpty,decoded.parts.count<=64 else {throw CloudError(.invalidPayload)}
+        guard let manifest=manifests[manifestID],manifest.record.recordType==CloudSDKSchema.manifest,manifest.scope==top.scope,let owner=manifest.record["owner"] as? String,owner.utf8.elementsEqual(top.record.recordID.recordName.utf8),let bytes=manifest.assetBytes else {throw CloudError(.invalidPayload)}
+        guard let manifestTag=manifest.record.recordChangeTag else {throw CloudError(.partialSave)}
+        let metadata=CloudManifestReadbackMetadata(actualRecordID:manifest.record.recordID.recordName,changeTag:manifestTag,ownerRecordID:owner,scope:manifest.scope,bytes:bytes)
+        let decoded=try CloudManifestBinding.manifest(metadata,referencedID:manifestID,recordID:top.record.recordID.recordName,recordDigest:expectedDigest,scope:top.scope)
         let partMap=try await fetched(decoded.parts.map(\.partID),scope:scope,context:context,expectedAssets:Dictionary(uniqueKeysWithValues:decoded.parts.map {($0.partID,$0)}))
         let parts=try decoded.parts.map {ref -> CloudSDKRecord in
             guard let part=partMap[ref.partID],part.record.recordType==CloudSDKSchema.part,part.scope==decoded.scope,part.record["owner"] as? String==decoded.recordID,
@@ -304,13 +326,14 @@ private final class CloudKitSDKTransport:CloudKitTransport,@unchecked Sendable {
         let facts=try await fetched([upload.record.recordID],scope:upload.scope,context:context)
         guard let top=facts[upload.record.recordID] else {throw CloudError(.partialSave)}
         let (record,manifest,parts)=try await canonical(top,scope:upload.scope,context:context)
-        guard record==upload.record,let manifestTag=manifest.record.recordChangeTag,let recordTag=top.record.recordChangeTag,let bytes=manifest.assetBytes else {throw CloudError(.conflict)}
+        guard record==upload.record,let manifestTag=manifest.record.recordChangeTag,let recordTag=top.record.recordChangeTag,let owner=manifest.record["owner"] as? String,let bytes=manifest.assetBytes else {throw CloudError(.conflict)}
         let refs=try CloudCodec.decode(CloudSaveManifest.self,bytes,limit:1024*1024).parts
         let saved=try parts.enumerated().map {i,part -> CloudSavedPart in
             guard let tag=part.record.recordChangeTag,let bytes=part.assetBytes else {throw CloudError(.partialSave)}
             return CloudSavedPart(reference:refs[i],changeTag:tag,condition:.ifServerRecordUnchanged,readBackBytes:bytes)
         }
-        return CloudSaveReadback(scope:upload.scope,recordID:record.recordID,manifestRecordID:upload.checkpointID,manifestBytes:bytes,manifestChangeTag:manifestTag,manifestCondition:.ifServerRecordUnchanged,parts:saved,confirmationID:UUID().uuidString.lowercased(),recordChangeTag:recordTag,recordCondition:.ifServerRecordUnchanged)
+        let metadata=CloudManifestReadbackMetadata(actualRecordID:manifest.record.recordID.recordName,changeTag:manifestTag,ownerRecordID:owner,scope:manifest.scope,bytes:bytes)
+        return try CloudManifestBinding.readback(upload:upload,record:record,manifest:metadata,parts:saved,recordChangeTag:recordTag)
     }
     func save(_ upload:CloudUpload,package:CloudAssetPackage,context:CloudKitIOContext) async throws->CloudSaveResult {
         try await ensureZone(upload.scope,context:context)

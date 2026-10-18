@@ -129,4 +129,29 @@ final class CloudKitDriverTests:XCTestCase,@unchecked Sendable {
         let next=try h.staging.begin(scope:h.scope,identityGeneration:0);try h.staging.check(next);try h.staging.close()
     }
 
+    func manifestProof(actualID:String,referencedID:String,upload:CloudUpload,tag:String) throws->CloudSaveReadback {
+        let original=try completeCloudSave(upload)
+        let actual=CloudManifestReadbackMetadata(actualRecordID:actualID,changeTag:tag,ownerRecordID:upload.record.recordID,scope:upload.scope,bytes:original.manifestBytes)
+        _=try CloudManifestBinding.manifest(actual,referencedID:referencedID,recordID:upload.record.recordID,recordDigest:upload.record.digest,scope:upload.scope)
+        let proof=try CloudManifestBinding.readback(upload:upload,record:upload.record,manifest:actual,parts:original.parts,recordChangeTag:original.recordChangeTag)
+        try CloudAssetCodec.validate(proof,upload:upload)
+        return proof
+    }
+    func testActualAliasManifestCannotAssertUnreadExpectedCheckpointProof() throws {
+        let upload=try cloudUpload(),alias=String(repeating:"a",count:64)
+        XCTAssertNotEqual(alias,upload.checkpointID)
+        // Only the alias was read. The expected checkpoint record does not exist in this fixture.
+        XCTAssertThrowsError(try manifestProof(actualID:alias,referencedID:alias,upload:upload,tag:"actual-alias-tag"))
+    }
+    func testActualManifestMustAlsoMatchTopReferencedRecordID() throws {
+        let upload=try cloudUpload(),otherReference=String(repeating:"b",count:64)
+        XCTAssertThrowsError(try manifestProof(actualID:upload.checkpointID,referencedID:otherReference,upload:upload,tag:"actual-original-tag"))
+    }
+    func testActualOriginalManifestIDAndTagSurviveIntoCompleteProof() throws {
+        let upload=try cloudUpload()
+        let proof=try manifestProof(actualID:upload.checkpointID,referencedID:upload.checkpointID,upload:upload,tag:"actual-original-tag")
+        XCTAssertEqual(proof.manifestRecordID,upload.checkpointID)
+        XCTAssertEqual(proof.manifestChangeTag,"actual-original-tag")
+    }
+
 }
