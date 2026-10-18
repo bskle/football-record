@@ -135,3 +135,5 @@ Only the frozen nine metric names and finite count/version/OS/qualification fiel
 ## Local operations readiness
 
 [NATIVE-034 operations](ops/README.md) adds private no-secret-output config/fingerprint preflight, consistent online SQLite/WAL plus matching-key backup/restore, and runnable isolated restore/TLS drills. Destinations are new private directories, completion publishes last, and restore rejects corrupted, mismatched or interrupted bundles. The smoke verifies local certificate/host/no-redirect and three contract error boundaries through a loopback TLS front. This is local Node readiness; server CLI stays development-only, revoker Unavailable by default, and actual deployment/Swift TLS/Apple/device acceptance remains deferred.
+
+Restore drills prove only backup-point state. Post-backup published locks/requests/global epochs may be lost or roll back; restoring files never starts a service. Continuous provider durability/RPO, invalidation and epoch high-water recovery remain real026 requirements before any external service resumes.

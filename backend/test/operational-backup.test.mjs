@@ -26,7 +26,7 @@ test('runnable isolated operator drill prints finite checks without development 
 
 test('actual killed backup process leaves an incomplete private bundle that restore refuses',async t=>{
  const {fork}=await import('node:child_process'),{restoreAuthority}=await import('../ops/backup.mjs'),f=await operationalFixture();t.after(()=>f.close());const bundle=join(f.directory,'killed'),child=fork(new URL('./support/operational-interrupted-backup.mjs',import.meta.url),[f.configPath,bundle],{stdio:['ignore','pipe','pipe','ipc']});t.after(()=>child.kill());
- await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill();reject(Error('pause deadline'));},5000);child.once('error',reject);child.once('message',m=>{clearTimeout(timer);assert.equal(m.paused,true);resolve();});});const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGKILL');await exited;
+ await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{child.kill();reject(Error('pause deadline'));},5000);child.once('error',reject);child.once('message',m=>{clearTimeout(timer);assert.equal(m.paused,true);resolve();});});const exited=new Promise(resolve=>child.once('exit',(code,signal)=>resolve({code,signal})));assert.equal(child.kill('SIGKILL'),true);assert.deepEqual(await exited,{code:null,signal:'SIGKILL'});
  assert.equal(existsSync(join(bundle,'manifest.json')),false);assert.equal(statSync(bundle).mode&0o777,0o700);await assert.rejects(restoreAuthority(bundle,join(f.directory,'killed-restore')),e=>e.code==='unavailable');
 });
 
