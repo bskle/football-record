@@ -13,7 +13,7 @@ public struct AccountAuthentication:Sendable {
     public let receipt:VerifiedAuthorityReceiptV1
     public let reauthenticationID:String?
 }
-public enum AuthenticationRecovery:Sendable {case authenticated(AccountAuthentication),knownRevoked,knownExpired,knownNotFound,unresolved}
+public enum AuthenticationRecovery:Sendable {case authenticated(AccountAuthentication),knownRevoked,knownExpired,knownNotFound,knownAbandoned,unresolved}
 public actor AccountService {
     let client:AuthorityClient
     let repository:any AccountLifecycleRepository & AuthorityRepository
@@ -25,7 +25,7 @@ public actor AccountService {
     struct ChallengeRequest:Encodable {let version=1;let requestID,deviceID,devicePublicKey:String}
     struct Challenge:Codable {let version:Int;let requestID,challengeID:String;let expiresAt:Int64;let challenge:String?;let status:String?}
     struct AuthRequest:Encodable {let version=1;let requestID,challengeID,identityToken,authorizationCode,deviceID,devicePublicKey,cloudSpaceID:String}
-    struct RecoverRequest:Encodable {let version=1;let requestID,authRequestID,deviceID,keyID,nonce:String;let issuedAt:Int64}
+    struct RecoverRequest:Encodable {let version=1;let requestID,authRequestID,deviceID,keyID,nonce,devicePublicKey:String;let issuedAt:Int64}
     struct SessionClaims:Decodable {let sessionID:String;let expiresAt:Int64}
     struct Context:Decodable {let accountID,deviceID,keyID:String;let activationEpoch:Int64}
     func ensureFacade() async throws {guard await coordinator.syncRepositoryIdentity()==repository.syncRepositoryIdentity() else {throw AuthorityError.identityChanged};try AuthorityWire.identifier(deviceID);try AuthorityWire.identifier(cloudSpaceID)}
@@ -56,7 +56,7 @@ public actor AccountService {
     public func recover(authRequestID:String) async throws->AuthenticationRecovery {
         try await ensureFacade()
         guard let attempt=try await repository.authAttemptV4(requestID:authRequestID),attempt.deviceID==deviceID,attempt.cloudSpaceID==cloudSpaceID,attempt.publicKey==client.signer.publicKey,attempt.environment==client.trust.environment else {throw AuthorityError.identityChanged}
-        let request=RecoverRequest(requestID:UUID().uuidString,authRequestID:authRequestID,deviceID:deviceID,keyID:attempt.keyID,nonce:UUID().uuidString,issuedAt:try seconds())
+        let request=RecoverRequest(requestID:UUID().uuidString,authRequestID:authRequestID,deviceID:deviceID,keyID:attempt.keyID,nonce:UUID().uuidString,devicePublicKey:attempt.publicKey,issuedAt:try seconds())
         let unsigned=try object(request),signature=try await client.signer.sign(AuthorityWire.signedInput("football-record.device.auth-recover.v1",body:bytes(unsigned)))
         var full=unsigned;full["deviceProof"]=AuthorityWire.base64URL(signature)
         let raw:Data
@@ -67,6 +67,7 @@ public actor AccountService {
             throw failure
         } catch is URLError {return .unresolved}
         if let object=try JSONSerialization.jsonObject(with:raw) as? [String:Any],Set(object.keys)==["status"] {
+            if object["status"] as? String=="knownAbandoned" {try await coordinator.resolveAuthAttempt(requestID:authRequestID,resolution:.knownAbandoned);return .knownAbandoned}
             if object["status"] as? String=="knownRevoked" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownRevoked);return .knownRevoked}
             if object["status"] as? String=="knownExpired" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownExpired);return .knownExpired}
             throw AuthorityError.invalidWire

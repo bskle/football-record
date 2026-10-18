@@ -10,7 +10,7 @@ public struct AuthAttemptV4:Codable,Sendable,Equatable {
     private enum CodingKeys:String,CodingKey {case requestID,deviceID,publicKey,keyID,cloudSpaceID,challengeID,requestDigest,environment}
     public init(from decoder:any Decoder)throws {let c=try decoder.container(keyedBy:CodingKeys.self);try self.init(requestID:c.decode(String.self,forKey:.requestID),deviceID:c.decode(String.self,forKey:.deviceID),publicKey:c.decode(String.self,forKey:.publicKey),cloudSpaceID:c.decode(String.self,forKey:.cloudSpaceID),challengeID:c.decode(String.self,forKey:.challengeID),requestDigest:c.decode(String.self,forKey:.requestDigest),environment:c.decode(AuthorityEnvironment.self,forKey:.environment));guard keyID == (try c.decode(String.self,forKey:.keyID)) else {throw AuthorityError.invalidWire}}
 }
-public enum AuthResolutionV4:String,Codable,Sendable {case knownRevoked,knownExpired,knownNotFound}
+public enum AuthResolutionV4:String,Codable,Sendable {case knownRevoked,knownExpired,knownNotFound,knownAbandoned}
 public protocol AccountLifecycleRepository:Sendable {
     func syncRepositoryIdentity() async->SyncRepositoryIdentity
     func pendingAuthAttemptsV4() async throws->[AuthAttemptV4]

@@ -40,6 +40,7 @@ final class MigrationRecoveryTests:XCTestCase,@unchecked Sendable {
         let batch=try CloudFetchBatch(scope:scope,batchID:"full-final-download",records:records,expectedAppliedToken:nil,nextToken:Data([1,2]),fetchGeneration:0,moreComing:false)
         _=try await nextBridge.importBatch(batch)
         let activated=try await nextService.activateMigration(migrationID:migration.migrationID,requestID:"activate-after-download");XCTAssertEqual(activated.body.result,.activated)
+        guard case .knownRevoked=try await next.service.recover(authRequestID:"next-waiting") else {return XCTFail()}
         let fresh=try await next.service.signIn(requestID:"next-active-fresh",challengeRequestID:"next-active-challenge");XCTAssertEqual(fresh.binding.role,.phone);XCTAssertGreaterThan(fresh.binding.activationEpoch,waiting.binding.activationEpoch)
         let ids=try await next.repo.matchIDs();XCTAssertTrue(ids.isEmpty)
         if let started {let history=try await next.repo.cloudHistoryV4(scope:CloudSessionBridge.coreScope(scope));XCTAssertEqual(history.first?.facts.startIntent,started.startIntent);do {try await next.repo.validateAuthorityStartV4(started.startIntent!,now:old.date);XCTFail()}catch{}}

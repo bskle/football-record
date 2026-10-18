@@ -71,3 +71,5 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - Store 本地清表与 transport 副本分开记录；默认 transport purge unavailable，真实非空 canonical bytes 保留且整体 finished=false。正向仅受控确实空台账可确认，云/健康选项独立，capability/saga保留；026 负责所有 owned ledger 与 SDK staging 聚合清理，033 未审不提前接入。
 - 本 checkpoint 完整 Core 241/0（44/133/47/17）与 AccountKit 28/0（Cloud7/HTTP10/Auth3/Lifecycle4/Migration4）。日志 `023-5-migration-core-checkpoint.log` / `023-5-migration-account-checkpoint-green.log`。初次全 AccountKit 有旧100ms异步断言未等到replacement，改有界事件等待后重跑，失败原日志保留。
 - peer / 已审032联调 / SDK编译仍在执行，未标 whole023完成或双审。
+
+- 已审032普通合入 `aa9977805dfb172cf1ece605d1f575cf7684df72`，本树 merge `5cdd9be166db1a20330fa6c49805b15d843cf26d`。client recover 总带原 strict publicKey，完整参与原 domain 签名。notSent / beforeCommit 红2→绿：knownAbandoned仅结束原tuple未知尝试，显式新ID/challenge方可登录；迟到原auth bytes实际401，错误key不能恢复原DB。recover丢响应仍unknown并阻新ID，原COMMITlost仍同session，knownExpired/迁移knownRevoked各可显式fresh。选测 Auth5+Migration4=9/0，日志 `023-5-auth-abandon-*`；不宣称真实Apple。
