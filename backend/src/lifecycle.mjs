@@ -66,12 +66,14 @@ export function installLifecycle(api,state){
  function forceMigration(ctx,r){return write(ctx,r,'forceMigration',()=>{
    const m=lostReady(ctx,r);reauth(ctx,r.reauthenticationID,m.eligible_at);if(activeLock(ctx.accountID))fail('migrationBlocked');consume(r.reauthenticationID);return activate(ctx,r,m);
  },{active:false});}
- function peerGrant(ctx,r){return write(ctx,r,'peerGrant',({a})=>{
-   if(ctx.deviceID!==a.active_phone_id||r.activationEpoch!==ctx.activationEpoch)fail('activationMismatch',403);
+ function peerGrant(ctx,r){return write(ctx,r,'peerGrant',({a,d})=>{
+   if(d.role!=='phone'||ctx.deviceID!==a.active_phone_id||r.activationEpoch!==ctx.activationEpoch)fail('activationMismatch',403);
    const local=db.prepare('SELECT * FROM devices WHERE device_id=? AND account_id=? AND activation_epoch=?').get(r.localDeviceID,ctx.accountID,ctx.activationEpoch),remote=db.prepare('SELECT * FROM devices WHERE device_id=? AND account_id=? AND activation_epoch=?').get(r.remoteDeviceID,ctx.accountID,ctx.activationEpoch);
-   if(!local||!remote||local.role==='waiting'||remote.role==='waiting'||local.device_id===remote.device_id)fail('activationMismatch',403);
+   if(!local||!remote||local.device_id===remote.device_id)fail('activationMismatch',403);
+   const phone=local.role==='phone'&&remote.role==='watch'?local:local.role==='watch'&&remote.role==='phone'?remote:undefined;
+   if(!phone||phone.device_id!==a.active_phone_id)fail('activationMismatch',403);
    const prior=db.prepare('SELECT * FROM peer_grants WHERE account_id=? AND activation_epoch=? AND pairing_id=?').get(ctx.accountID,ctx.activationEpoch,r.pairingID);if(prior&&(prior.local_device_id!==r.localDeviceID||prior.remote_device_id!==r.remoteDeviceID))fail('idempotencyConflict');
-   const grantID=prior?.grant_id??randomUUID(),grant={grantID,pairingID:r.pairingID,localDeviceID:local.device_id,remoteDeviceID:remote.device_id,localPublicKey:local.public_key,remotePublicKey:remote.public_key,expiresAt:config.clock.now()+3600};
+   const grantID=prior?.grant_id??randomUUID(),grant={grantID,pairingID:r.pairingID,localDeviceID:local.device_id,remoteDeviceID:remote.device_id,localPublicKey:local.public_key,remotePublicKey:remote.public_key,localRole:local.role,remoteRole:remote.role,activePhoneID:a.active_phone_id,expiresAt:config.clock.now()+3600};
    const result=makeReceipt(config,ctx,r,'peerGrant','grantIssued',{}, {peerGrant:grant});db.prepare('INSERT INTO peer_grants VALUES(?,?,?,?,?,?,?) ON CONFLICT(grant_id) DO UPDATE SET result=excluded.result').run(grantID,ctx.accountID,ctx.activationEpoch,r.pairingID,local.device_id,remote.device_id,Buffer.from(canonicalJSON(result)));return result;
  });}
  function deleteStatus(r){
