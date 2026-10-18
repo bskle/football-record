@@ -5,11 +5,14 @@ import MatchCore
 public actor MatchStore {
     let db: SQLite
     let fault: StoreFault?
+    let authorityTrust: AuthorityTrustConfiguration?
     let syncEnvironment: PeerEnvironment
-    public init(url: URL, syncEnvironment: PeerEnvironment = .production) throws {
+    public init(url: URL, syncEnvironment: PeerEnvironment = .production, authorityTrust: AuthorityTrustConfiguration? = nil) throws {
+        self.authorityTrust = authorityTrust
         try syncEnvironment.validate(); db = try SQLite(url: url, fault: nil); fault = nil; self.syncEnvironment = syncEnvironment
     }
-    init(url: URL, fault: StoreFault, syncEnvironment: PeerEnvironment = .production) throws {
+    init(url: URL, fault: StoreFault, syncEnvironment: PeerEnvironment = .production, authorityTrust: AuthorityTrustConfiguration? = nil) throws {
+        self.authorityTrust = authorityTrust
         try syncEnvironment.validate(); db = try SQLite(url: url, fault: fault); self.fault = fault; self.syncEnvironment = syncEnvironment
     }
     public func close() throws { try db.close() }

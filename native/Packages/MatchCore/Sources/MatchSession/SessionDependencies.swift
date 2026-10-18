@@ -64,7 +64,7 @@ public struct UnavailableWorkoutGateway: WorkoutGateway {
 /// Namespace selects the actual database path; callers cannot relabel an already-open production store.
 public actor SQLiteSessionRepository: SessionRepository {
   public static let productionNamespace = "production"
-  private let store: MatchStore
+  let store: MatchStore
   private let syncIdentity: SyncRepositoryIdentity
   private let namespace: String
   public let databaseURL: URL
@@ -74,7 +74,7 @@ public actor SQLiteSessionRepository: SessionRepository {
         (byte >= 97 && byte <= 122) || (byte >= 48 && byte <= 57) || byte == 45 || byte == 95
       }
   }
-  public init(rootDirectory: URL, databaseNamespace: String) throws {
+  public init(rootDirectory: URL, databaseNamespace: String, authorityTrust: AuthorityTrustConfiguration? = nil) throws {
     // APFS may fold case and Unicode. Only canonical ASCII names reach the path factory.
     guard Self.isCanonicalNamespace(databaseNamespace) else { throw SessionError.invalidRequest }
     namespace = databaseNamespace
@@ -82,7 +82,7 @@ public actor SQLiteSessionRepository: SessionRepository {
     let directory = rootDirectory.appendingPathComponent(databaseNamespace, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     databaseURL = directory.appendingPathComponent("matches.sqlite")
-    store = try MatchStore(url: databaseURL, syncEnvironment: databaseNamespace == Self.productionNamespace ? .production : .development(databaseNamespace: databaseNamespace))
+    store = try MatchStore(url: databaseURL, syncEnvironment: databaseNamespace == Self.productionNamespace ? .production : .development(databaseNamespace: databaseNamespace), authorityTrust: authorityTrust)
   }
   public func databaseNamespace() async -> String { namespace }
   public func matchIDs() async throws -> [String] { try await store.matchIDs() }
@@ -154,4 +154,17 @@ public actor PersistentDeviceIdentityProvider: DeviceIdentityProvider {
     load = task
     return try await task.value
   }
+}
+
+
+extension SQLiteSessionRepository: AuthorityRepository {
+  public func bindAccountV4(_ binding: AccountBindingV4) async throws { try await store.bindAccountV4(binding) }
+  public func accountBindingV4() async throws -> AccountBindingV4? { try await store.accountBindingV4() }
+  public func suspendAccountV4() async throws { try await store.suspendAccountV4() }
+  public func prepareControlV4(_ intent: ControlIntentV1) async throws -> ControlIntentReceiptV4 { try await store.prepareControlV4(intent) }
+  public func pendingControlsV4() async throws -> [ControlIntentV1] { try await store.pendingControlsV4() }
+  public func recordAuthorityResultV4(_ receipt: VerifiedAuthorityReceiptV1) async throws -> AuthorityReceiptV4 { try await store.recordAuthorityResultV4(receipt) }
+  public func recordLiveLockV4(_ proof: VerifiedLiveLockV1, now: Date) async throws { try await store.recordLiveLockV4(proof,now:now) }
+  public func authorityStateV4(matchID: String, now: Date) async throws -> AuthorityStateV4 { try await store.authorityStateV4(matchID:matchID,now:now) }
+  public func validateAuthorityStartV4(_ intent: StartIntent, now: Date) async throws { try await store.validateAuthorityStartV4(intent,now:now) }
 }

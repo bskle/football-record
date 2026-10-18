@@ -41,6 +41,7 @@ public actor MatchSession {
   }
   func validateEnvironment() async throws {
     let namespace = await store.databaseNamespace()
+    if let authority = store as? any AuthorityRepository, let binding = try await authority.accountBindingV4(), binding.suspended { throw AuthorityError.identityChanged }
     guard SQLiteSessionRepository.isCanonicalNamespace(namespace) else {
       throw SessionError.developmentIsolationRequired
     }
@@ -260,9 +261,10 @@ public actor MatchSession {
     guard let intent = request.startIntent, intent.recordingDeviceID == device,
       case .start(let starter) = request.action
     else { throw SessionError.wrongRecordingDevice }
+    let managed = try await authorityManaged()
     await acquire(request.matchID)
     do {
-      if let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
+      if !managed, let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
         try validateSaved(saved.request, for: request, device: device)
         let receipt = try await store.commitV2(saved.request)
         let snapshot = try await snapshot(matchID: request.matchID)
@@ -278,8 +280,9 @@ public actor MatchSession {
         guard !other.business.diagnostics.contains(where: { $0.severity == .blocking }) else {
           throw SessionError.blockedDiagnostics
         }
+        let released = try await authorityReleased(match)
         if match != request.matchID
-          && (!terminal(other) || other.business.descriptor.backendLockState != .releasedConfirmed)
+          && (!terminal(other) || (other.business.descriptor.backendLockState != .releasedConfirmed && !released))
         {
           throw SessionError.multipleCandidates
         }
@@ -308,6 +311,12 @@ public actor MatchSession {
     }
     await acquire(request.matchID)
     defer { release(request.matchID) }
+    try await requireAuthorityStart(intent)
+    if managed {
+      let fresh = try await store.snapshotV2(matchID: request.matchID)
+      if terminal(fresh) { throw SessionError.terminalMatch }
+      if case .development = environment, permit != DevelopmentStartFixture.permit(for: intent) { throw SessionError.developmentIsolationRequired }
+    }
     if let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
       try validateSaved(saved.request, for: request, device: device)
       let receipt = try await store.commitV2(saved.request)
