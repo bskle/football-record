@@ -75,7 +75,7 @@ public actor SQLiteSessionRepository: SessionRepository {
         (byte >= 97 && byte <= 122) || (byte >= 48 && byte <= 57) || byte == 45 || byte == 95
       }
   }
-  public init(rootDirectory: URL, databaseNamespace: String, authorityTrust: AuthorityTrustConfiguration? = nil) throws {
+  public init(rootDirectory: URL, databaseNamespace: String, authorityTrust: AuthorityTrustConfiguration? = nil, cloudSavePolicy: CloudSaveProofPolicy = .unavailable) throws {
     // APFS may fold case and Unicode. Only canonical ASCII names reach the path factory.
     guard Self.isCanonicalNamespace(databaseNamespace) else { throw SessionError.invalidRequest }
     namespace = databaseNamespace
@@ -83,7 +83,7 @@ public actor SQLiteSessionRepository: SessionRepository {
     let directory = rootDirectory.appendingPathComponent(databaseNamespace, isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     databaseURL = directory.appendingPathComponent("matches.sqlite")
-    store = try MatchStore(url: databaseURL, syncEnvironment: databaseNamespace == Self.productionNamespace ? .production : .development(databaseNamespace: databaseNamespace), authorityTrust: authorityTrust)
+    store = try MatchStore(url: databaseURL, syncEnvironment: databaseNamespace == Self.productionNamespace ? .production : .development(databaseNamespace: databaseNamespace), authorityTrust: authorityTrust, cloudSavePolicy: cloudSavePolicy)
   }
   public func databaseNamespace() async -> String { namespace }
   public func matchIDs() async throws -> [String] { try await store.matchIDs() }

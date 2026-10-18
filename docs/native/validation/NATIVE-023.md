@@ -29,3 +29,11 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - 真实 Node + 文件 SQLite + TrackingGateway：在线获知终态的重开恢复红（续采/替代 start）→绿；全 HTTP 单轮 9/0，包含已知 terminal 离线重开、recover callback 门闩之后拒替代、网络 status 失败仍同 match/recorder 恢复并建合法新 segment。
 - 新开首次物理 start 仍须 fresh held；未知旧 start 仅 reconcile 原 token。terminal/release 作为持久 fence，dispatch、planRecovery、callback 和 replacement 读同 facade，网络在 queue 外。
 - `023-2-fence-core-regression.log` 完整 Core 包当前单轮通过（其中含本树尚在后续 slice 的 2 项 cloud 事务测试；不当作已提交 cloud slice 完成）。真实 Workout/设备仍留 024/026。
+
+## 023.3 Core 事务 checkpoint（纵向仍在执行）
+
+- 云 facts/cursor/first receipt 原子性、四个 SQL fault close/reopen、双连接 CAS、原 receipt 历史只读及 generation reset：选测通过；坏 canonical scope/deletion 实际红 1 项 / 2 断言后补 validating decode。
+- cloud-only / release-only 保持 pending；绑定后两种 legacy completion API 均拒绝绕过；双 proof 才完成，纠错失效旧 completion 后可用新 cloud proof 结合永久 release 重建。
+- 当前完整 Core 包单轮 235/0（Core44 / Store127 / Session47 / Sync17），原始日志 `023-3-core-checkpoint.log`。schema0～3、fault、partial4/future5 与原 canonical 回归均在本轮。
+- 未知云比赛仅写同 facade 的只读 `cloud_history_v4`；原 acquire 验签只授原 match/recorder 历史读取，保留原 epoch，无合成 permit，不进入 matchIDs/录制恢复候选。此为历史恢复，不是原 Workout 恢复；025 应通过 `cloudHistoryV4(scope:)` 展示。
+- AccountKit CloudLedger bridge / normal HTTP / abnormal 本地事务和完整纵向尚在后续执行，本 checkpoint 不表示 023.3 全部完成。

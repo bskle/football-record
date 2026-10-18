@@ -282,6 +282,7 @@ public actor MatchSession {
         guard !other.business.diagnostics.contains(where: { $0.severity == .blocking }) else {
           throw SessionError.blockedDiagnostics
         }
+        try await updateAuthorityFence(other)
         let released = try await authorityReleased(match)
         if match != request.matchID
           && (!terminal(other) || (other.business.descriptor.backendLockState != .releasedConfirmed && !released))

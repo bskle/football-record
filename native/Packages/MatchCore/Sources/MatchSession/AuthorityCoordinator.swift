@@ -21,7 +21,7 @@ extension MatchSession: AuthorityInboundCoordinator {
     func authorityReleased(_ matchID:String) async throws -> Bool {
         guard try await authorityManaged() else { return false }
         let state=try await authorityRepository().authorityStateV4(matchID:matchID,now:clock.now())
-        return state.status == .releasedNormal || state.status == .releasedAbnormal
+        return state.status == .terminal || state.status == .releasedNormal || state.status == .releasedAbnormal
     }
     public func prepareAuthorityControl(_ intent:ControlIntentV1) async throws -> ControlIntentReceiptV4 {
         try await validateEnvironment();let repository=try authorityRepository()
@@ -35,6 +35,7 @@ extension MatchSession: AuthorityInboundCoordinator {
         await acquire(key);defer { release(key) }
         let result=try await repository.recordAuthorityResultV4(receipt)
         if receipt.body.result == .releasedNormal || receipt.body.result == .releasedAbnormal { authorityTerminalMatches.insert(receipt.body.matchID); scheduleCapture(receipt.body.matchID) }
+        if receipt.body.result == .releasedNormal {try await completeNormallyLocked(receipt.body.matchID)}
         if !receipt.body.matchID.isEmpty,let snapshot=try? await store.snapshotV2(matchID:receipt.body.matchID) { publish(try projected(snapshot)) }
         return result
     }

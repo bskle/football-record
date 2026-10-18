@@ -105,6 +105,7 @@ extension MatchStore {
                                       expectedGeneration: Int64, now: Date) throws {
         try preservingDiagnostics(matchID: evidence.matchID) {
             try db.transaction {
+                guard try currentBindingV4() == nil else { throw StoreError.trustUnavailable }
                 let snapshot = try loadSnapshot(matchID: evidence.matchID)
                 guard snapshot.generation == expectedGeneration else { throw StoreError.staleGeneration }
                 guard !snapshot.diagnostics.contains(where: { $0.severity == .blocking }) else { throw StoreError.unresolvedDiagnostics }
@@ -123,9 +124,21 @@ extension MatchStore {
     }
 
     /// Both snapshot APIs call this boundary, so old evidence cannot bypass capture invalidation.
-    func filteredCompletionEvidence(descriptor: MatchDescriptor, legacy: TrustedCompletionEvidence?) throws -> TrustedCompletionEvidence? {
+    func filteredCompletionEvidence(descriptor: MatchDescriptor, events: [MatchEvent], legacy: TrustedCompletionEvidence?) throws -> TrustedCompletionEvidence? {
         try validateCaptureAbsenceIntegrity(descriptor: descriptor)
         let revisions = try loadCaptureRevisions(descriptor: descriptor)
+        if try currentBindingV4() != nil {
+            let state=try authorityStateV4(matchID:descriptor.matchID,now:descriptor.startIntent.requestedAt)
+            guard state.status == .releasedNormal,state.verifiedNormalRelease != nil else {return nil}
+            let current=try CloudFactSetV1(startIntent:descriptor.startIntent,starter:descriptor.starter,events:events,captureRevisions:revisions)
+            var matched=false
+            for row in try db.rows("SELECT payload,checksum FROM cloud_checkpoints_v4 WHERE match_id=?",[.text(descriptor.matchID)]) {
+                let input=try checkedV4(CloudSaveInputV1.self,row:row,table:"cloud_checkpoints_v4",key:descriptor.matchID)
+                _=try VerifiedCloudSaveV1.verifyReadback(input,policy:cloudSavePolicy)
+                if case .matchFacts(let facts)=try input.record.payload,facts==current {matched=true;break}
+            }
+            guard matched else {return nil}
+        }
         if let row = try db.rows("SELECT evidence,capture_digest FROM completion_v2 WHERE match_id=?", [.text(descriptor.matchID)]).first {
             let evidence = try decode(TrustedCompletionEvidence.self, row[0], table: "completion_v2", key: descriptor.matchID)
             guard evidence.matchID == descriptor.matchID else { throw corruptCapture("completion_v2", key: descriptor.matchID, raw: row[0].data ?? Data()) }
