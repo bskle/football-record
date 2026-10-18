@@ -114,12 +114,27 @@ public struct CloudDeletion: Codable, Sendable, Equatable {
     }
 }
 public struct CloudCheckpoint: Codable, Sendable, Equatable {
+    public static let accountAnchorPrefix = "account-checkpoint:"
     public let matchID, checkpointID: String
     public let recordIDs: [String]
+    /// Account control metadata only; callers persist the control UUID and supply current confirmed fact IDs.
+    public static func accountMatchID(for scope: CloudScope) -> String { accountAnchorPrefix + scope.stableZoneKey }
+    public static func account(scope: CloudScope, checkpointID: UUID, recordIDs: [String]) throws -> Self {
+        try Self(matchID: accountMatchID(for: scope), checkpointID: checkpointID.uuidString.lowercased(), recordIDs: recordIDs)
+    }
     public init(matchID: String, checkpointID: String, recordIDs: [String]) throws {
         for id in [matchID, checkpointID] + recordIDs { try CloudCodec.id(id) }
-        guard !recordIDs.isEmpty, Set(recordIDs).count == recordIDs.count else { throw CloudError(.invalidPayload) }
+        let account = matchID.hasPrefix(Self.accountAnchorPrefix)
+        if account {
+            let key = matchID.dropFirst(Self.accountAnchorPrefix.count)
+            guard key.utf8.count == 64, key.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                  let uuid = UUID(uuidString: checkpointID), checkpointID == uuid.uuidString.lowercased() else { throw CloudError(.invalidPayload) }
+        }
+        guard (account || !recordIDs.isEmpty), Set(recordIDs).count == recordIDs.count else { throw CloudError(.invalidPayload) }
         self.matchID = matchID; self.checkpointID = checkpointID; self.recordIDs = recordIDs.sorted()
+    }
+    func validate(scope: CloudScope) throws {
+        if matchID.hasPrefix(Self.accountAnchorPrefix), matchID != Self.accountMatchID(for: scope) { throw CloudError(.invalidPayload) }
     }
     private enum CodingKeys: String, CodingKey { case matchID, checkpointID, recordIDs }
     public init(from decoder: any Decoder) throws {
@@ -138,6 +153,7 @@ public struct CloudRecord: Codable, Sendable, Equatable {
     public let canonicalBytes: Data
     public var payload: CloudPayload { get throws { try CloudCodec.decode(CloudPayload.self, canonicalBytes, limit: CloudCodec.maximumBytes) } }
     public init(scope: CloudScope, payload: CloudPayload) throws {
+        if case .checkpoint(let checkpoint) = payload { try checkpoint.validate(scope: scope) }
         let bytes = try CloudCodec.encode(payload)
         guard bytes.count <= CloudCodec.maximumBytes else { throw CloudError(.payloadTooLarge) }
         self.scope = scope; self.canonicalBytes = bytes; self.digest = CloudCodec.hash(bytes)
