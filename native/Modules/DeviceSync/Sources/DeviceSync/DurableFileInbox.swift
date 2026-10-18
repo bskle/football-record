@@ -11,13 +11,16 @@ public final class DurableFileInbox: @unchecked Sendable {
     public let directory: URL
     let limits: InboxLimits
     let lock = NSLock()
+    let storage: DeviceSyncStorageContext
+    func critical<T>(_ body: () throws -> T) throws -> T { try storage.withActive { try lock.withLock(body) } }
     public init(directory: URL, limits: InboxLimits? = nil) throws {
         self.directory = directory.standardizedFileURL; self.limits = try limits ?? InboxLimits()
-        do {
+        storage = try DeviceSyncStorageContext.component(directory, role: "inbox")
+        do { try storage.withActive {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isDirectory == true, values.isSymbolicLink != true else { throw DeviceSyncError.fileIO }
-        } catch { throw DeviceSyncError.fileIO }
+        } } catch { throw error }
     }
     func frameURL(_ id: String) throws -> URL {
         guard id.hasPrefix("frame-"), isDigest(String(id.dropFirst(6))) else { throw DeviceSyncError.invalidFrame }
@@ -51,12 +54,12 @@ public final class DurableFileInbox: @unchecked Sendable {
         try? canonical(InboxFailure(transportDeliveryID: String(id.prefix(128)), issue: error)).write(to: directory.appendingPathComponent("last-error.json"), options: .atomic)
     }
     public func adoptFile(_ source: URL) throws -> SyncDelivery {
-        do { return try adoptData(read(source)) }
-        catch let error as DeviceSyncError { lock.withLock { audit(error, id: source.lastPathComponent) }; throw error }
-        catch { lock.withLock { audit(.fileIO, id: source.lastPathComponent) }; throw DeviceSyncError.fileIO }
+        do { return try storage.withActive { try adoptData(read(source)) } }
+        catch let error as DeviceSyncError { try? critical { audit(error, id: source.lastPathComponent) }; throw error }
+        catch { try? critical { audit(.fileIO, id: source.lastPathComponent) }; throw DeviceSyncError.fileIO }
     }
     public func adoptData(_ bytes: Data) throws -> SyncDelivery {
-        try lock.withLock {
+        try critical {
             guard !bytes.isEmpty, bytes.count <= limits.maximumFrameBytes else { audit(.quotaExceeded, id: "incoming"); throw DeviceSyncError.quotaExceeded }
             let id = "frame-" + digest(bytes)
             do {
@@ -74,7 +77,7 @@ public final class DurableFileInbox: @unchecked Sendable {
         }
     }
     public func scan() -> InboxScan {
-        lock.withLock {
+        (try? critical {
             var frames: [SyncDelivery] = [], failures: [InboxFailure] = [], used = 0
             do {
                 for file in try inventory() {
@@ -90,11 +93,11 @@ public final class DurableFileInbox: @unchecked Sendable {
                 }
             } catch { failures.append(InboxFailure(transportDeliveryID: "inbox", issue: .fileIO)); audit(.fileIO, id: "inbox") }
             return InboxScan(frames: frames, failures: failures)
-        }
+        }) ?? InboxScan(frames: [], failures: [InboxFailure(transportDeliveryID: "inbox", issue: .erased)])
     }
     /// Only SyncTransport.didPersistDelivery calls this for committed application fragments.
     public func didPersist(_ transportDeliveryID: String) throws {
-        try lock.withLock {
+        try critical {
             let url = try frameURL(transportDeliveryID)
             guard FileManager.default.fileExists(atPath: url.path) else { return }
             do { _ = try verified(url); try FileManager.default.removeItem(at: url) }

@@ -7,11 +7,13 @@ private struct PairingEnvelope: Codable { let state: PairingState; let checksum:
 final class PairingBaseline: @unchecked Sendable {
     let directory: URL
     private let lock = NSLock()
+    private let storage: DeviceSyncStorageContext
     private var state: PairingState?
-    var isInvalidated: Bool { lock.withLock { state?.invalidated ?? false } }
+    var isInvalidated: Bool { (try? storage.withActive { lock.withLock { state?.invalidated ?? false } }) ?? true }
     init(directory: URL) throws {
         self.directory = directory
-        do {
+        storage = try DeviceSyncStorageContext.component(directory, role: "state")
+        do { try storage.withActive {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isDirectory == true, values.isSymbolicLink != true else { throw DeviceSyncError.fileIO }
@@ -26,11 +28,11 @@ final class PairingBaseline: @unchecked Sendable {
                 guard raw == (try canonical(saved)), isDigest(saved.state.fingerprint), saved.checksum == digest(try canonical(saved.state)) else { throw DeviceSyncError.corruptFile }
                 state = saved.state
             }
-        } catch let error as DeviceSyncError { throw error }
+        } } catch let error as DeviceSyncError { throw error }
         catch { throw DeviceSyncError.corruptFile }
     }
     @discardableResult func observe(_ fingerprint: String) throws -> Bool {
-        try lock.withLock {
+        try storage.withActive { try lock.withLock {
             let hash = digest(Data(fingerprint.utf8))
             if let state, state.invalidated { return true }
             if state?.fingerprint == hash { return false }
@@ -44,6 +46,10 @@ final class PairingBaseline: @unchecked Sendable {
                 state = PairingState(fingerprint: updated.fingerprint, invalidated: true)
                 throw DeviceSyncError.fileIO
             }
-        }
+        } }
+    }
+    static func validate(_ raw: Data) throws {
+        let saved = try JSONDecoder().decode(PairingEnvelope.self, from: raw)
+        guard raw.count <= 2048, raw == (try canonical(saved)), isDigest(saved.state.fingerprint), saved.checksum == digest(try canonical(saved.state)) else { throw DeviceSyncErasureError.unknownInventory }
     }
 }

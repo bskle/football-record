@@ -63,6 +63,7 @@ public actor WCSessionTransport: SyncTransport {
                     return issue == .quotaExceeded ? .deferred : .unavailable
                 }
             }, file: { [weak self] source in
+                guard !gate.isInvalidated else { return }
                 do {
                     let frame = try inbox.adoptFile(source)
                     Task { await self?.deliver(frame) }

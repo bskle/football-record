@@ -10,16 +10,19 @@ enum OutgoingQueueFault { case afterRecordRemoval }
 final class OutgoingFileQueue: @unchecked Sendable {
     let directory: URL
     let lock = NSLock()
+    let storage: DeviceSyncStorageContext
+    func critical<T>(_ body: () throws -> T) throws -> T { try storage.withActive { try lock.withLock(body) } }
     let limits: InboxLimits
     let fault: OutgoingQueueFault?
     init(directory: URL, limits: InboxLimits? = nil, fault: OutgoingQueueFault? = nil) throws {
         self.fault = fault
         self.directory = directory.standardizedFileURL; self.limits = try limits ?? InboxLimits()
-        do {
+        storage = try DeviceSyncStorageContext.component(directory, role: "outbox")
+        do { try storage.withActive {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
             guard values.isDirectory == true, values.isSymbolicLink != true else { throw DeviceSyncError.fileIO }
-        } catch { throw DeviceSyncError.fileIO }
+        } } catch { throw error }
     }
     func key(_ id: String) throws -> String {
         guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, id.utf8.count <= 4096 else { throw DeviceSyncError.invalidFrame }
@@ -36,7 +39,7 @@ final class OutgoingFileQueue: @unchecked Sendable {
         let attrs = try FileManager.default.attributesOfItem(atPath: metadata.path)
         guard attrs[.type] as? FileAttributeType == .typeRegular, (attrs[.size] as? NSNumber)?.intValue ?? Int.max <= 8192 else { throw DeviceSyncError.corruptFile }
         let raw = try Data(contentsOf: metadata), saved = try JSONDecoder().decode(OutgoingRecord.self, from: raw)
-        guard raw == (try canonical(saved)), saved.deliveryID == id, isDigest(saved.checksum), UUID(uuidString: saved.token) != nil, saved.byteCount > 0, saved.byteCount <= limits.maximumFrameBytes else { throw DeviceSyncError.corruptFile }
+        guard raw == (try canonical(saved)), Data(saved.deliveryID.utf8) == Data(id.utf8), isDigest(saved.checksum), UUID(uuidString: saved.token) != nil, saved.byteCount > 0, saved.byteCount <= limits.maximumFrameBytes else { throw DeviceSyncError.corruptFile }
         let fileAttrs = try FileManager.default.attributesOfItem(atPath: file.path)
         guard fileAttrs[.type] as? FileAttributeType == .typeRegular, (fileAttrs[.size] as? NSNumber)?.intValue == saved.byteCount else { throw DeviceSyncError.corruptFile }
         let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
@@ -45,14 +48,14 @@ final class OutgoingFileQueue: @unchecked Sendable {
         return saved
     }
     func existing(_ id: String, bytes: Data) throws -> DriverFileTransfer? {
-        try lock.withLock {
+        try critical {
             guard let saved = try load(id) else { return nil }
             guard saved.checksum == digest(bytes), saved.byteCount == bytes.count else { throw DeviceSyncError.conflictingDelivery }
             return DriverFileTransfer(deliveryID: id, checksum: saved.checksum, token: saved.token, url: try urls(id).1)
         }
     }
     func stage(_ bytes: Data, id: String) throws -> DriverFileTransfer {
-        try lock.withLock {
+        try critical {
             guard !bytes.isEmpty, bytes.count <= limits.maximumFrameBytes else { throw DeviceSyncError.quotaExceeded }
             let (metadata, file) = try urls(id), checksum = digest(bytes)
             if let saved = try load(id) { guard saved.checksum == checksum, saved.byteCount == bytes.count else { throw DeviceSyncError.conflictingDelivery } }
@@ -77,7 +80,7 @@ final class OutgoingFileQueue: @unchecked Sendable {
         }
     }
     func recoverOrphans(outstanding: [DriverFileTransfer]) throws {
-        try lock.withLock {
+        try critical {
             let retained = try Set(outstanding.map { try key($0.deliveryID) })
             for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) where file.pathExtension == "frame" {
                 let key = file.deletingPathExtension().lastPathComponent
@@ -92,7 +95,7 @@ final class OutgoingFileQueue: @unchecked Sendable {
         }
     }
     func completed(_ transfer: DriverFileTransfer) throws {
-        try lock.withLock {
+        try critical {
             let (metadata, file) = try urls(transfer.deliveryID)
             guard let saved = try load(transfer.deliveryID) else { return }
             guard saved.token == transfer.token else { return } // late completion from an older attempt

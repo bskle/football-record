@@ -3,7 +3,7 @@ import CryptoKit
 
 public enum DeviceSyncError: String, Error, Codable, Sendable, Equatable {
     case unavailable, inactive, activationFailed, deliveryFailed, invalidReply
-    case invalidFrame, quotaExceeded, fileIO, corruptFile, conflictingDelivery
+    case invalidFrame, quotaExceeded, fileIO, corruptFile, conflictingDelivery, erased
 }
 public enum DeviceSyncPolicy {
     /// Matches the frozen MatchSync v2 encoded-frame bound; no business decoding occurs here.

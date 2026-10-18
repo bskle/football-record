@@ -57,7 +57,9 @@ actor EventLog {
 struct TransportFixture: Sendable {
     let root: URL, inbox: DurableFileInbox, driver: FakeWCDriver, transport: WCSessionTransport
     init() throws {
-        root = FileManager.default.temporaryDirectory.appendingPathComponent("wc-transport-" + UUID().uuidString)
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("wc-transport-" + UUID().uuidString).appendingPathComponent("DeviceSync")
+        let context = try DeviceSyncStorageContext(root: root)
+        try context.bind(DeviceSyncNamespaceBinding(namespaceID: UUID().uuidString, accountID: "fixture-account", cloudSpaceID: "fixture-space", zoneID: "fixture-zone", activationEpoch: 1, catalogRevision: 1, catalogDigest: String(repeating: "a", count: 64), rootIdentity: context.rootIdentity))
         inbox = try DurableFileInbox(directory: root.appendingPathComponent("inbox")); driver = FakeWCDriver()
         transport = try WCSessionTransport(driver: driver, inbox: inbox, outboxDirectory: root.appendingPathComponent("outbox"))
     }
