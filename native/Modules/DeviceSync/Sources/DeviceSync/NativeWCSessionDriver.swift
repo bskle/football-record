@@ -1,6 +1,11 @@
 import Foundation
 
 enum DeviceSyncTransferOwnership { case owned, foreign, unresolved }
+func deviceSyncSourceInsideRoot(_ source: URL, root: URL) -> Bool {
+    guard let actual = try? DeviceSyncStorageContext.identity(source.deletingLastPathComponent(), directory: true),
+          let owned = try? DeviceSyncStorageContext.identity(root.appendingPathComponent("outbox"), directory: true) else { return false }
+    return actual == owned
+}
 func deviceSyncDrainInventory<Handle>(current: () throws -> [Handle], ownership: (Handle) throws -> DeviceSyncTransferOwnership, cancel: (Handle) throws -> Void) throws -> DeviceSyncDrainStatus {
     var unknown = false
     for transfer in try current() {
@@ -24,15 +29,18 @@ func deviceSyncDrainInventory<Handle>(current: () throws -> [Handle], ownership:
 
 /// The same pure classification runs in host tests and the native cancellation path.
 func deviceSyncTransferOwnership(namespaceID: String?, ownerDigest: String?, transfer: DriverFileTransfer?, protocolMatches: Bool, sourceInsideRoot: Bool, request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) throws -> DeviceSyncTransferOwnership {
-    guard protocolMatches else { return sourceInsideRoot ? .unresolved : .foreign }
-    guard let transfer else { return .unresolved }
+    let identity = transfer.flatMap { try? DeviceSyncTransferIdentity(deliveryIDHash: digest(Data($0.deliveryID.utf8)), checksum: $0.checksum, token: $0.token) }
+    let original = identity.map { expected.contains($0) } ?? false
+    let ownDigest = try request.binding.ownerDigest
+    let ownNamespace = namespaceID.map { Data($0.utf8) == Data(request.binding.namespaceID.utf8) } ?? false
+    guard protocolMatches else { return sourceInsideRoot || original || ownNamespace || ownerDigest == ownDigest ? .unresolved : .foreign }
+    guard transfer != nil, identity != nil else { return .unresolved }
     if let namespaceID {
         guard UUID(uuidString: namespaceID) != nil, let ownerDigest, isDigest(ownerDigest) else { return .unresolved }
-        guard Data(namespaceID.utf8) == Data(request.binding.namespaceID.utf8) else { return .foreign }
-        guard ownerDigest == (try request.binding.ownerDigest) else { return .unresolved }
+        if !ownNamespace { return sourceInsideRoot || original || ownerDigest == ownDigest ? .unresolved : .foreign }
+        guard ownerDigest == ownDigest else { return .unresolved }
     } else if ownerDigest != nil { return .unresolved }
-    guard let identity = try? DeviceSyncTransferIdentity(deliveryIDHash: digest(Data(transfer.deliveryID.utf8)), checksum: transfer.checksum, token: transfer.token) else { return .unresolved }
-    return expected.contains(identity) ? .owned : .unresolved
+    return original ? .owned : .unresolved
 }
 
 public extension WCSessionTransport {
@@ -144,8 +152,8 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
     private func complete(_ id: UUID, with result: Result<TransportReply, any Error>) {
         let value = lock.withLock { pending.removeValue(forKey: id) }; value?.finish(result)
     }
-    private func fileValue(_ file: WCSessionFile) -> DriverFileTransfer? {
-        guard let metadata = file.metadata, metadata["protocol"] as? String == "football-record.sync-fragment.v2",
+    private func fileValue(_ file: WCSessionFile, requireProtocol: Bool = true) -> DriverFileTransfer? {
+        guard let metadata = file.metadata, (!requireProtocol || metadata["protocol"] as? String == "football-record.sync-fragment.v2"),
               let id = metadata["deliveryID"] as? String, validOpaqueID(id), let checksum = metadata["checksum"] as? String, isDigest(checksum),
               let token = metadata["token"] as? String, UUID(uuidString: token) != nil else { return nil }
         return DriverFileTransfer(deliveryID: id, checksum: checksum, token: token, url: file.fileURL)
@@ -192,8 +200,12 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
     }
     private func ownership(_ transfer: WCSessionFileTransfer, request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) throws -> DeviceSyncTransferOwnership {
         let metadata = transfer.file.metadata
-        let path = Data(transfer.file.fileURL.standardizedFileURL.path.utf8), prefix = Data((storage.root.appendingPathComponent("outbox").path + "/").utf8)
-        return try deviceSyncTransferOwnership(namespaceID: metadata?["storageNamespace"] as? String, ownerDigest: metadata?["storageOwner"] as? String, transfer: fileValue(transfer.file), protocolMatches: metadata?["protocol"] as? String == "football-record.sync-fragment.v2", sourceInsideRoot: path.starts(with: prefix), request: request, expected: expected)
+        // Present-but-wrong-type storage tags cannot silently become legacy nil/nil.
+        if let metadata {
+            if metadata["storageNamespace"] != nil && !(metadata["storageNamespace"] is String) { return .unresolved }
+            if metadata["storageOwner"] != nil && !(metadata["storageOwner"] is String) { return .unresolved }
+        }
+        return try deviceSyncTransferOwnership(namespaceID: metadata?["storageNamespace"] as? String, ownerDigest: metadata?["storageOwner"] as? String, transfer: fileValue(transfer.file, requireProtocol: false), protocolMatches: metadata?["protocol"] as? String == "football-record.sync-fragment.v2", sourceInsideRoot: deviceSyncSourceInsideRoot(transfer.file.fileURL, root: storage.root), request: request, expected: expected)
     }
     fileprivate func receivedMessage(_ bytes: Data) -> TransportReply {
         (try? storage.withActive {

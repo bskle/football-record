@@ -28,3 +28,9 @@ root+m2 已通过方案方向与 root 最终决定。输入、工作树和审阅
 2. 实际原生 activate/sendMessageData/transferFile/cancel 调用在同 gate；native对象不跨 Task，回调先释放 driver 锁再进 storage。保留 v2 canonical/hash 与旧协议 required functions。
 3. 完整 DeviceSync host；fresh arm64 iOS17 sim/device、watchOS10 sim/device 四编译。README/卡记录真实范围和026桥接责任。
 4. 精确 manifest/source/final、clean 停写交 root+m2，不 merge/push/archive。最终卡收尾也审阅。
+
+## 审查补充边界
+
+固定durable/native两个checkpoint均非最终PASS。四个正式finding逐项实际红绿后再进行一次whole source/final双审与四最低SDK：receipt两入口重放必须当前strict zero；control统一64KiB encoded budget且未来receipt先于进度；本卷same-inode case alias在任何standalone构造前拒绝；原生外tag不能掩盖实际outbox inode/冻结transfer/owner digest矛盾。真正foreign队列保持，unresolved不取消也不完成。
+
+保存旧19a/b0输入与原日志；新增证据另名不覆写。schema0既存文件不得重建，未知control不得作为fresh绑定；owner文件永久保留，FD仅在活handle之间共享，最后handle释放关闭。真实SDK只编译，所有runtime采用本机临时SQLite/文件、子进程与受控driver。

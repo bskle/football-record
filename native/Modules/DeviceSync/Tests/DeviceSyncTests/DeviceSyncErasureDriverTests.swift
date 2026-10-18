@@ -142,7 +142,9 @@ extension DeviceSyncErasureDriverTests {
     }
     func testNativeForeignAndMalformedInventoryAreNeverSilentlyOwnedOrDropped() throws {
         let f = try ManagedErasureFixture(), transfer = try f.queue().stage(Data("original".utf8), id: "id")
-        XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: UUID().uuidString, ownerDigest: String(repeating: "d", count: 64), transfer: transfer, protocolMatches: true, sourceInsideRoot: false, request: f.request, expected: []), .foreign)
+        let other = try ManagedErasureFixture(account: "other-account"), foreign = try other.queue().stage(Data("foreign-original".utf8), id: "foreign-id")
+        XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: other.binding.namespaceID, ownerDigest: other.binding.ownerDigest, transfer: foreign, protocolMatches: true, sourceInsideRoot: false, request: f.request, expected: []), .foreign)
+        XCTAssertEqual(try Data(contentsOf: foreign.url), Data("foreign-original".utf8))
         XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: nil, ownerDigest: nil, transfer: nil, protocolMatches: true, sourceInsideRoot: false, request: f.request, expected: []), .unresolved)
         XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: "bad", ownerDigest: nil, transfer: transfer, protocolMatches: true, sourceInsideRoot: false, request: f.request, expected: []), .unresolved)
         XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: nil, ownerDigest: nil, transfer: nil, protocolMatches: false, sourceInsideRoot: false, request: f.request, expected: []), .foreign)
@@ -183,5 +185,40 @@ extension DeviceSyncErasureDriverTests {
         outstanding.removeAll { $0 == "owned" } // controlled late SDK completion, not a business ACK
         let drained = try deviceSyncDrainInventory(current: { outstanding }, ownership: { _ in .foreign }, cancel: { _ in XCTFail("no target left") })
         XCTAssertEqual(drained, .drained); XCTAssertEqual(outstanding, ["foreign"])
+    }
+}
+
+private struct ConflictingNativeOwnerDriver: DeviceSyncErasureDriving {
+    let transfer: DriverFileTransfer
+    let otherNamespace: String
+    func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus {
+        try deviceSyncDrainInventory(current: { [transfer] }, ownership: {
+            try deviceSyncTransferOwnership(namespaceID: otherNamespace, ownerDigest: String(repeating: "c", count: 64), transfer: $0, protocolMatches: true, sourceInsideRoot: true, request: request, expected: expected)
+        }, cancel: { _ in XCTFail("contradictory metadata must not expand cancellation") })
+    }
+}
+extension DeviceSyncErasureDriverTests {
+    func testNativeForeignTagCannotHideRootOrFrozenTransferEvidence() throws {
+        let f = try ManagedErasureFixture(), transfer = try f.queue().stage(Data("ours".utf8), id: "original")
+        let expected = try DeviceSyncTransferIdentity(deliveryIDHash: digest(Data(transfer.deliveryID.utf8)), checksum: transfer.checksum, token: transfer.token), other = UUID().uuidString
+        for (inside, original) in [(true, [DeviceSyncTransferIdentity]()), (false, [expected]), (true, [expected])] {
+            XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: other, ownerDigest: String(repeating: "c", count: 64), transfer: transfer, protocolMatches: true, sourceInsideRoot: inside, request: f.request, expected: original), .unresolved)
+        }
+        XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: other, ownerDigest: String(repeating: "c", count: 64), transfer: transfer, protocolMatches: false, sourceInsideRoot: false, request: f.request, expected: [expected]), .unresolved)
+        XCTAssertEqual(try deviceSyncTransferOwnership(namespaceID: other, ownerDigest: f.binding.ownerDigest, transfer: transfer, protocolMatches: true, sourceInsideRoot: false, request: f.request, expected: []), .unresolved)
+    }
+    func testContradictoryNativeOwnerCannotCompleteOrDeleteCanonical() async throws {
+        let f = try ManagedErasureFixture(), raw = Data("must-stay-until-native-owned-state-known".utf8), transfer = try f.queue().stage(raw, id: "original")
+        let result = try await f.service(driver: ConflictingNativeOwnerDriver(transfer: transfer, otherNamespace: UUID().uuidString)).erase(f.request)
+        XCTAssertEqual(result, .pending(.unresolved))
+        XCTAssertEqual(try Data(contentsOf: transfer.url), raw)
+        XCTAssertNil(try f.context.withLocked { try f.context.ledger.state().receipt })
+    }
+    func testNativeSourceOwnershipUsesActualParentDirectoryIdentity() throws {
+        let f = try ManagedErasureFixture(), other = try ManagedErasureFixture(account: "other"), transfer = try f.queue().stage(Data("ours".utf8), id: "d"), foreign = try other.queue().stage(Data("foreign".utf8), id: "d")
+        XCTAssertTrue(deviceSyncSourceInsideRoot(transfer.url, root: f.context.root), "system /var alias still names the owned directory")
+        XCTAssertFalse(deviceSyncSourceInsideRoot(foreign.url, root: f.context.root))
+        let alias = f.root.deletingLastPathComponent().appendingPathComponent("devicesync/outbox/" + transfer.url.lastPathComponent)
+        if FileManager.default.fileExists(atPath: alias.path) { XCTAssertTrue(deviceSyncSourceInsideRoot(alias, root: f.context.root), "case alias is the same actual owned outbox") }
     }
 }

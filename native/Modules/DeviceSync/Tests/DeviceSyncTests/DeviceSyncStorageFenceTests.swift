@@ -170,3 +170,16 @@ extension DeviceSyncStorageFenceTests {
         XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("inbox/.control").path), "no independent nested standalone gate")
     }
 }
+
+extension DeviceSyncStorageFenceTests {
+    func testSymbolicParentAliasCannotCreateStandaloneGateUnderManagedFence() async throws {
+        let f = try ManagedErasureFixture(), raw = Data("symlink-alias-late".utf8)
+        _ = try f.inbox().adoptData(Data("before".utf8)); _ = try await f.service().erase(f.request)
+        let alias = f.root.deletingLastPathComponent().appendingPathComponent("alias-root")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: f.root)
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: alias.path)[.type] as? FileAttributeType, .typeSymbolicLink)
+        XCTAssertThrowsError(try DurableFileInbox(directory: alias.appendingPathComponent("inbox")).adoptData(raw))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("inbox/frame-" + digest(raw) + ".frame").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("inbox/.control").path))
+    }
+}
