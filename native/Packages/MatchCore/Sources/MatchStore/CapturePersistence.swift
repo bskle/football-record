@@ -23,48 +23,50 @@ extension MatchStore {
     }
 
     public func commitV2(_ request: StoreCommitV2) throws -> CommitReceiptV2 {
-        let bytes = try Canonical.data(request), hash = Canonical.hash(bytes), matchID = request.descriptor.matchID
-        let receipt: CommitReceiptV2 = try preservingDiagnostics(matchID: matchID) {
-            try db.transaction {
-                if let row = try db.rows("SELECT request,request_hash,receipt,match_id FROM commands_v2 WHERE command_id=?", [.text(request.commandID)]).first {
-                    if row[0].data == bytes, row[1].string != hash { throw corruptCapture("commands_v2", key: request.commandID, raw: row[0].data ?? Data()) }
-                    guard row[1].string == hash else { throw StoreError.commandConflict }
-                    return try verifiedCommandV2(commandID: request.commandID, row: row).receipt
-                }
-                guard try db.rows("SELECT command_id FROM commands WHERE command_id=?", [.text(request.commandID)]).isEmpty else { throw StoreError.commandConflict }
-                try validateV2Coverage(request)
-                let existing = try descriptorAndGeneration(matchID)
-                guard (existing?.1 ?? 0) == request.expectedGeneration else { throw StoreError.staleGeneration }
-                if existing == nil {
-                    guard request.descriptor.startPermit == nil, request.events.isEmpty, request.captureRevisions.isEmpty,
-                          request.newCaptureOperations.isEmpty, request.captureOperationUpdates.isEmpty,
-                          request.descriptor.backendLockState == .unknown else { throw StoreError.invalidRequest }
-                }
-                try validateDescriptor(request.descriptor, prior: existing?.0)
-                try validateFacts(request.events, descriptor: request.descriptor)
-                if let existing {
-                    let saved = try loadSavedOperations(matchID: matchID, descriptor: existing.0)
-                    try rejectAbsenceContradictions(request, saved: saved, descriptor: existing.0)
-                    try validateAbsentCancellations(saved, descriptor: existing.0)
-                }
-                let generation = request.expectedGeneration + 1
-                try writeDescriptor(request.descriptor, generation: generation)
-                try append(request.events, matchID: matchID); try fail(.afterEvents)
-                for revision in request.captureRevisions { try appendRevision(revision, descriptor: request.descriptor) }
-                try fail(.afterCaptureRevisions)
-                for operation in request.newCaptureOperations { try insertOperation(operation, commandID: request.commandID, descriptor: request.descriptor) }
-                for update in request.captureOperationUpdates { try updateOperation(update, commandID: request.commandID, descriptor: request.descriptor) }
-                try fail(.afterCaptureOperations)
-                for item in request.businessOutbox { try insertBusinessOutbox(item) }
-                try fail(.afterOutbox)
-                let receipt = try expectedReceipt(request)
-                try db.execute("INSERT INTO commands_v2 VALUES (?,?,?,?,?)", [.text(request.commandID), .text(matchID), .blob(bytes), .text(hash), .blob(try Canonical.data(receipt))])
-                _ = try loadOperations(matchID: matchID, descriptor: request.descriptor)
-                try fail(.afterReceipt); try fail(.beforeCommit)
-                return receipt
-            }
+        let receipt = try preservingDiagnostics(matchID:request.descriptor.matchID) {
+            try db.transaction {try applyCommitV2(request)}
         }
-        if fault == .afterCommit { throw StoreError.responseLost }
+        if fault == .afterCommit {throw StoreError.responseLost};return receipt
+    }
+    /// Shared transaction body. Dedicated M4 control commits use the same business validation.
+    func applyCommitV2(_ request:StoreCommitV2)throws->CommitReceiptV2 {
+        let bytes=try Canonical.data(request),hash=Canonical.hash(bytes),matchID=request.descriptor.matchID
+        if let row = try db.rows("SELECT request,request_hash,receipt,match_id FROM commands_v2 WHERE command_id=?", [.text(request.commandID)]).first {
+            if row[0].data == bytes, row[1].string != hash { throw corruptCapture("commands_v2", key: request.commandID, raw: row[0].data ?? Data()) }
+            guard row[1].string == hash else { throw StoreError.commandConflict }
+            return try verifiedCommandV2(commandID: request.commandID, row: row).receipt
+        }
+        guard try db.rows("SELECT command_id FROM commands WHERE command_id=?", [.text(request.commandID)]).isEmpty else { throw StoreError.commandConflict }
+        try validateAccountBusinessWriteV4()
+        try validateV2Coverage(request)
+        let existing = try descriptorAndGeneration(matchID)
+        guard (existing?.1 ?? 0) == request.expectedGeneration else { throw StoreError.staleGeneration }
+        if existing == nil {
+            guard request.descriptor.startPermit == nil, request.events.isEmpty, request.captureRevisions.isEmpty,
+                  request.newCaptureOperations.isEmpty, request.captureOperationUpdates.isEmpty,
+                  request.descriptor.backendLockState == .unknown else { throw StoreError.invalidRequest }
+        }
+        try validateDescriptor(request.descriptor, prior: existing?.0)
+        try validateFacts(request.events, descriptor: request.descriptor)
+        if let existing {
+            let saved = try loadSavedOperations(matchID: matchID, descriptor: existing.0)
+            try rejectAbsenceContradictions(request, saved: saved, descriptor: existing.0)
+            try validateAbsentCancellations(saved, descriptor: existing.0)
+        }
+        let generation = request.expectedGeneration + 1
+        try writeDescriptor(request.descriptor, generation: generation)
+        try append(request.events, matchID: matchID); try fail(.afterEvents)
+        for revision in request.captureRevisions { try appendRevision(revision, descriptor: request.descriptor) }
+        try fail(.afterCaptureRevisions)
+        for operation in request.newCaptureOperations { try insertOperation(operation, commandID: request.commandID, descriptor: request.descriptor) }
+        for update in request.captureOperationUpdates { try updateOperation(update, commandID: request.commandID, descriptor: request.descriptor) }
+        try fail(.afterCaptureOperations)
+        for item in request.businessOutbox { try insertBusinessOutbox(item) }
+        try fail(.afterOutbox)
+        let receipt = try expectedReceipt(request)
+        try db.execute("INSERT INTO commands_v2 VALUES (?,?,?,?,?)", [.text(request.commandID), .text(matchID), .blob(bytes), .text(hash), .blob(try Canonical.data(receipt))])
+        _ = try loadOperations(matchID: matchID, descriptor: request.descriptor)
+        try fail(.afterReceipt); try fail(.beforeCommit)
         return receipt
     }
 
@@ -105,6 +107,7 @@ extension MatchStore {
                                       expectedGeneration: Int64, now: Date) throws {
         try preservingDiagnostics(matchID: evidence.matchID) {
             try db.transaction {
+                guard try currentBindingV4() == nil else { throw StoreError.trustUnavailable }
                 let snapshot = try loadSnapshot(matchID: evidence.matchID)
                 guard snapshot.generation == expectedGeneration else { throw StoreError.staleGeneration }
                 guard !snapshot.diagnostics.contains(where: { $0.severity == .blocking }) else { throw StoreError.unresolvedDiagnostics }
@@ -123,9 +126,21 @@ extension MatchStore {
     }
 
     /// Both snapshot APIs call this boundary, so old evidence cannot bypass capture invalidation.
-    func filteredCompletionEvidence(descriptor: MatchDescriptor, legacy: TrustedCompletionEvidence?) throws -> TrustedCompletionEvidence? {
+    func filteredCompletionEvidence(descriptor: MatchDescriptor, events: [MatchEvent], legacy: TrustedCompletionEvidence?) throws -> TrustedCompletionEvidence? {
         try validateCaptureAbsenceIntegrity(descriptor: descriptor)
         let revisions = try loadCaptureRevisions(descriptor: descriptor)
+        if try currentBindingV4() != nil {
+            let state=try authorityStateV4(matchID:descriptor.matchID,now:descriptor.startIntent.requestedAt)
+            guard state.status == .releasedNormal,state.verifiedNormalRelease != nil else {return nil}
+            let current=try CloudFactSetV1(startIntent:descriptor.startIntent,starter:descriptor.starter,events:events,captureRevisions:revisions)
+            var matched=false
+            for row in try db.rows("SELECT payload,checksum FROM cloud_checkpoints_v4 WHERE match_id=?",[.text(descriptor.matchID)]) {
+                let input=try checkedV4(CloudSaveInputV1.self,row:row,table:"cloud_checkpoints_v4",key:descriptor.matchID)
+                _=try VerifiedCloudSaveV1.verifyReadback(input,policy:cloudSavePolicy)
+                if case .matchFacts(let facts)=try input.record.payload,facts==current {matched=true;break}
+            }
+            guard matched else {return nil}
+        }
         if let row = try db.rows("SELECT evidence,capture_digest FROM completion_v2 WHERE match_id=?", [.text(descriptor.matchID)]).first {
             let evidence = try decode(TrustedCompletionEvidence.self, row[0], table: "completion_v2", key: descriptor.matchID)
             guard evidence.matchID == descriptor.matchID else { throw corruptCapture("completion_v2", key: descriptor.matchID, raw: row[0].data ?? Data()) }
@@ -174,7 +189,7 @@ extension MatchStore {
             operationIDs: request.newCaptureOperations.map(\.id) + request.captureOperationUpdates.map(\.operationID),
             businessOutboxIDs: request.businessOutbox.map(\.id))
     }
-    private func verifiedCommandV2(commandID: String, row: [SQLValue], validateAbsence: Bool = true) throws -> CommittedCommandV2 {
+    func verifiedCommandV2(commandID: String, row: [SQLValue], validateAbsence: Bool = true) throws -> CommittedCommandV2 {
         let request = try checkedCapture(StoreCommitV2.self, raw: row[0], checksum: row[1], table: "commands_v2", key: commandID)
         let receipt = try decode(CommitReceiptV2.self, row[2], table: "commands_v2", key: commandID)
         guard request.commandID == commandID, request.descriptor.matchID == row[3].string, receipt == (try expectedReceipt(request)),
@@ -309,7 +324,7 @@ extension MatchStore {
     func validateCaptureAbsenceIntegrity(descriptor: MatchDescriptor) throws {
         _ = try loadOperations(matchID: descriptor.matchID, descriptor: descriptor)
     }
-    private func loadOperations(matchID: String, descriptor: MatchDescriptor) throws -> [CaptureOperationRecord] {
+    func loadOperations(matchID: String, descriptor: MatchDescriptor) throws -> [CaptureOperationRecord] {
         let saved = try loadSavedOperations(matchID: matchID, descriptor: descriptor)
         try validateAbsentCancellations(saved, descriptor: descriptor)
         return saved.map(\.record)
