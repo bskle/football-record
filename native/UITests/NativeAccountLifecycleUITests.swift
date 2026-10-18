@@ -12,7 +12,10 @@ import XCTest
       let frame = control.exists ? control.frame : .zero
       if control.exists && control.isHittable && frame.height > 0 && frame.minY >= app.frame.minY + 36 && frame.maxY <= app.frame.maxY - 4 { return }
       let down = frame.height > 0 && frame.minY < app.frame.minY + 36
-      app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.40 : 0.72)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.72 : 0.40)))
+      print("Watch reveal \(id) frame=\(frame) down=\(down)")
+      // A slow short drag stops before release, preventing momentum from jumping
+      // from below the bottom safe area to above the clock in a single gesture.
+      app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.45 : 0.65)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: down ? 0.65 : 0.45)), withVelocity: XCUIGestureVelocity(rawValue: 100), thenHoldForDuration: 0.15)
     }
     #else
     for attempt in 0..<24 {
@@ -55,7 +58,7 @@ import XCTest
     XCTAssertTrue(app.buttons["open-controls"].waitForExistence(timeout: 12))
     tap("open-controls", app); tap("request-end", app)
     #if os(watchOS)
-    let row = app.cells.matching(NSPredicate(format: "label == %@", "结束并保存")).firstMatch
+    let row = app.cells.matching(NSPredicate(format: "label == %@", "结束并保存")).element
     XCTAssertTrue(row.waitForExistence(timeout: 5)); row.tap()
     #else
     tap("confirm-end", app)
@@ -152,6 +155,11 @@ import XCTest
     tap("account-identity-change"); app.buttons["确认身份变化"].firstMatch.tap()
     XCTAssertTrue(app.buttons["account-renew"].waitForExistence(timeout: 10)); tap("account-renew")
     let status = app.staticTexts["account-status"].firstMatch
+    for _ in 0..<12 {
+      if status.exists && status.isHittable && status.frame.minY >= 40 { break }
+      app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.36)).press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.73)))
+    }
+    XCTAssertTrue(status.isHittable)
     let verified = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "身份已验证，请重新载入记录"), object: status)
     XCTAssertEqual(XCTWaiter.wait(for: [verified], timeout: 15), .completed)
     XCTAssertFalse(app.buttons["start-match"].exists)
