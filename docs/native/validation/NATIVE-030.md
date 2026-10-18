@@ -1,0 +1,13 @@
+# NATIVE-030 validation
+
+Registered base/target `d59768f5f5d7872b9c520fd746d20f99f236acdc`; initial clean/head/branch and six Git inputs captured before implementation. Runtime versions are in external evidence. Red/green and exact-source counts will be recorded only after execution.
+
+Scope is local reference HTTP/file SQLite and cryptographic software behavior. Real Apple/WC/devices/deployment and production App/bootstrap remain unverified; physical devices do not apply to this narrow backend task. Source/final, two non-author reviews, actual merge and synchronization are pending.
+
+`/Users/liam/.local/bin/node --test backend/test/peer-grant-roles.test.mjs` before product changes: 14 tests, five pass/nine fail (`030-red.log`). Observed failures include missing signed roles, Watch-Watch/Phone-Phone/unknown-role/nonactive phone endpoint accepted as 200 and invalid legacy pair renewal accepted. After the minimal transaction fix: 14/14 (`030-green.log`).
+
+`/Users/liam/.local/bin/node --test backend/test/*.test.mjs`: one complete round 114/114 (100 inherited + 14 new), exit 0, no failures/skips/cancellations (`030-full-green.log`), Node v22.23.1 with SQLite ExperimentalWarning retained. File SQLite and actual loopback HTTP cover genuine Apple RSA fixture challenge/auth and Watch registration, both endpoint orders, genuine Ed25519 receipt/tampered role/activePhone signatures, self-reported fields rejected, caller/key/account/epoch/role boundaries, stable pairing/grant IDs, renewed expiry, original request bytes across reopen and rollback/COMMIT response loss. No outbound real Apple/JWKS/WC/device call.
+
+Legacy fixtures generate genuine signed pre-change receipt bytes and insert exact request/peer-grant rows as an old-schema snapshot. Same old request/GET after reopen stays byte-identical and missing-role; explicit valid renewal gets new proof under the same pair/grant ID while original request bytes remain. Old Watch-Watch replay is retained unchanged, renewal fails 403 and the cached old result is not modified. Tests exercise server behavior; client rejection of insufficient role proof and schema4 context integration remain 023's separate implementation and verification.
+
+Final exact-SHA post-commit full round, six Git inputs, runtime versions and all changed source/evidence hashes will be recorded externally in source-manifest.json. Source/final remains pending exact two-nonauthor review and root-owned actual merge/sync/archive. Real Apple/WC/CloudKit, deployment and physical-device acceptance remain unverified; physical devices are not applicable to this isolated backend software repair.
