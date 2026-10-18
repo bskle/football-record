@@ -2,7 +2,7 @@ import Foundation
 
 public enum DeviceSyncErasureError: String, Error, Sendable {
     case unbound, unsupportedLayout, intentMismatch, unknownInventory, corruptControl
-    case futureControl, ownerChanged, fileIO, faultInjected
+    case futureControl, ownerChanged, fileIO, faultInjected, controlBudgetExceeded
 }
 public struct DeviceSyncRootIdentity: Codable, Sendable, Equatable {
     public let device, inode: UInt64

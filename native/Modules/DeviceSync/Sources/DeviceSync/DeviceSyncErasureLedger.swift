@@ -13,6 +13,7 @@ struct DeviceSyncControlState {
 }
 /// All access is serialized by the retained storage owner lock, including other processes.
 final class DeviceSyncErasureLedger: @unchecked Sendable {
+    private static let maximumControlBytes = 65536
     private var db: OpaquePointer?
     init(url: URL, creating: Bool) throws {
         guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { if db != nil { sqlite3_close(db) }; throw DeviceSyncErasureError.corruptControl }
@@ -60,7 +61,7 @@ final class DeviceSyncErasureLedger: @unchecked Sendable {
     private func decode<T: Codable>(_ type: T.Type, from s: OpaquePointer, column: Int32) throws -> T? {
         if sqlite3_column_type(s, column) == SQLITE_NULL { return nil }
         let n = Int(sqlite3_column_bytes(s, column))
-        guard sqlite3_column_type(s, column) == SQLITE_BLOB, n > 0, n <= 65536, let p = sqlite3_column_blob(s, column) else { throw DeviceSyncErasureError.corruptControl }
+        guard sqlite3_column_type(s, column) == SQLITE_BLOB, n > 0, n <= Self.maximumControlBytes, let p = sqlite3_column_blob(s, column) else { throw DeviceSyncErasureError.corruptControl }
         let raw = Data(bytes: p, count: n)
         do { let value = try JSONDecoder().decode(type, from: raw); guard try canonical(value) == raw else { throw DeviceSyncErasureError.corruptControl }; return value } catch { throw DeviceSyncErasureError.corruptControl }
     }
@@ -79,8 +80,17 @@ final class DeviceSyncErasureLedger: @unchecked Sendable {
         if let receipt { guard let request, receipt.request == request, receipt.fenceGeneration == 1, receipt.intentDigest == (try request.intentDigest) else { throw DeviceSyncErasureError.corruptControl } }
         return DeviceSyncControlState(transfers: intent?.transfers ?? [], owner: owner, request: request, receipt: receipt)
     }
+    private func encoded<T: Encodable>(_ value: T) throws -> Data {
+        let raw = try canonical(value)
+        guard !raw.isEmpty, raw.count <= Self.maximumControlBytes else { throw DeviceSyncErasureError.controlBudgetExceeded }
+        return raw
+    }
+    func validateBudgets(_ request: DeviceSyncLocalEraseRequest, transfers: [DeviceSyncTransferIdentity]) throws {
+        _ = try encoded(DeviceSyncControlIntent(request: request, transfers: transfers))
+        _ = try encoded(DeviceSyncLocalEraseReceipt(request: request, intentDigest: try request.intentDigest, fenceGeneration: 1))
+    }
     private func set<T: Encodable>(_ column: String, _ value: T) throws {
-        let raw = try canonical(value), s = try statement("UPDATE control SET \(column)=? WHERE id=1"); defer { sqlite3_finalize(s) }
+        let raw = try encoded(value), s = try statement("UPDATE control SET \(column)=? WHERE id=1"); defer { sqlite3_finalize(s) }
         let code = raw.withUnsafeBytes { sqlite3_bind_blob(s, 1, $0.baseAddress, Int32(raw.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
         guard code == SQLITE_OK, sqlite3_step(s) == SQLITE_DONE, sqlite3_changes(db) == 1 else { throw DeviceSyncErasureError.corruptControl }
     }
@@ -88,13 +98,18 @@ final class DeviceSyncErasureLedger: @unchecked Sendable {
         try exec("BEGIN IMMEDIATE")
         do { let result = try body(); try exec("COMMIT"); return result } catch { try? exec("ROLLBACK"); throw error }
     }
-    func bind(_ owner: DeviceSyncNamespaceBinding) throws { try transaction { try set("owner", owner) } }
+    func bind(_ owner: DeviceSyncNamespaceBinding) throws {
+        _ = try encoded(owner)
+        try transaction { try set("owner", owner) }
+    }
     func begin(_ request: DeviceSyncLocalEraseRequest, transfers: [DeviceSyncTransferIdentity], fault: DeviceSyncErasureFault?) throws {
+        try validateBudgets(request, transfers: transfers)
         try transaction { try set("request", DeviceSyncControlIntent(request: request, transfers: transfers)); if fault == .beforeFenceCommit { throw DeviceSyncErasureError.faultInjected } }
         if fault == .afterFenceCommit { throw DeviceSyncErasureError.faultInjected }
     }
     func complete(_ request: DeviceSyncLocalEraseRequest, fault: DeviceSyncErasureFault?) throws -> DeviceSyncLocalEraseReceipt {
         let value = DeviceSyncLocalEraseReceipt(request: request, intentDigest: try request.intentDigest, fenceGeneration: 1)
+        _ = try encoded(value)
         try transaction { try set("receipt", value); if fault == .beforeReceiptCommit { throw DeviceSyncErasureError.faultInjected } }
         if fault == .afterReceiptCommit { throw DeviceSyncErasureError.faultInjected }
         return value

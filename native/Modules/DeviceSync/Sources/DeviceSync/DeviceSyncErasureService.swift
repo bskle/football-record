@@ -15,6 +15,7 @@ public struct DeviceSyncErasureService: DeviceSyncLocalTransportErasing {
             if let previous = state.request { guard previous == request else { throw DeviceSyncErasureError.intentMismatch } }
             if let receipt = state.receipt { return (try verifiedReplay(receipt), state.transfers) }
             let inventory = try inventory()
+            try context.ledger.validateBudgets(request, transfers: state.request == nil ? inventory.transfers : state.transfers)
             if state.request == nil { try context.ledger.begin(request, transfers: inventory.transfers, fault: fault) }
             return (nil, try context.ledger.state().transfers)
         }

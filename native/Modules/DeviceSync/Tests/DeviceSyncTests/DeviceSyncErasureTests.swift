@@ -164,3 +164,55 @@ extension DeviceSyncErasureTests {
         XCTAssertEqual(try f.context.withLocked { try f.context.ledger.state().receipt }, receipt)
     }
 }
+
+private struct ControlIntentBudgetProbe: Encodable {
+    let request: DeviceSyncLocalEraseRequest
+    let transfers: [DeviceSyncTransferIdentity]
+}
+extension DeviceSyncErasureTests {
+    func testControlBudgetRejectsOversizeOwnerBeforeChangingReadableState() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("DeviceSync"), context = try DeviceSyncStorageContext(root: root)
+        let id = String(repeating: "\u{1}", count: 4096)
+        let binding = try DeviceSyncNamespaceBinding(namespaceID: UUID().uuidString, accountID: id, cloudSpaceID: id, zoneID: id, activationEpoch: 1, catalogRevision: 1, catalogDigest: String(repeating: "a", count: 64), rootIdentity: context.rootIdentity)
+        XCTAssertGreaterThan(try canonical(binding).count, 65536)
+        let database = root.appendingPathComponent(".control/control.sqlite"), before = try Data(contentsOf: database)
+        XCTAssertThrowsError(try context.bind(binding))
+        XCTAssertEqual(try Data(contentsOf: database), before)
+        XCTAssertNoThrow(try context.withLocked { try context.ledger.state() })
+        XCTAssertNoThrow(try DeviceSyncStorageContext(root: root))
+    }
+    func testControlBudgetRejectsRequestWithFrozenTransfersBeforeFenceOrDriver() async throws {
+        let f = try ManagedErasureFixture(account: String(repeating: "\u{1}", count: 4096)), queue = try f.queue()
+        var transfers: [DriverFileTransfer] = []
+        for index in 0..<96 { transfers.append(try queue.stage(Data([UInt8(index)]), id: "delivery-\(index)")) }
+        let request = try DeviceSyncLocalEraseRequest(binding: f.binding, requestID: String(repeating: "\u{1}", count: 4096), requestDigest: f.request.requestDigest)
+        let identities = try transfers.map { try DeviceSyncTransferIdentity(deliveryIDHash: digest(Data($0.deliveryID.utf8)), checksum: $0.checksum, token: $0.token) }
+        XCTAssertGreaterThan(try canonical(ControlIntentBudgetProbe(request: request, transfers: identities)).count, 65536)
+        let database = f.root.appendingPathComponent(".control/control.sqlite"), before = try Data(contentsOf: database), driver = PendingErasureDriver(.drained)
+        do { _ = try await f.service(driver: driver).erase(request); XCTFail("oversize request+frozen inventory") } catch {}
+        XCTAssertEqual(try Data(contentsOf: database), before)
+        XCTAssertNoThrow(try f.context.withLocked { try f.context.ledger.state() })
+        let calls = await driver.calls; XCTAssertTrue(calls.isEmpty)
+        for (index, transfer) in transfers.enumerated() { XCTAssertEqual(try Data(contentsOf: transfer.url), Data([UInt8(index)])) }
+    }
+    func testControlBudgetPreflightsReceiptBeforeFenceAndCanonicalUnlink() async throws {
+        let large = String(repeating: "\u{1}", count: 4096), f = try ManagedErasureFixture(account: large, space: large)
+        var low = 1, high = 4096
+        while low < high {
+            let count = (low + high + 1) / 2
+            let value = try DeviceSyncLocalEraseRequest(binding: f.binding, requestID: String(repeating: "\u{1}", count: count), requestDigest: f.request.requestDigest)
+            if try canonical(ControlIntentBudgetProbe(request: value, transfers: [])).count <= 65536 { low = count } else { high = count - 1 }
+        }
+        let request = try DeviceSyncLocalEraseRequest(binding: f.binding, requestID: String(repeating: "\u{1}", count: low), requestDigest: f.request.requestDigest)
+        let receipt = DeviceSyncLocalEraseReceipt(request: request, intentDigest: try request.intentDigest, fenceGeneration: 1)
+        XCTAssertLessThanOrEqual(try canonical(ControlIntentBudgetProbe(request: request, transfers: [])).count, 65536)
+        XCTAssertGreaterThan(try canonical(receipt).count, 65536)
+        let raw = Data("must-remain-before-budget-rejection".utf8), frame = try f.inbox().adoptData(raw)
+        let file = f.root.appendingPathComponent("inbox/" + frame.transportDeliveryID + ".frame"), database = f.root.appendingPathComponent(".control/control.sqlite"), before = try Data(contentsOf: database), driver = PendingErasureDriver(.drained)
+        do { _ = try await f.service(driver: driver).erase(request); XCTFail("oversize future receipt") } catch {}
+        XCTAssertEqual(try Data(contentsOf: database), before)
+        XCTAssertEqual(try Data(contentsOf: file), raw)
+        XCTAssertNoThrow(try f.context.withLocked { try f.context.ledger.state() })
+        let calls = await driver.calls; XCTAssertTrue(calls.isEmpty)
+    }
+}
