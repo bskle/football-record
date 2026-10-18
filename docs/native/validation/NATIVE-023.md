@@ -61,3 +61,13 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - 删除/身份HTTP实际红→绿3/0：真实027 Apple exchange/revoke loopback sidecar，delete COMMIT丢响应后无session capability恢复；cloud失败/local及单独确认health成功，各进度重开保留并仅重试失败项；identityChanged同时业务与transport DB停写，仅清可选统计；正常迁移本地endedPending在HTTP前拒绝。
 - 非空业务本地擦除新增红→绿：内部复用原capture校验避免public读取嵌套transaction；尚有pending/reconcile原token时不擦业务；普通saga update不能伪造local completed。
 - 此checkpoint完整Core单轮240/0（44/132/47/17）与AccountKit单轮23/0（Cloud7/HTTP10/Auth3/Lifecycle3），日志 `023-5-deletion-core-checkpoint.log` / `023-5-deletion-account-checkpoint.log`。正常最终checkpoint/七天迁移、peer、032终态仍在执行，不表示whole023冻结。
+
+## 023.5 最终 checkpoint / 迁移软件 checkpoint
+
+- 普通合入已审 NATIVE030 / 031（dev `ef10b33a10663ad94b0bb4a3e43106af108c38bb`，本树 merge `aabeb4920c80cf879c94a33d0003708b4bf80608`）；未消费尚在开发的033。
+- account checkpoint 镜像红→绿：仅保留控制锚 `account-checkpoint:<stableZoneKey>` + lowercase UUID 允许空 refs，scope 精确匹配；ordinary checkpoint 仍非空且旧 bytes 不变；不制造 Match/事件/permit。
+- actual Node HTTP 正常迁移3/0：空账号、原 Session 完整 facts 与 capture、真实文件 CloudLedger conditional readback 专用 proof；新机未下载完整控制记录不得激活，下载仅历史 facts，无旧录制权。关闭重开后两轮迁移完成，旧 prepare/checkpoint/activate 只返回原 receipt bytes，不覆盖新轮投影、不冻结新 epoch 云队列。Q23-pre2 真实 conflict 红→绿，first receipt 先于投影处理。
+- actual Node HTTP 丢失迁移1/0：604799 秒拒绝，604800 秒仍需新鲜 Apple 证明；held 锁阻止强制激活；窄 grant 只异常释放原 match/lock/recorder/epoch，再次 fresh proof 才激活，全程不在新机生成旧 Match/Workout。
+- Store 本地清表与 transport 副本分开记录；默认 transport purge unavailable，真实非空 canonical bytes 保留且整体 finished=false。正向仅受控确实空台账可确认，云/健康选项独立，capability/saga保留；026 负责所有 owned ledger 与 SDK staging 聚合清理，033 未审不提前接入。
+- 本 checkpoint 完整 Core 241/0（44/133/47/17）与 AccountKit 28/0（Cloud7/HTTP10/Auth3/Lifecycle4/Migration4）。日志 `023-5-migration-core-checkpoint.log` / `023-5-migration-account-checkpoint-green.log`。初次全 AccountKit 有旧100ms异步断言未等到replacement，改有界事件等待后重跑，失败原日志保留。
+- peer / 已审032联调 / SDK编译仍在执行，未标 whole023完成或双审。

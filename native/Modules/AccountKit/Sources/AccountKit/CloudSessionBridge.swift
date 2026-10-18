@@ -87,4 +87,13 @@ public actor CloudSessionBridge:CloudCommitSink {
         let input=CloudSaveInputV1(record:try CloudRecordV1(scope:Self.coreScope(upload.scope),canonicalBytes:upload.record.canonicalBytes),checkpointID:upload.checkpointID,confirmationID:readback.confirmationID,factDigest:manifest.factDigest,captureDigest:manifest.captureDigest,terminalEventID:terminal,manifestBytes:readback.manifestBytes,manifestChangeTag:readback.manifestChangeTag,recordChangeTag:readback.recordChangeTag,conditional:true,parts:parts)
         return try await coordinator.acceptCloudSave(VerifiedCloudSaveV1.verifyReadback(input,policy:policy))
     }
+    public static func developmentReadbackInput(upload:CloudUpload,evidence:DevelopmentCloudSaveEvidence,ledger:any CloudLedger) async throws->CloudSaveInputV1 {
+        guard evidence.boundary=="controlledDevelopmentTransport",evidence.matches(upload),evidence.parts.count==evidence.partChangeTags.count else {throw CloudImportError.proofUnavailable}
+        let uploads=try await ledger.uploads(scope:upload.scope),stored=try await ledger.saveEvidence(scope:upload.scope)
+        guard uploads.contains(where:{$0.upload==upload && $0.state == .confirmed && $0.originalBytes == (try? upload.canonicalBytes())}),stored.contains(evidence) else {throw CloudImportError.proofUnavailable}
+        var offset=0,parts:[CloudSavedAssetV1]=[]
+        for (i,ref) in evidence.parts.enumerated() {guard ref.index==i,ref.byteCount>0,ref.byteCount<=upload.record.canonicalBytes.count,offset<=upload.record.canonicalBytes.count-ref.byteCount else {throw CloudImportError.invalidPayload};let end=offset+ref.byteCount;parts.append(CloudSavedAssetV1(partID:ref.partID,index:ref.index,byteCount:ref.byteCount,digest:ref.digest,changeTag:evidence.partChangeTags[i],bytes:upload.record.canonicalBytes.subdata(in:offset..<end),conditional:true));offset=end}
+        return CloudSaveInputV1(record:try CloudRecordV1(scope:coreScope(upload.scope),canonicalBytes:upload.record.canonicalBytes),checkpointID:evidence.checkpointID,confirmationID:evidence.confirmationID,factDigest:evidence.factDigest,captureDigest:evidence.captureDigest,terminalEventID:evidence.terminalEventID ?? "",manifestBytes:evidence.manifestBytes,manifestChangeTag:evidence.manifestChangeTag,recordChangeTag:evidence.recordChangeTag,conditional:true,parts:parts)
+    }
+
 }

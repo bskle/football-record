@@ -3,6 +3,7 @@ import MatchStore
 public protocol LifecycleInboundCoordinator:Sendable {
     func syncRepositoryIdentity() async->SyncRepositoryIdentity
     func prepareLifecycleControl(_ intent:ControlIntentV1) async throws->ControlIntentReceiptV4
+    func acceptMigrationCheckpoint(migrationID:String,proof:VerifiedAccountCheckpointV4) async throws
     func acceptLifecycleResult(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1) async throws
     func suspendAccount() async throws
     func createDeletionSaga(_ saga:DeletionSagaV4) async throws
@@ -14,6 +15,10 @@ public protocol LifecycleInboundCoordinator:Sendable {
     func acknowledgeAnalytics(requestID:String) async throws
 }
 extension MatchSession:LifecycleInboundCoordinator {
+    public func acceptMigrationCheckpoint(migrationID:String,proof:VerifiedAccountCheckpointV4) async throws {
+        try await validateEnvironment();guard let repository=store as? any LifecycleStateRepository else {throw AuthorityError.unavailable}
+        await acquire("_authority-account");defer {release("_authority-account")};try await repository.saveMigrationCheckpointV4(migrationID:migrationID,proof:proof)
+    }
     public func prepareLifecycleControl(_ intent:ControlIntentV1) async throws->ControlIntentReceiptV4 {
         try await validateEnvironment(allowSuspendedRead:true);guard let repository=store as? any LifecycleStateRepository else {throw AuthorityError.unavailable}
         await acquire("_authority-account");defer {release("_authority-account")}
@@ -66,6 +71,9 @@ extension MatchSession:LifecycleInboundCoordinator {
     }
 }
 extension SQLiteSessionRepository:LifecycleStateRepository {
+    public func accountFactRecordsV4(scope:CloudScopeV1) async throws->[CloudRecordV1] {try await store.accountFactRecordsV4(scope:scope)}
+    public func saveMigrationCheckpointV4(migrationID:String,proof:VerifiedAccountCheckpointV4) async throws {try await store.saveMigrationCheckpointV4(migrationID:migrationID,proof:proof)}
+    public func migrationCheckpointV4(migrationID:String) async throws->VerifiedAccountCheckpointV4? {try await store.migrationCheckpointV4(migrationID:migrationID)}
     public func lifecycleControlIntentV4(requestID:String) async throws->ControlIntentV1? {return try await store.lifecycleControlIntentV4(requestID:requestID)}
     public func lifecycleReceiptV4(requestID:String) async throws->Data? {return try await store.lifecycleReceiptV4(requestID:requestID)}
     public func acceptLifecycleResultV4(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1) async throws {try await store.acceptLifecycleResultV4(intent:intent,receipt:receipt)}

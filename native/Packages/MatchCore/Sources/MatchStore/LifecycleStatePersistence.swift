@@ -25,6 +25,12 @@ extension MatchStore {
     public func acceptLifecycleResultV4(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1)throws {
         try db.transaction {
             guard let b=try currentBindingV4(),let trust=authorityTrust,try controlV4(intent.requestID)==intent else {throw AuthorityError.intentMismatch}
+            let key="lifecycle-result:"+intent.requestID
+            // Original results are immutable reads. They never project historical state over a newer round.
+            if let first=try readLifecycleV4(StoredLifecycleControlV4.self,key) {
+                guard first.intent==intent,first.raw==receipt.raw,first.accountID==b.accountID else {throw AuthorityError.conflict}
+                _=try verifyLifecycleV4(first);return
+            }
             let activates=intent.operation == .activateMigration || intent.operation == .forceMigration
             let epoch=receipt.body.activationEpoch
             guard activates ? epoch>=b.activationEpoch:epoch==b.activationEpoch else {throw AuthorityError.identityChanged}
@@ -38,21 +44,29 @@ extension MatchStore {
                       m.kind != "lost" || m.eligibleAt-m.requestedAt==604800 else {throw AuthorityError.intentMismatch}
                 for id in [m.migrationID,m.newPhoneID,m.cloudSpaceID] {try AuthorityWire.identifier(id)}
                 for id in [m.oldPhoneID,m.checkpointID,m.contentCommitment] {try AuthorityWire.identifier(id,empty:true)}
-                if let prior=try latestMigrationV4() {guard prior.migrationID==m.migrationID,prior.newPhoneID==m.newPhoneID,prior.oldActivationEpoch==m.oldActivationEpoch,prior.requestedAt==m.requestedAt,prior.eligibleAt==m.eligibleAt,prior.state != "activated" || m.state=="activated" else {throw AuthorityError.conflict}}
+                if let prior=try latestMigrationV4() {
+                    if prior.migrationID==m.migrationID {
+                        let rank:[String:Int] = ["oldPhonePrepared":0,"waitingPeriod":0,"oldPhoneDeactivated":1,"activated":2]
+                        guard prior.kind==m.kind,prior.oldPhoneID==m.oldPhoneID,prior.newPhoneID==m.newPhoneID,prior.cloudSpaceID==m.cloudSpaceID,prior.oldActivationEpoch==m.oldActivationEpoch,prior.requestedAt==m.requestedAt,prior.eligibleAt==m.eligibleAt,
+                              rank[m.state,default:-1]>=rank[prior.state,default:3],prior.checkpointID.isEmpty || (prior.checkpointID==m.checkpointID && prior.contentCommitment==m.contentCommitment) else {throw AuthorityError.conflict}
+                    } else {
+                        guard prior.state=="activated",m.oldActivationEpoch==b.activationEpoch,m.oldActivationEpoch>prior.oldActivationEpoch,
+                              (intent.operation == .prepareMigration && m.state=="oldPhonePrepared") || (intent.operation == .requestLostMigration && m.state=="waitingPeriod") else {throw AuthorityError.conflict}
+                    }
+                }
                 let expected:AuthorityResult=switch intent.operation {case .prepareMigration:.waitingMigration;case .checkpointMigration:.checkpointAccepted;case .requestLostMigration:.waitingPeriod;default:.activated}
                 guard r.result==expected,(intent.operation != .prepareMigration || m.oldPhoneID==b.deviceID || (m.newPhoneID==b.deviceID && b.role == .waiting)),(intent.operation != .activateMigration && intent.operation != .forceMigration) || (m.newPhoneID==b.deviceID && epoch>m.oldActivationEpoch) else {throw AuthorityError.intentMismatch}
                 if intent.fields.checkpointID != nil {guard m.checkpointID==intent.fields.checkpointID,m.contentCommitment==intent.fields.contentCommitment else {throw AuthorityError.intentMismatch}}
                 try writeV4(StoredLifecycleControlV4(intent:intent,accountID:b.accountID,epoch:epoch,raw:receipt.raw),table:"lifecycle_steps_v4",id:"migration-latest")
-                if r.result == .checkpointAccepted || r.result == .activated {try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
+                if (r.result == .checkpointAccepted && m.oldPhoneID==b.deviceID) || r.result == .activated {try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
             case .lostRecovery:
-                guard r.result == .grantIssued,let grant=r.lostRecovery,grant.newPhoneID==b.deviceID,grant.migrationID==intent.fields.migrationID,r.matchID==intent.fields.matchID,r.lockID==intent.fields.lockID,r.recordingDeviceID==intent.fields.originalRecordingDeviceID else {throw AuthorityError.intentMismatch}
+                guard r.result == .grantIssued,let grant=r.lostRecovery,grant.newPhoneID==b.deviceID,grant.migrationID==intent.fields.migrationID,grant.expiresAt>=r.issuedAt,grant.expiresAt<=9_007_199_254_740_991,grant.expiresAt-r.issuedAt<=300,intent.fields.originalActivationEpoch==b.activationEpoch,r.matchID==intent.fields.matchID,r.lockID==intent.fields.lockID,r.recordingDeviceID==intent.fields.originalRecordingDeviceID else {throw AuthorityError.intentMismatch}
             case .terminateLost:
-                guard r.result == .releasedAbnormal,r.matchID==intent.fields.matchID,r.lockID==intent.fields.lockID,r.recordingDeviceID==intent.fields.originalRecordingDeviceID else {throw AuthorityError.intentMismatch}
+                guard r.result == .releasedAbnormal,intent.fields.originalActivationEpoch==b.activationEpoch,r.matchID==intent.fields.matchID,r.lockID==intent.fields.lockID,r.recordingDeviceID==intent.fields.originalRecordingDeviceID else {throw AuthorityError.intentMismatch}
             default:throw AuthorityError.invalidWire
             }
-            let value=StoredLifecycleControlV4(intent:intent,accountID:b.accountID,epoch:epoch,raw:receipt.raw),key="lifecycle-result:"+intent.requestID
-            if let first=try readLifecycleV4(StoredLifecycleControlV4.self,key) {guard first.raw==receipt.raw,first.intent==intent else {throw AuthorityError.conflict}}
-            else {try writeV4(value,table:"lifecycle_steps_v4",id:key)}
+            let value=StoredLifecycleControlV4(intent:intent,accountID:b.accountID,epoch:epoch,raw:receipt.raw)
+            try writeV4(value,table:"lifecycle_steps_v4",id:key)
             try fail(.afterReceipt);try fail(.beforeCommit)
         };if fault == .afterCommit {throw StoreError.responseLost}
     }
@@ -124,4 +138,35 @@ extension MatchStore {
         guard let row=try db.rows("SELECT payload,checksum FROM cloud_records_v4 WHERE id=? AND scope=?",[.text(recordID),.text(scope.stableZoneKey)]).first else {return nil}
         return try checkedV4(CloudRecordV1.self,row:row,table:"cloud_records_v4",key:recordID)
     }
+    public func accountFactRecordsV4(scope:CloudScopeV1)throws->[CloudRecordV1] {
+        _=try validateCloudScopeV4(scope)
+        let ids=try matchIDs();var result=try ids.map {try CloudRecordV1(scope:scope,payload:.matchFacts(currentCloudFactsV4($0)))}
+        for history in try cloudHistoryV4(scope:scope) where !ids.contains(history.facts.matchID) {result.append(try CloudRecordV1(scope:scope,payload:.matchFacts(history.facts)))}
+        return result.sorted {$0.recordID<$1.recordID}
+    }
+    func validateAccountCheckpointV4(migrationID:String,proof:VerifiedAccountCheckpointV4)throws {
+        let input=proof.input,b=try validateCloudScopeV4(input.record.scope)
+        guard proof.policy==cloudSavePolicy,let migration=try latestMigrationV4(),migration.migrationID==migrationID,migration.state=="oldPhonePrepared",migration.oldPhoneID==b.deviceID,
+              case .checkpoint(let checkpoint)=try input.record.payload,
+              checkpoint.recordIDs == (try accountFactRecordsV4(scope:input.record.scope).map(\.recordID).sorted()) else {throw CloudImportError.proofUnavailable}
+        switch (cloudSavePolicy,syncEnvironment,b.environment) {
+        case (.development(let expected),.development(let actual),.development):guard expected==actual else {throw CloudImportError.identityMismatch}
+        case (.productionSDK,.production,.production):break
+        default:throw CloudImportError.proofUnavailable
+        }
+        _=try VerifiedAccountCheckpointV4.verifyReadback(input,policy:cloudSavePolicy)
+    }
+    public func saveMigrationCheckpointV4(migrationID:String,proof:VerifiedAccountCheckpointV4)throws {
+        try db.transaction {try validateAccountCheckpointV4(migrationID:migrationID,proof:proof)
+            let key="migration-checkpoint:"+migrationID
+            if let prior=try readLifecycleV4(CloudSaveInputV1.self,key) {guard prior==proof.input else {throw AuthorityError.conflict}}
+            else {try writeV4(proof.input,table:"lifecycle_steps_v4",id:key)}
+            try fail(.afterReceipt);try fail(.beforeCommit)
+        };if fault == .afterCommit {throw StoreError.responseLost}
+    }
+    public func migrationCheckpointV4(migrationID:String)throws->VerifiedAccountCheckpointV4? {
+        guard let input=try readLifecycleV4(CloudSaveInputV1.self,"migration-checkpoint:"+migrationID) else {return nil}
+        let proof=try VerifiedAccountCheckpointV4.verifyReadback(input,policy:cloudSavePolicy);try validateAccountCheckpointV4(migrationID:migrationID,proof:proof);return proof
+    }
+
 }

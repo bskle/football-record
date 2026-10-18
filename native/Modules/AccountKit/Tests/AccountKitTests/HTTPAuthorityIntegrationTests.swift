@@ -97,7 +97,8 @@ final class HTTPAuthorityIntegrationTests:XCTestCase,@unchecked Sendable {
         let after=TrackingGateway(),reopened=try await harness(f,root:h.root,gateway:after)
         let recovered=try await reopened.session.recover()
         if case .active(let value)=recovered {XCTAssertEqual(value.store.business.descriptor.recordingDeviceID,request.startIntent!.recordingDeviceID)} else {XCTFail("offline recovery must remain available for an established match")}
-        try await Task.sleep(for:.milliseconds(100))
+        let deadline=Date().addingTimeInterval(3)
+        while !(await after.operations).contains(where:{$0.action == .start}),Date()<deadline {try await Task.sleep(for:.milliseconds(10))}
         let operations=await after.operations
         XCTAssertTrue(operations.contains(where:{$0.action == .recover}));XCTAssertTrue(operations.contains(where:{$0.action == .start}))
         XCTAssertTrue(operations.allSatisfy({$0.binding.matchID==request.matchID && $0.binding.recordingDeviceID==request.startIntent!.recordingDeviceID}))

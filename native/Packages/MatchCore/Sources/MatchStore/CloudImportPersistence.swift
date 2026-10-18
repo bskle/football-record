@@ -50,7 +50,8 @@ extension MatchStore {
             if let row=try db.rows("SELECT digest,receipt FROM cloud_applied_batches_v4 WHERE scope=? AND batch_id=?",[.text(key),.text(batch.batchID)]).first {
                 guard row[0].string==batch.digest,let raw=row[1].data,try JSONDecoder().decode(CloudImportReceiptV4.self,from:raw)==expected,try Canonical.data(expected)==raw else {throw CloudImportError.conflict};return expected
             }
-            _=try validateCloudScopeV4(scope)
+            let binding=try validateCloudScopeV4(scope)
+            if let migration=try latestMigrationV4(),migration.state != "activated",migration.oldPhoneID==binding.deviceID {throw CloudImportError.readOnly}
             let cursor=try loadCloudCursorV4(scope)
             guard cursor.fetchGeneration==batch.fetchGeneration else {throw CloudImportError.staleGeneration}
             guard cursor.appliedToken==batch.expectedAppliedToken else {throw CloudImportError.cursorMismatch}
@@ -71,14 +72,14 @@ extension MatchStore {
                 switch payload {
                 case .deletion:break
                 case .checkpoint(let checkpoint):
-                    guard !checkpoint.checkpointID.isEmpty,!checkpoint.recordIDs.isEmpty,Set(checkpoint.recordIDs).count==checkpoint.recordIDs.count else {throw CloudImportError.invalidPayload}
+                    guard !checkpoint.checkpointID.isEmpty,(checkpoint.matchID.hasPrefix(CloudCheckpointV1.accountAnchorPrefix) || !checkpoint.recordIDs.isEmpty),Set(checkpoint.recordIDs).count==checkpoint.recordIDs.count else {throw CloudImportError.invalidPayload}
                     for id in checkpoint.recordIDs {guard try db.rows("SELECT id FROM cloud_records_v4 WHERE id=? AND scope=?",[.text(id),.text(scope.stableZoneKey)]).first != nil else {throw CloudImportError.invalidPayload}}
                 case .matchFacts(let facts):
                     if try db.rows("SELECT match_id FROM cloud_deletions_v4 WHERE scope=? AND match_id=?",[.text(scope.stableZoneKey),.text(facts.matchID)]).first != nil {continue}
                     if let existing=try descriptorAndGeneration(facts.matchID) {
                         let current=try loadSnapshot(matchID:facts.matchID)
                         guard current.descriptor.startIntent==facts.startIntent,current.descriptor.starter==facts.starter,current.descriptor.startPermit != nil else {throw CloudImportError.conflict}
-                        guard record.scope.activationEpoch==scope.activationEpoch else {throw CloudImportError.readOnly}
+                        guard binding.role != .waiting,record.scope.activationEpoch==scope.activationEpoch else {throw CloudImportError.readOnly}
                         let priorRevisions=try loadCaptureRevisions(descriptor:current.descriptor)
                         try append(facts.events,matchID:facts.matchID)
                         for revision in facts.captureRevisions {try appendRevision(revision,descriptor:current.descriptor)}

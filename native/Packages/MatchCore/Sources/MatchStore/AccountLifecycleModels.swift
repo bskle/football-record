@@ -31,16 +31,17 @@ public struct DeletionSagaV4:Codable,Sendable,Equatable {
     public let cloudChoice,localChoice,healthChoice:ClientDeletionChoiceV4
     public let healthConfirmed:Bool
     public var backendDeleted:Bool
-    public var cloudProgress,localProgress,healthProgress:ClientDeletionProgressV4
+    /// localProgress is the Store component; UI aggregates it with the scoped transport component.
+    public var cloudProgress,localProgress,localTransportProgress,healthProgress:ClientDeletionProgressV4
     public var lastIssue:LifecycleIssueV4?
     public var revision:Int64
     public var backendReceipt:Data?
-    public var finished:Bool {backendDeleted && [cloudProgress,localProgress,healthProgress].allSatisfy {$0 == .completed || $0 == .retained}}
+    public var finished:Bool {backendDeleted && [cloudProgress,localProgress,localTransportProgress,healthProgress].allSatisfy {$0 == .completed || $0 == .retained}}
     public init(intent:ControlIntentV1,accountID:String,activationEpoch:Int64,recoveryCapability:String,cloudChoice:ClientDeletionChoiceV4,localChoice:ClientDeletionChoiceV4,healthChoice:ClientDeletionChoiceV4,healthConfirmed:Bool)throws {
         try AuthorityWire.identifier(accountID);_=try AuthorityWire.decodeBase64URL(recoveryCapability,count:32)
         guard activationEpoch>0,intent.operation == .deleteAccount,intent.fields.recoveryCapabilityDigest==AuthorityWire.hash(Data(recoveryCapability.utf8)),healthChoice != .delete || healthConfirmed else {throw AuthorityError.invalidWire}
         self.intent=intent;self.accountID=accountID;self.activationEpoch=activationEpoch;self.recoveryCapability=recoveryCapability;self.cloudChoice=cloudChoice;self.localChoice=localChoice;self.healthChoice=healthChoice;self.healthConfirmed=healthConfirmed
-        backendDeleted=false;cloudProgress=cloudChoice == .keep ? .retained:.pending;localProgress=localChoice == .keep ? .retained:.pending;healthProgress=healthChoice == .keep ? .retained:.pending;revision=0
+        backendDeleted=false;cloudProgress=cloudChoice == .keep ? .retained:.pending;localProgress=localChoice == .keep ? .retained:.pending;localTransportProgress=localChoice == .keep ? .retained:.pending;healthProgress=healthChoice == .keep ? .retained:.pending;revision=0
     }
 }
 public enum AnalyticsMetricV4:String,Codable,Sendable {case registered,activeDay,matchCompleted,matchIncomplete,watchRecorded,syncSucceeded,syncFailed,recoverySucceeded,recoveryFailed}
@@ -76,5 +77,8 @@ public protocol LifecycleStateRepository:Sendable {
     func enqueueAnalyticsV4(_ event:AnalyticsEventV4) async throws
     func pendingAnalyticsV4() async throws->[AnalyticsEventV4]
     func acknowledgeAnalyticsV4(requestID:String) async throws
+    func accountFactRecordsV4(scope:CloudScopeV1) async throws->[CloudRecordV1]
+    func saveMigrationCheckpointV4(migrationID:String,proof:VerifiedAccountCheckpointV4) async throws
+    func migrationCheckpointV4(migrationID:String) async throws->VerifiedAccountCheckpointV4?
     func cloudRecordV4(scope:CloudScopeV1,recordID:String) async throws->CloudRecordV1?
 }

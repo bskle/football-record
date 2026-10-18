@@ -56,8 +56,16 @@ public struct CloudFactSetV1:Codable,Sendable,Equatable {
     public init(from decoder:any Decoder)throws {let c=try decoder.container(keyedBy:CodingKeys.self);try self.init(startIntent:c.decode(StartIntent.self,forKey:.startIntent),starter:c.decode(Bool.self,forKey:.starter),events:c.decode([MatchEvent].self,forKey:.events),captureRevisions:c.decode([CaptureRevision].self,forKey:.captureRevisions))}
 }
 public struct CloudCheckpointV1:Codable,Sendable,Equatable {
+    public static let accountAnchorPrefix="account-checkpoint:"
     public let matchID,checkpointID:String;public let recordIDs:[String]
-    public init(matchID:String,checkpointID:String,recordIDs:[String])throws {for id in [matchID,checkpointID]+recordIDs {try CloudCanonicalV1.id(id)};guard !recordIDs.isEmpty,Set(recordIDs).count==recordIDs.count else {throw CloudImportError.invalidPayload};self.matchID=matchID;self.checkpointID=checkpointID;self.recordIDs=recordIDs.sorted()}
+    public init(matchID:String,checkpointID:String,recordIDs:[String])throws {
+        for id in [matchID,checkpointID]+recordIDs {try CloudCanonicalV1.id(id)}
+        let account=matchID.hasPrefix(Self.accountAnchorPrefix)
+        if account {let key=matchID.dropFirst(Self.accountAnchorPrefix.count);guard key.utf8.count==64,key.utf8.allSatisfy({(48...57).contains($0)||(97...102).contains($0)}),let uuid=UUID(uuidString:checkpointID),checkpointID==uuid.uuidString.lowercased() else {throw CloudImportError.invalidPayload}}
+        guard (account || !recordIDs.isEmpty),Set(recordIDs).count==recordIDs.count else {throw CloudImportError.invalidPayload}
+        self.matchID=matchID;self.checkpointID=checkpointID;self.recordIDs=recordIDs.sorted()
+    }
+    func validate(scope:CloudScopeV1)throws {if matchID.hasPrefix(Self.accountAnchorPrefix),matchID != Self.accountAnchorPrefix+scope.stableZoneKey {throw CloudImportError.identityMismatch}}
     private enum CodingKeys:String,CodingKey {case matchID,checkpointID,recordIDs}
     public init(from decoder:any Decoder)throws {let c=try decoder.container(keyedBy:CodingKeys.self);try self.init(matchID:c.decode(String.self,forKey:.matchID),checkpointID:c.decode(String.self,forKey:.checkpointID),recordIDs:c.decode([String].self,forKey:.recordIDs))}
 }
@@ -79,6 +87,7 @@ public struct CloudRecordV1:Codable,Sendable,Equatable {
     public var payload:CloudPayloadV1 {get throws {try CloudCanonicalV1.decode(CloudPayloadV1.self,canonicalBytes,limit:8*1024*1024)}}
     public init(scope:CloudScopeV1,canonicalBytes:Data)throws {
         let payload=try CloudCanonicalV1.decode(CloudPayloadV1.self,canonicalBytes,limit:8*1024*1024)
+        if case .checkpoint(let checkpoint)=payload {try checkpoint.validate(scope:scope)}
         self.scope=scope;self.canonicalBytes=canonicalBytes;digest=AuthorityWire.hash(canonicalBytes)
         recordID=try CloudCanonicalV1.digest([scope.stableZoneKey,payload.recordType,payload.matchID,digest],domain:"record-id")
     }
@@ -186,4 +195,26 @@ public protocol CloudImportRepository:Sendable {
     func saveCloudCheckpointV4(_ proof:VerifiedCloudSaveV1) async throws->CloudCheckpointReceiptV4
     func matchingCloudSaveV4(matchID:String) async throws->VerifiedCloudSaveV1?
     func completeNormallyV4(release:VerifiedAuthorityReceiptV1,cloud:VerifiedCloudSaveV1,expectedGeneration:Int64,now:Date) async throws
+}
+
+public struct VerifiedAccountCheckpointV4:Sendable {
+    public let input:CloudSaveInputV1
+    public let policy:CloudSaveProofPolicy
+    private init(input:CloudSaveInputV1,policy:CloudSaveProofPolicy){self.input=input;self.policy=policy}
+    public static func verifyReadback(_ input:CloudSaveInputV1,policy:CloudSaveProofPolicy)throws->Self {
+        guard policy != .unavailable,input.conditional,!input.confirmationID.isEmpty,!input.manifestChangeTag.isEmpty,!input.recordChangeTag.isEmpty,
+              case .checkpoint(let checkpoint)=try input.record.payload,checkpoint.matchID==CloudCheckpointV1.accountAnchorPrefix+input.record.scope.stableZoneKey,
+              input.factDigest==input.record.digest,input.captureDigest == (try CaptureRevision.digest([])),input.terminalEventID.isEmpty,
+              !input.parts.isEmpty,input.parts.count<=64,Set(input.parts.map(\.partID)).count==input.parts.count else {throw CloudImportError.invalidPayload}
+        let manifest=try CloudCanonicalV1.decode(CloudSaveManifestV1.self,input.manifestBytes,limit:1024*1024)
+        let manifestID=AuthorityWire.hash(Data((input.record.scope.stableZoneKey+"\0"+input.record.recordID+"\0checkpoint.v1").utf8))
+        guard manifest.version==1,manifest.scope==input.record.scope,manifest.recordID==input.record.recordID,manifest.recordDigest==input.record.digest,manifest.recordType=="CheckpointV1",
+              manifest.matchID==checkpoint.matchID,manifest.factDigest==input.factDigest,manifest.captureDigest==input.captureDigest,manifest.checkpointID==manifestID,input.checkpointID==manifestID,
+              manifest.terminalEventID==nil,manifest.byteCount==input.record.canonicalBytes.count,
+              manifest.parts==input.parts.map({CloudAssetReferenceV1(partID:$0.partID,index:$0.index,byteCount:$0.byteCount,digest:$0.digest)}) else {throw CloudImportError.invalidPayload}
+        var bytes=Data()
+        for (i,part) in input.parts.enumerated() {guard part.index==i,part.conditional,!part.partID.isEmpty,!part.changeTag.isEmpty,part.byteCount==part.bytes.count,part.byteCount>0,part.bytes.count<=input.record.canonicalBytes.count,bytes.count<=input.record.canonicalBytes.count-part.bytes.count,AuthorityWire.hash(part.bytes)==part.digest else {throw CloudImportError.invalidPayload};bytes.append(part.bytes)}
+        guard bytes==input.record.canonicalBytes else {throw CloudImportError.invalidPayload}
+        return Self(input:input,policy:policy)
+    }
 }

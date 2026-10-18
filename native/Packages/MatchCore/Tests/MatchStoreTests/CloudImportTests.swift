@@ -91,4 +91,15 @@ final class CloudImportTests:XCTestCase,@unchecked Sendable {
         XCTAssertThrowsError(try CloudRecordV1(scope:scope(),canonicalBytes:badDeletion))
     }
 
+    func testAccountCheckpointEmptyReferencesAreControlMetadataAndScopeBound() async throws {
+        let scope=try scope(),control=try CloudCheckpointV1(matchID:"account-checkpoint:"+scope.stableZoneKey,checkpointID:"00112233-4455-6677-8899-aabbccddeeff",recordIDs:[])
+        let record=try CloudRecordV1(scope:scope,payload:.checkpoint(control))
+        let store=try MatchStore(url:h.path(),syncEnvironment:.development(databaseNamespace:"cloud-test"),authorityTrust:trust());try await store.bindAccountV4(binding())
+        let batch=try ValidatedCloudBatchV1(canonicalBytes:CloudCanonicalV1.encode(ValidatedCloudBatchV1.Wire(scope:scope,batchID:"empty-account-checkpoint",records:[record],expectedAppliedToken:nil,nextToken:Data([1]),fetchGeneration:0,moreComing:false)))
+        _=try await store.commitCloudBatchV4(batch);let ids=try await store.matchIDs();XCTAssertTrue(ids.isEmpty)
+        let other=try CloudScopeV1(accountID:"other",cloudSpaceID:scope.cloudSpaceID,zoneID:scope.zoneID,activationEpoch:1)
+        XCTAssertThrowsError(try CloudRecordV1(scope:other,payload:.checkpoint(control)))
+        XCTAssertThrowsError(try CloudCheckpointV1(matchID:"ordinary-match",checkpointID:"ordinary",recordIDs:[]))
+    }
+
 }

@@ -14,3 +14,4 @@
 - 证据：`native-validation/NATIVE-023`，详见验证卡。
 
 - 023.1 / 023.2 / 023.3 软件切片已提交；236 Core + 17 AccountKit 的确切单轮及限制见验证卡。023.4 独立 peer 等待已审 NATIVE030 角色签名 wire，023.5 auth/lifecycle 继续执行；未请求审阅/合并通过。
+- 023.5 迁移/删除 checkpoint：实际两轮正常迁移、七天丢失窄授权、历史导入及本地副本分项状态已跑；Core241/0、AccountKit28/0。Q23-pre2红绿已修。独立 production peer 与032 exact联调仍执行中。
