@@ -6,8 +6,8 @@ import AccountKit
 import CloudSync
 
 public enum LifecycleUserAction: Sendable {
-  case synchronize(String), retryControls, abnormal(String), analytics(Bool)
-  case prepareMigration(String), checkpoint, activateMigration, requestLost, confirmLostEnd, forceMigration
+  case synchronize(String), saveCloudOnly(String), retryControls, abnormal(String), analytics(Bool)
+  case prepareMigration(String), checkpoint, importMigration, activateMigration, requestLost, confirmLostEnd, forceMigration
   case delete(cloud: ClientDeletionChoiceV4, local: ClientDeletionChoiceV4, health: ClientDeletionChoiceV4, healthConfirmed: Bool)
   case resumeDeletion(String)
 }
@@ -32,7 +32,7 @@ public struct DeletionStatusRow: Sendable {
   public let development: Bool
   @ObservationIgnored let repository: SQLiteSessionRepository
   @ObservationIgnored private let ledger: (any CloudLedger)?
-  @ObservationIgnored private let scope: CloudScope?
+  @ObservationIgnored private var scope: CloudScope?
   @ObservationIgnored private let action: (@MainActor (LifecycleUserAction) async throws -> Void)?
   @ObservationIgnored private var generation = UUID()
   @ObservationIgnored private var stopped = false
@@ -109,5 +109,6 @@ public struct DeletionStatusRow: Sendable {
     guard !stopped, generation == refresh else { return }
     if let failure { issue = failure }
   }
+  func setCloudScope(_ value: CloudScope) { scope = value; generation = UUID(); cloudSaved = nil; backendStatus = nil }
   public func stop() { stopped = true; generation = UUID(); cloudSaved = nil; backendStatus = nil; analyticsEnabled = nil }
 }

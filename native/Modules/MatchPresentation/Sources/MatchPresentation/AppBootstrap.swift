@@ -95,3 +95,33 @@ private actor DebugFailureRepository: SessionRepository {
   }
 }
 #endif
+
+/// The account gate and recording model retain the exact same facade and Session.
+@MainActor public final class AccountAppContext {
+  public let repository: SQLiteSessionRepository
+  public let session: MatchSession
+  public let recording: RecordingModel
+  public let account: AccountStatusModel
+  public let lifecycle: LifecycleStatusModel
+  private let closeResources: @MainActor () async -> Void
+  private var closed = false
+  init(repository: SQLiteSessionRepository, session: MatchSession, recording: RecordingModel, account: AccountStatusModel, lifecycle: LifecycleStatusModel, close: @escaping @MainActor () async -> Void) {
+    self.repository = repository; self.session = session; self.recording = recording; self.account = account; self.lifecycle = lifecycle; closeResources = close
+  }
+  public func refresh() async {
+    guard !closed else { return }
+    await account.refresh()
+    if account.canEnterRecording { await recording.load() }
+    await lifecycle.refresh(matchID: recording.snapshot?.replay.matchID)
+  }
+  public func shutdown() async {
+    guard !closed else { return }; closed = true
+    account.stop(); lifecycle.stop(); await recording.shutdown(); await closeResources()
+  }
+}
+public extension AppBootstrap {
+  @MainActor static func accountContext(rootDirectory: URL? = nil) throws -> AccountAppContext {
+    let c = try composition(rootDirectory: rootDirectory)
+    return AccountAppContext(repository: c.repository, session: c.session, recording: c.model, account: AccountStatusModel(repository: c.repository), lifecycle: LifecycleStatusModel(repository: c.repository), close: { try? await c.repository.close() })
+  }
+}

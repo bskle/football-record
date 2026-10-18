@@ -61,6 +61,7 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
       binding = value; pendingAuthIDs = auth.map(\.requestID); pendingWatchIDs = watches.map(\.requestID)
       issue = nil
       if action == nil { phase = .unavailable }
+      else if value == nil && auth.isEmpty && watches.isEmpty { phase = .signedOut }
       else if !identityVerified || value?.suspended == true { phase = .suspended }
       else if !auth.isEmpty || !watches.isEmpty { phase = .pending }
       else if value?.role == .waiting { phase = .waitingMigration }
@@ -84,6 +85,7 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
     guard !stopped, generation == refresh else { return }
     if let failure { issue = failure }
   }
+  func confirmIdentity() { identityVerified = true }
   public func pauseIdentity() { identityVerified = false; phase = .suspended; generation = UUID() }
   public func stop() { stopped = true; generation = UUID(); binding = nil; phase = .unavailable }
 }
