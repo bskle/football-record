@@ -44,7 +44,8 @@ extension MatchStore {
     func verifyWatchRegistrationV4(_ attempt:WatchRegistrationAttemptV4,raw:Data)throws->VerifiedAuthorityReceiptV1 {
         guard let trust=authorityTrust else {throw AuthorityError.unavailable}
         let receipt=try VerifiedAuthorityReceiptV1.verify(raw,expected:AuthorityExpectedIntent(requestID:attempt.requestID,digest:attempt.requestDigest,operation:.registerWatch,accountID:attempt.context.accountID,epoch:attempt.context.activationEpoch),trust:trust)
-        guard receipt.body.result == .registered,receipt.body.registration?.watchID==attempt.payload.watchID,receipt.body.registration?.watchPublicKey==attempt.payload.watchPublicKey else {throw AuthorityError.intentMismatch};return receipt
+        guard [.registered,.knownAbandoned].contains(receipt.body.result),receipt.body.registration?.watchID==attempt.payload.watchID,receipt.body.registration?.watchPublicKey==attempt.payload.watchPublicKey,
+              receipt.body.matchID.isEmpty,receipt.body.lockID.isEmpty,receipt.body.recordingDeviceID.isEmpty,receipt.body.migration==nil,receipt.body.peerGrant==nil,receipt.body.lostRecovery==nil,receipt.body.deletion==nil else {throw AuthorityError.intentMismatch};return receipt
     }
     public func saveWatchRegistrationAttemptV4(_ attempt:WatchRegistrationAttemptV4,expectedIdentityGeneration:Int64)throws {
         try db.transaction {
@@ -57,10 +58,20 @@ extension MatchStore {
             try writeV4(attempt,table:"lifecycle_steps_v4",id:"watch-attempt:"+attempt.requestID);try fail(.beforeCommit)
         };if fault == .afterCommit {throw StoreError.responseLost}
     }
+    public func closeWatchRegistrationV4(_ attempt:WatchRegistrationAttemptV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64)throws {
+        try db.transaction {
+            guard try identityGenerationV4()==expectedIdentityGeneration,try watchRegistrationAttemptV4(requestID:attempt.requestID)==attempt else {throw AuthorityError.identityChanged}
+            try validateWatchParticipantV4(attempt,allowSuspended:true)
+            let verified=try verifyWatchRegistrationV4(attempt,raw:receipt.raw);guard verified.body.result == .knownAbandoned else {throw AuthorityError.intentMismatch}
+            if let first=try watchRegistrationReceiptV4(requestID:attempt.requestID) {guard first==receipt.raw else {throw AuthorityError.conflict};return}
+            try writeV4(receipt.raw,table:"lifecycle_steps_v4",id:"watch-receipt:"+attempt.requestID);try fail(.afterReceipt);try fail(.beforeCommit)
+        };if fault == .afterCommit {throw StoreError.responseLost}
+    }
     public func acceptWatchRegistrationV4(_ attempt:WatchRegistrationAttemptV4,receipt:VerifiedAuthorityReceiptV1,watchBinding:AccountBindingV4?,expectedIdentityGeneration:Int64)throws {
         try db.transaction {
             guard try identityGenerationV4()==expectedIdentityGeneration,try watchRegistrationAttemptV4(requestID:attempt.requestID)==attempt else {throw AuthorityError.identityChanged}
-            try validateWatchParticipantV4(attempt,allowSuspended:true);_=try verifyWatchRegistrationV4(attempt,raw:receipt.raw)
+            try validateWatchParticipantV4(attempt,allowSuspended:true);let verified=try verifyWatchRegistrationV4(attempt,raw:receipt.raw)
+            guard verified.body.result == .registered else {throw AuthorityError.intentMismatch}
             if let first=try watchRegistrationReceiptV4(requestID:attempt.requestID) {guard first==receipt.raw else {throw AuthorityError.conflict}}
             if let b=watchBinding {
                 guard b.role == .watch,!b.suspended,b.accountID==attempt.context.accountID,b.cloudSpaceID==attempt.context.cloudSpaceID,b.deviceID==attempt.payload.watchID,b.activationEpoch==attempt.context.activationEpoch,b.environment==attempt.context.environment else {throw AuthorityError.identityChanged}

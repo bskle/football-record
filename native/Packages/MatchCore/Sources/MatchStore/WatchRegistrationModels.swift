@@ -45,5 +45,6 @@ public protocol WatchRegistrationRepository:Sendable {
     func pendingWatchRegistrationAttemptsV4() async throws->[WatchRegistrationAttemptV4]
     func watchRegistrationReceiptV4(requestID:String) async throws->Data?
     func saveWatchRegistrationAttemptV4(_ attempt:WatchRegistrationAttemptV4,expectedIdentityGeneration:Int64) async throws
+    func closeWatchRegistrationV4(_ attempt:WatchRegistrationAttemptV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64) async throws
     func acceptWatchRegistrationV4(_ attempt:WatchRegistrationAttemptV4,receipt:VerifiedAuthorityReceiptV1,watchBinding:AccountBindingV4?,expectedIdentityGeneration:Int64) async throws
 }

@@ -35,4 +35,18 @@ final class WatchRegistrationStateTests:XCTestCase,@unchecked Sendable {
         let suspended=try await reopened.accountBindingV4();XCTAssertEqual(suspended?.suspended,true);XCTAssertEqual(suspended?.activationEpoch,1)
         let original=try await reopened.watchRegistrationReceiptV4(requestID:a.requestID);XCTAssertEqual(original,receipt.raw);try await reopened.close()
     }
+    func testClosedProofFaultsAreAtomicAndLateRegisteredCannotOverwriteFirstClosed() async throws {
+        for fault in [StoreFault.beforeCommit,.afterReceipt,.afterCommit] {
+            let c=try h.context(),a=try attempt(c,key:Curve25519.Signing.PrivateKey()),seed=try h.store(c)
+            _=try await seed.admitWatchRegistrationContextV4(a.context,deviceID:"watch",publicKey:a.payload.watchPublicKey);try await seed.saveWatchRegistrationAttemptV4(a,expectedIdentityGeneration:0);try await seed.close()
+            let extra:[String:Any]=["registration":["watchID":"watch","watchPublicKey":a.payload.watchPublicKey]],closed=try h.receipt(c,requestID:a.requestID,digest:a.requestDigest,operation:.registerWatch,result:.knownAbandoned,extra:extra),registered=try h.receipt(c,requestID:a.requestID,digest:a.requestDigest,operation:.registerWatch,result:.registered,extra:extra),failing=try h.store(c,fault:fault)
+            do {try await failing.closeWatchRegistrationV4(a,receipt:closed,expectedIdentityGeneration:0);XCTFail()}catch{};try await failing.close()
+            let reopened=try h.store(c),saved=try await reopened.watchRegistrationReceiptV4(requestID:a.requestID),pending=try await reopened.pendingWatchRegistrationAttemptsV4();XCTAssertEqual(saved != nil,fault == .afterCommit);XCTAssertEqual(pending.isEmpty,fault == .afterCommit)
+            try await reopened.closeWatchRegistrationV4(a,receipt:closed,expectedIdentityGeneration:0);try await reopened.closeWatchRegistrationV4(a,receipt:closed,expectedIdentityGeneration:0)
+            let binding=try AccountBindingV4(accountID:c.binding.accountID,cloudSpaceID:c.binding.cloudSpaceID,deviceID:"watch",activationEpoch:1,role:.watch,environment:.development)
+            do {try await reopened.acceptWatchRegistrationV4(a,receipt:registered,watchBinding:binding,expectedIdentityGeneration:0);XCTFail()}catch{}
+            let original=try await reopened.watchRegistrationReceiptV4(requestID:a.requestID),current=try await reopened.accountBindingV4();XCTAssertEqual(original,closed.raw);XCTAssertNil(current);try await reopened.close()
+        }
+    }
+
 }

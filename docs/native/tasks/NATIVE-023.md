@@ -1,11 +1,11 @@
 # NATIVE-023：schema4、原 Session 与 HTTP 纵向
 
-状态：收尾执行中，删除scope修复和Watch客户端登记已补；最终完整验证等待035已审测试修复合入后执行。两位非作者 exact 审阅、actual merge、同步与清理均待主代理，不预填通过。
+状态：036客户端封闭恢复已完成focused红绿，源码切片即将冻结并执行最终完整验证；两位非作者 exact 审阅、actual merge、同步与清理均待主代理，不预填通过。
 
 - 作者：m4_session；唯一 worktree `/Users/liam/.codex/worktrees/m4-session-authority/20260830_足球记录`。
 - 分支：`feat/m4-session-authority`；attachment `01a14fd7-5113-7dd2-8c29-c64d7f18b94a`。
 - 原始 base_ref / target：dev；完整 base / 开工 target / 初始 HEAD：`8d6ec935efa060ab462b2913ab8460734871ff40`；初始 clean。
-- 最后已验证合并目标：dev `71251f9afbb299e97344ff082c1d83bf17a110df`；已普通 no-ff 合入已审 027、029～033 与 GIT005/006。前轮运行 source：`094c690775809eb9ce40d82d19a139ff5d9ea4d3`；最终两卡提交的完整 SHA 与相同产品输入证明放树外 manifest，避免自引用 SHA。
+- 最后已验证合并目标：dev `17f2e39adcdbc633682992d5e5e2f348dbc940e6`；已普通 no-ff 合入已审 027、029～033 与 GIT005/006。前轮运行 source：`094c690775809eb9ce40d82d19a139ff5d9ea4d3`；最终两卡提交的完整 SHA 与相同产品输入证明放树外 manifest，避免自引用 SHA。
 - 依赖：021 final `a55dab4d10bf2b10011c81a49a30128cd9f835ad`；022 final `b648b730fbb9929453c32a43b12bc77bd2d67faf`，均已双审合入实际 base。后续已审接口来源与每次合并保留 Git 历史和验证卡。
 - 所有权：`native/Packages/MatchCore/**`、`native/Modules/AccountKit/**`、必要 `scripts/native/verify.sh`、本卡与 `docs/native/validation/NATIVE-023.md`。未写他人模块、工程配置或生产 Bootstrap。
 
@@ -38,3 +38,7 @@
 Watch客户端登记归023唯一Core/Account作者补齐：Phone仅授权/中继、Watch持钥与独立vault，原attempt/receipt持久，404/网络unknown不换ID，明确已提交过期只显式fresh；late identity/key/epoch/vault callback拒绝。实际NodeHTTP七项/0，含登记后原Watch Session开赛、COMMIT/query丢响应重开同session、Phone vault不覆盖、DB无Watch token；Core两项/0覆盖Phone/Watch receipt+binding六故障重开与旧epoch拒绝。024/026仅具体SDK/WC driver，public入口见README。该软件登记此前仅有backend harness，本卡现明确纳入023。
 
 上述新增输入与094旧层分开，最终完整host/最低SDK/两App待最新已审034/035普通合入后一次执行；未把旧层或选测计作最终整包通过。
+
+## 036可信封闭恢复接入
+
+已普通合入036 actual dev `17f2e39adcdbc633682992d5e5e2f348dbc940e6`，本树merge `d2d12d3c7f193c206cd5ebf7e54fd3f7ba59995d`。Watch超TTL未送达重开真实红1项4fail→绿；独立submit/recover action保留到Phone。knownAbandoned必须固定keyset严格验原receipt，Store不可变首次结果CAS，迟到registered拒绝；未签名status/404/401/网络unknown仍pending。Watch完整focused11/0，含十类篡改、无Phone attempt、closed COMMITlost、双端identity重新admit及fence无row401；Core登记focused3/0含闭合三个SQL fault/reopen/迟到成功反例。最终whole/SDK/App下轮单独记录，不以27d的570项旧层代替。

@@ -115,7 +115,7 @@ public struct AuthorityWatchRegistrationV1: Codable, Sendable, Equatable { publi
 public struct AuthorityLostGrantV1: Codable, Sendable, Equatable { public let grantID, migrationID, newPhoneID: String; public let expiresAt: Int64 }
 public struct AuthorityDeletionV1: Codable, Sendable, Equatable { public let backend, apple, cloud, local, health: String }
 public enum AuthorityResult: String, Codable, Sendable {
-    case held, originalMatch, releasedNormal, releasedAbnormal, registered, waitingMigration, checkpointAccepted, activated, waitingPeriod, deleted, grantIssued
+    case held, originalMatch, releasedNormal, releasedAbnormal, registered, knownAbandoned, waitingMigration, checkpointAccepted, activated, waitingPeriod, deleted, grantIssued
 }
 public struct AuthorityReceiptBodyV1: Codable, Sendable, Equatable {
     public let version: Int

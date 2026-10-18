@@ -135,3 +135,11 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - 新Core2/0涵盖Phone及Watch联合receipt/binding三个故障各close/reopen，原receipt bytes幂等，升级epoch推进持久generation并暂停旧binding，旧receipt即借新generation也不能重激活；稳定Watch key错误拒绝。完整原payload/receipt bytes保持；ControlIntent仍不塞transient登记字段。日志 `023-5-watch-registration-red.log`、`green-attempt1.log`（编译短路修正）、`green.log`、`store-green.log`。
 - 额外actual HTTP：登记COMMITlost后原session已过期，验原公开receipt才关闭unknown，不装过期credential，只显式新ID/challenge续登记，红2→绿；此前已确认过期正例独立日志保留，不误称红。`023-5-watch-registration-expiry-red.log` / `expiry-prior-confirmed-positive.log`。
 - 上述追加切片最终整包及最低SDK尚待执行，094旧层不复用成新输入PASS。035属于独立Presentation test owner；023不越界修改。
+
+## 036客户端封闭恢复红绿
+
+- 精确合入依赖036 actual `17f2e39adcdbc633682992d5e5e2f348dbc940e6`（source=final `d5c7017efbd61f1570062dac07380c8c86bc68f1`），本树merge `d2d12d3c7f193c206cd5ebf7e54fd3f7ba59995d`。未写backend或合同；新receipt result沿原域验证，历史bytes保持。
+- `testExpiredNotSubmittedReopenClosesOnlyVerifiedOriginalThenExplicitFreshRegistration` 实际NodeHTTP红1项4fail，旧401/永久pending复现；绿含Watch→Phone首次中继根本未送达、Phone本地无attempt，仍按显式recover，不误当submit。first submit保持registered，closed后只显式新ID/challenge登记，迟到原POST回同closed bytes。
+- WatchRegistrationTests完整focused11/0：十类篡改/unsigned status不能关pending，原proof可重开恢复；closed COMMIT丢响应后按原ID取同proof；原requests行移除仅永久fence留存时401仍unknown且不能新ID绕过；Phone/Watch身份变化后旧closed回调不能借新代次，当前显式重新核验/admit原ID闭合仍可用。原注册到期、旧key/epoch/vault、登记→原Session实际start正例保留。
+- Core focused3/0：原registered与closed结果同事务first-result互斥，closed beforeCommit/afterReceipt/afterCommit close/reopen全有全无，幂等原bytes，合法控制签名的迟到registered也不能覆盖closed或安装binding。Verified receipt无public init/JSONdecode旁路，Store使用自身pinned trust重验。
+- 红/绿日志 `023-36-watch-ttl-red.log` / `023-36-watch-ttl-green-attempt1.log` / `023-36-watch-focused-green.log` / `023-36-watch-store-green.log`。最终整包、最低SDK、两App将在新冻结source运行；27d的570/0+12SDK+2App仍保留为独立旧层，不提前标whole通过或审阅通过。

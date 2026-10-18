@@ -2,9 +2,20 @@ import Foundation
 import MatchStore
 import MatchSession
 
+public enum WatchRegistrationAction:String,Codable,Sendable {case submit,recover}
+public enum WatchRegistrationError:Error,Sendable,Equatable {case knownAbandoned}
 public protocol WatchRegistrationAuthorizing:Sendable {
     func registrationContext() async throws->WatchRegistrationContextV4
-    func authorizeRegistration(_ attempt:WatchRegistrationAttemptV4) async throws->Data
+    func authorizeRegistration(_ attempt:WatchRegistrationAttemptV4,action:WatchRegistrationAction) async throws->Data
+}
+enum WatchRegistrationClosure {
+    static func receipt(_ raw:Data,attempt:WatchRegistrationAttemptV4,trust:AuthorityTrustConfiguration)throws->VerifiedAuthorityReceiptV1? {
+        guard raw.count<=65536,let object=try JSONSerialization.jsonObject(with:raw) as? [String:Any] else {throw AuthorityError.invalidWire}
+        guard object["status"] != nil else {return nil}
+        guard object["status"] as? String=="knownAbandoned",Set(object.keys)==["status","receipt"],try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.withoutEscapingSlashes])==raw,let value=object["receipt"] else {throw AuthorityError.invalidWire}
+        let verified=try VerifiedAuthorityReceiptV1.verify(JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.withoutEscapingSlashes]),expected:AuthorityExpectedIntent(requestID:attempt.requestID,digest:attempt.requestDigest,operation:.registerWatch,accountID:attempt.context.accountID,epoch:attempt.context.activationEpoch),trust:trust),b=verified.body
+        guard b.result == .knownAbandoned,b.registration?.watchID==attempt.payload.watchID,b.registration?.watchPublicKey==attempt.payload.watchPublicKey,b.matchID.isEmpty,b.lockID.isEmpty,b.recordingDeviceID.isEmpty,b.migration==nil,b.peerGrant==nil,b.lostRecovery==nil,b.deletion==nil else {throw AuthorityError.intentMismatch};return verified
+    }
 }
 struct WatchRegistrationReply {
     struct Claims:Decodable {let sessionID:String;let expiresAt:Int64}
@@ -47,19 +58,28 @@ public actor PhoneWatchRegistrationService:WatchRegistrationAuthorizing {
         guard c.accountID==b.accountID,c.deviceID==b.deviceID,c.activationEpoch==b.activationEpoch,c.keyID == (try AuthorityWire.deviceKeyID(publicKey:client.signer.publicKey)),try await repository.identityGenerationV4()==generation else {throw AuthorityError.identityChanged}
         return try WatchRegistrationContextV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,phoneID:b.deviceID,activationEpoch:b.activationEpoch,environment:b.environment)
     }
-    public func authorizeRegistration(_ attempt:WatchRegistrationAttemptV4) async throws->Data {
+    public func authorizeRegistration(_ attempt:WatchRegistrationAttemptV4,action:WatchRegistrationAction) async throws->Data {
         try attempt.validate();guard let generation=admission else {throw AuthorityError.identityChanged}
         let context=try await registrationContext();guard context==attempt.context,try await repository.identityGenerationV4()==generation else {throw AuthorityError.identityChanged}
         try await coordinator.saveWatchRegistrationAttempt(attempt,expectedIdentityGeneration:generation)
-        do {
-            let original=try await client.query(requestID:attempt.requestID),reply=try WatchRegistrationReply(original,attempt:attempt,trust:client.trust,now:client.now(),credentialRequired:false)
-            if reply.expired {
-                try await coordinator.acceptWatchRegistration(attempt,receipt:reply.receipt,watchBinding:nil,expectedIdentityGeneration:generation)
-                guard try await repository.identityGenerationV4()==generation else {throw AuthorityError.identityChanged};return original
-            }
+        if action == .recover {
+            do {
+                let original=try await client.query(requestID:attempt.requestID)
+                if let closed=try WatchRegistrationClosure.receipt(original,attempt:attempt,trust:client.trust) {
+                    try await coordinator.closeWatchRegistration(attempt,receipt:closed,expectedIdentityGeneration:generation);return original
+                }
+                let reply=try WatchRegistrationReply(original,attempt:attempt,trust:client.trust,now:client.now(),credentialRequired:false)
+                if reply.expired {
+                    try await coordinator.acceptWatchRegistration(attempt,receipt:reply.receipt,watchBinding:nil,expectedIdentityGeneration:generation)
+                    guard try await repository.identityGenerationV4()==generation else {throw AuthorityError.identityChanged};return original
+                }
+            } catch let failure as AuthorityHTTPFailure where failure.code=="notFound" {} // Only explicit recovery may ask the backend to close the original attempt.
         }
-        catch let failure as AuthorityHTTPFailure where failure.code=="notFound" {} // Re-send only the exact original business ID/body.
-        let raw=try await client.signed(path:"/v1/devices/watches",body:attempt.canonicalRequest,requestID:attempt.requestID),reply=try WatchRegistrationReply(raw,attempt:attempt,trust:client.trust,now:client.now(),credentialRequired:true)
+        let raw=try await client.signed(path:action == .submit ? "/v1/devices/watches":"/v1/devices/watches/recover",body:attempt.canonicalRequest,requestID:attempt.requestID)
+        if let closed=try WatchRegistrationClosure.receipt(raw,attempt:attempt,trust:client.trust) {
+            try await coordinator.closeWatchRegistration(attempt,receipt:closed,expectedIdentityGeneration:generation);return raw
+        }
+        let reply=try WatchRegistrationReply(raw,attempt:attempt,trust:client.trust,now:client.now(),credentialRequired:true)
         try await coordinator.acceptWatchRegistration(attempt,receipt:reply.receipt,watchBinding:nil,expectedIdentityGeneration:generation)
         guard try await repository.identityGenerationV4()==generation,try await registrationContext()==context else {throw AuthorityError.identityChanged};return raw
     }
@@ -96,15 +116,19 @@ public actor WatchRegistrationService {
         signing.removeAll() // The raw challenge is never persisted.
         let attempt=try WatchRegistrationAttemptV4(context:context,payload:WatchRegistrationPayloadV4(requestID:requestID,watchID:deviceID,watchPublicKey:client.signer.publicKey,challengeID:challenge.challengeID,deviceProof:AuthorityWire.base64URL(signature)),challengeRequestID:challengeRequestID,challengeSHA256:hash)
         try await coordinator.saveWatchRegistrationAttempt(attempt,expectedIdentityGeneration:generation)
-        return try await finish(attempt,generation:generation)
+        return try await finish(attempt,generation:generation,action:.submit)
     }
     public func recover(requestID:String) async throws->AccountAuthentication {
         let (context,generation)=try await currentAdmission()
         guard let attempt=try await repository.watchRegistrationAttemptV4(requestID:requestID),attempt.context==context,attempt.payload.watchID==deviceID,attempt.payload.watchPublicKey==client.signer.publicKey else {throw AuthorityError.identityChanged}
-        return try await finish(attempt,generation:generation)
+        return try await finish(attempt,generation:generation,action:.recover)
     }
-    func finish(_ attempt:WatchRegistrationAttemptV4,generation:Int64) async throws->AccountAuthentication {
-        let raw=try await authorizer.authorizeRegistration(attempt)
+    func finish(_ attempt:WatchRegistrationAttemptV4,generation:Int64,action:WatchRegistrationAction) async throws->AccountAuthentication {
+        let raw=try await authorizer.authorizeRegistration(attempt,action:action)
+        if let closed=try WatchRegistrationClosure.receipt(raw,attempt:attempt,trust:client.trust) {
+            try await coordinator.closeWatchRegistration(attempt,receipt:closed,expectedIdentityGeneration:generation)
+            throw WatchRegistrationError.knownAbandoned
+        }
         guard let object=try JSONSerialization.jsonObject(with:raw) as? [String:Any] else {throw AuthorityError.invalidWire}
         let reply=try WatchRegistrationReply(raw,attempt:attempt,trust:client.trust,now:client.now(),credentialRequired:object["credential"] != nil)
         if reply.expired {
