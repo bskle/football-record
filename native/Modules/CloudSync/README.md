@@ -42,6 +42,14 @@ accountChanged 是持久 scope fence，重开不自动解除。服务在网络�
 
 scope / upload / batch 的可选持久 issue 只将 SQL NULL 视为无 issue；非 NULL 必须是已知 CloudIssue 枚举，否则抛 invalidPayload，保留原文件与原 bytes，并在任何 driver 调用或业务导入前停止。不会把未知状态自动清除或当作恢复正常。
 
+## 账号迁移控制检查点（NATIVE-031）
+
+`CloudCheckpoint.account(scope:checkpointID:recordIDs:)` 接收调用方持久的稳定控制 UUID 与当前完整已确认 facts 的 recordID 集合。其 `matchID` 固定为 `CloudCheckpoint.accountMatchID(for:)`，即 `account-checkpoint:<scope.stableZoneKey>`；仅此账号控制锚允许空集合。它只产生 checkpoint 元数据，不创建 Match、events、permit 或 scratch facts。非空引用仍去重校验并排序；普通 match checkpoint 仍要求非空引用。
+
+CloudRecord 的 typed / raw canonical / Codable 导入边界都检查控制锚与 record 的 account、cloudSpace、zone 精确一致；错 hash 或其他稳定 scope 的锚被拒绝。epoch 不属于 stable zone 锚，旧 epoch 合法历史的读取规则保持。调用方的业务 bridge 仍负责确认引用集合就是当前完整已确认 facts，不能用控制记录代替业务集合核验。
+
+迁移提交绑定的是该控制 **CloudRecord.recordID + CloudRecord.digest（canonical bytes 摘要）**。`CloudCheckpoint.checkpointID` 是稳定控制 UUID；`CloudUpload.checkpointID` 仍是既有 asset manifest ID，与迁移提交 ID 不同。普通非空 match checkpoint 的 canonical bytes、recordID 与 digest 编码规则不变。031 的六项回归与原47项在同一轮完成53/53；两项 fresh 最低 simulator target 编译通过，详见 [031验证卡](../../../docs/native/validation/NATIVE-031.md)。
+
 ## 验证与交接
 
 ```sh
