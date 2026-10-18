@@ -11,6 +11,7 @@ export function validatePayload(operation,r){
  if(!r||Object.getPrototypeOf(r)!==Object.prototype||!definitions[operation])fail('invalidPayload',422);
  let fields=['version','requestID',...definitions[operation].split(' ')];
  if(operation==='terminate'&&r.mode==='normal')fields.push('cloudConfirmationID','contentCommitment');
+ if(operation==='authRecover'&&Object.hasOwn(r,'devicePublicKey'))fields.push('devicePublicKey');
  if(Object.keys(r).sort().join(',')!==fields.sort().join(',')||r.version!==1||!id(r.requestID))fail('invalidPayload',422);
  for(const field of fields){const value=r[field];if(['version','requestID'].includes(field))continue;
    if(['activationEpoch','originalActivationEpoch'].includes(field)){if(!Number.isSafeInteger(value)||value<1)fail('invalidPayload',422);}
