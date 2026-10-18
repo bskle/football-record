@@ -71,4 +71,13 @@ final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
         try await a.close();try await b.close();let reopened=try store(c),pending=try await reopened.pendingAuthAttemptsV4();XCTAssertEqual(pending.count,1);try await reopened.close()
     }
 
+    func testLocalEraseRemovesBusinessBearingNormalWitnessButKeepsSagaAndCapability() async throws {
+        let c=try context(),seed=try store(c),saga=try saga(c);try await seed.bindAccountV4(c.binding);try await seed.createDeletionSagaV4(saga)
+        let signed=try receipt(c,requestID:"delete",digest:saga.intent.digest,operation:.deleteAccount,result:.deleted,extra:["deletion":["backend":"backendDeleted","apple":"revoked","cloud":"clientManaged","local":"clientManaged","health":"separateConfirmation"]]),backend=try await seed.acceptDeletionV4(requestID:"delete",receipt:signed,expectedRevision:0)
+        try await seed.close();let db=try SQLite(url:c.url,fault:nil),raw=try Canonical.data("controlled-business-facts-witness")
+        try db.execute("INSERT INTO lifecycle_steps_v4 VALUES (?,?,?)",[.text("normal-intent:business-witness"),.blob(raw),.text(Canonical.hash(raw))]);try db.close()
+        let reopened=try store(c);_=try await reopened.eraseLocalBusinessV4(requestID:"delete",expectedRevision:backend.revision);try await reopened.close()
+        let inspect=try SQLite(url:c.url,fault:nil);XCTAssertEqual(try inspect.scalar("SELECT count(*) FROM lifecycle_steps_v4 WHERE id LIKE 'normal-intent:%'").number,0);XCTAssertEqual(try inspect.scalar("SELECT count(*) FROM lifecycle_steps_v4 WHERE id='deletion:delete'").number,1);try inspect.close()
+    }
+
 }

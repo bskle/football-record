@@ -114,6 +114,7 @@ extension MatchStore {
             for id in try matchIDs() {if let descriptor=try descriptorAndGeneration(id)?.0 {guard try loadOperations(matchID:id,descriptor:descriptor).allSatisfy({$0.state != .pending && $0.state != .needsReconciliation}) else {throw AuthorityError.unavailable}}}
             let tables=["matches","events","commands","outbox","inbound","diagnostics","completion","capture_identities","capture_revisions","capture_operations","capture_operation_history","business_outbox","commands_v2","completion_confirmations","completion_v2","sync_delivery_v3","sync_fragments_v3","sync_context_v3","sync_registry_v3","sync_routes_v3","sync_sequences_v3","sync_inbox_v3","sync_acknowledgements_v3","sync_ack_controls_v3","sync_receive_progress_v3","cloud_applied_batches_v4","cloud_checkpoints_v4","cloud_records_v4","cloud_history_v4","cloud_cursors_v4","cloud_deletions_v4","peer_contexts_v4","peer_inbox_v4","peer_grants_v4"]
             for table in tables {try db.execute("DELETE FROM "+table)}
+            try db.execute("DELETE FROM lifecycle_steps_v4 WHERE id LIKE 'normal-intent:%' OR id LIKE 'migration-checkpoint:%'")
             saga.localProgress = .completed;saga.revision += 1
             try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+requestID);try fail(.beforeCommit);return saga
         };if fault == .afterCommit {throw StoreError.responseLost};return result

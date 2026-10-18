@@ -45,12 +45,16 @@ struct FixedIdentity:DeviceIdentityProvider { let value:String;func localDeviceI
 
 actor TrackingGateway:WorkoutGateway {
     var operations:[CaptureOperation]=[]
+    var suspendFinish:Bool
+    var finishContinuation:CheckedContinuation<Void,Never>?
     var suspendRecovery:Bool
     var recoveryContinuation:CheckedContinuation<Void,Never>?
-    init(suspendRecovery:Bool=false){self.suspendRecovery=suspendRecovery}
+    init(suspendRecovery:Bool=false,suspendFinish:Bool=false){self.suspendRecovery=suspendRecovery;self.suspendFinish=suspendFinish}
+    func releaseFinish(){suspendFinish=false;finishContinuation?.resume();finishContinuation=nil}
     func releaseRecovery(){suspendRecovery=false;recoveryContinuation?.resume();recoveryContinuation=nil}
     func perform(_ operation:CaptureOperation) async->WorkoutObservation {
         operations.append(operation)
+        if operation.action == .finish,suspendFinish {await withCheckedContinuation {finishContinuation=$0}}
         if operation.action == .recover,suspendRecovery {await withCheckedContinuation {recoveryContinuation=$0}}
         let outcome:WorkoutOutcome
         let failure:CaptureFailure?

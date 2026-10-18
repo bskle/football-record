@@ -30,6 +30,12 @@ public actor LifecycleService {
     func binding(allowSuspended:Bool=false) async throws->AccountBindingV4 {
         try await facade();guard let b=try await repository.accountBindingV4(),(allowSuspended || !b.suspended),b.accountID==scope.accountID,b.cloudSpaceID==scope.cloudSpaceID,b.activationEpoch==scope.activationEpoch,b.environment==client.trust.environment else {throw AuthorityError.identityChanged};return b
     }
+    func fenceTransport() async throws {
+        do {try await ledger.recordScopeIssue(scope:scope,issue:.accountChanged,at:client.now(),nextAttemptAt:nil)}
+        catch let error as CloudError where error.issue == .accountChanged {
+            guard try await ledger.scopeState(scope:scope).issue == .accountChanged else {throw error}
+        }
+    }
     func issue(_ error:any Error)->LifecycleIssueV4 {
         if let e=error as? AuthorityHTTPFailure {switch e.code {case "reauthenticationRequired":return .reauthenticationRequired;case "waitingPeriod":return .waitingPeriod;case "activationMismatch","cloudIdentityMismatch":return .accountChanged;case "migrationBlocked","activeMatchExists":return .blocked;case "unavailable":return .unavailable;default:return .unknown}}
         if error is URLError || (error as? AuthorityError) == .unavailable {return .unavailable};return .unknown
@@ -43,7 +49,7 @@ public actor LifecycleService {
         let saga=try DeletionSagaV4(intent:ControlIntentV1(requestID:requestID,operation:.deleteAccount,fields:f),accountID:b.accountID,activationEpoch:b.activationEpoch,recoveryCapability:cap,cloudChoice:cloud,localChoice:local,healthChoice:health,healthConfirmed:healthConfirmed)
         try await coordinator.createDeletionSaga(saga)
         try await coordinator.setAnalyticsEnabled(false)
-        try await ledger.recordScopeIssue(scope:scope,issue:.accountChanged,at:client.now(),nextAttemptAt:nil)
+        try await fenceTransport()
         return saga
     }
     struct DeleteStatusRequest:Encodable {let version=1;let requestID,deleteRequestID,recoveryCapability:String}
@@ -82,7 +88,7 @@ public actor LifecycleService {
                 try await client.vault.advanceIdentityFence(to:repository.identityGenerationV4())
             } catch {try await ControlQueueSupport.failed(saga.intent,error:error,coordinator:coordinator,at:client.now());return try await save(saga) {$0.lastIssue=issue(error)}}
         }
-        try await ledger.recordScopeIssue(scope:scope,issue:.accountChanged,at:client.now(),nextAttemptAt:nil)
+        try await fenceTransport()
         // Each user choice remains independently retryable; one failed part does not hide another result.
         if saga.cloudChoice == .delete,saga.cloudProgress != .completed {
             saga=try await save(saga) {$0.cloudProgress = .running}
@@ -110,7 +116,7 @@ public actor LifecycleService {
         try await facade();try await coordinator.suspendAccount()
         try await client.vault.advanceIdentityFence(to:repository.identityGenerationV4())
         try await coordinator.setAnalyticsEnabled(false)
-        try await ledger.recordScopeIssue(scope:scope,issue:.accountChanged,at:client.now(),nextAttemptAt:nil)
+        try await fenceTransport()
     }
     public func setAnalyticsEnabled(_ value:Bool) async throws {try await facade();if value {_=try await binding()};try await coordinator.setAnalyticsEnabled(value)}
     public func enqueueAnalytics(_ event:AnalyticsEventV4) async throws {try await facade();try await coordinator.enqueueAnalytics(event)}
@@ -131,6 +137,7 @@ public actor LifecycleService {
         for id in try await repository.matchIDs() {
             let s=try await repository.snapshotV2(matchID:id),state=try s.business.replay(now:client.now()).state
             guard state == .completed || state == .incomplete else {throw LifecycleClientError.pendingBusiness}
+            guard try await repository.pendingCaptureOperations(matchID:id).isEmpty else {throw LifecycleClientError.pendingBusiness}
             let a=try await repository.authorityStateV4(matchID:id,now:client.now())
             guard [.terminal,.releasedAbnormal,.releasedNormal].contains(a.status) else {throw LifecycleClientError.pendingBusiness}
         }
@@ -156,7 +163,7 @@ public actor LifecycleService {
         let epoch=envelope.body.activationEpoch
         let receipt=try VerifiedAuthorityReceiptV1.verify(raw,expected:AuthorityExpectedIntent(intent,accountID:b.accountID,epoch:epoch),trust:client.trust)
         try await coordinator.acceptLifecycleResult(intent:intent,receipt:receipt)
-        if (receipt.body.result == .checkpointAccepted || receipt.body.result == .activated),try await repository.accountBindingV4()?.suspended == true {try await ledger.recordScopeIssue(scope:scope,issue:.accountChanged,at:client.now(),nextAttemptAt:nil)}
+        if (receipt.body.result == .checkpointAccepted || receipt.body.result == .activated),try await repository.accountBindingV4()?.suspended == true {try await fenceTransport()}
         return receipt
     }
     public func retryPendingControls() async throws->[VerifiedAuthorityReceiptV1] {

@@ -13,7 +13,6 @@ public struct DeviceCredential: Decodable, Sendable, Equatable {
 }
 public protocol DeviceCredentialVault: Sendable {
     func credential() async throws -> DeviceCredential
-    func replace(_ credential:DeviceCredential?) async throws
     /// Atomic across the actual credential write; a late SDK callback cannot lower this fence.
     func advanceIdentityFence(to generation:Int64) async throws
     func replace(_ credential:DeviceCredential?,expectedIdentityGeneration:Int64) async throws
@@ -23,7 +22,6 @@ public actor MemoryDeviceCredentialVault: DeviceCredentialVault {
     private var current:DeviceCredential?
     public init(_ credential:DeviceCredential?=nil) { current=credential }
     public func credential() throws -> DeviceCredential { guard let current else { throw AuthorityError.unavailable };return current }
-    public func replace(_ credential:DeviceCredential?) { current=credential }
     public func advanceIdentityFence(to value:Int64)throws {guard value>=generation else {throw AuthorityError.identityChanged};if value>generation {generation=value;current=nil}}
     public func replace(_ credential:DeviceCredential?,expectedIdentityGeneration:Int64)throws {guard generation==expectedIdentityGeneration else {throw AuthorityError.identityChanged};current=credential}
 }
@@ -45,6 +43,11 @@ public struct AuthorityHTTPRequest: Sendable {
     public let method,path:String
     public let body:Data
     public let authorization,deviceProof:String?
+    public static func opaqueRelay(method:String,path:String,body:Data,authorization:String,deviceProof:String)throws->Self {
+        guard ["GET","POST"].contains(method),path.hasPrefix("/v1/"),path.utf8.count<=512,path.utf8.allSatisfy({(48...57).contains($0)||(65...90).contains($0)||(97...122).contains($0)||[45,46,47,58,95].contains($0)}),body.count<=16384,method != "GET" || body.isEmpty,authorization.hasPrefix("Bearer "),authorization.utf8.count<=2048,deviceProof.utf8.count<=8192 else {throw AuthorityError.invalidWire}
+        _=try AuthorityWire.decodeBase64URL(String(authorization.dropFirst(7)));_=try AuthorityWire.decodeBase64URL(deviceProof)
+        return Self(method:method,path:path,body:body,authorization:authorization,deviceProof:deviceProof)
+    }
     init(method:String,path:String,body:Data,authorization:String?=nil,deviceProof:String?=nil) { self.method=method;self.path=path;self.body=body;self.authorization=authorization;self.deviceProof=deviceProof }
 }
 public struct AuthorityHTTPResponse: Sendable {

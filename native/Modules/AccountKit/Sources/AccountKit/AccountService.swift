@@ -78,17 +78,16 @@ public actor AccountService {
         } catch is URLError {return .unresolved}
         if let object=try JSONSerialization.jsonObject(with:raw) as? [String:Any],Set(object.keys)==["status"] {
             if object["status"] as? String=="knownAbandoned" {try await coordinator.resolveAuthAttempt(requestID:authRequestID,resolution:.knownAbandoned);return .knownAbandoned}
-            if object["status"] as? String=="knownRevoked" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownRevoked);return .knownRevoked}
-            if object["status"] as? String=="knownExpired" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownExpired);return .knownExpired}
+            if object["status"] as? String=="knownRevoked" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownRevoked,expectedIdentityGeneration:generation);return .knownRevoked}
+            if object["status"] as? String=="knownExpired" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownExpired,expectedIdentityGeneration:generation);return .knownExpired}
             throw AuthorityError.invalidWire
         }
         return .authenticated(try await accept(raw,attempt:attempt,generation:generation))
     }
-    func terminalCredential(authRequestID:String,resolution:AuthResolutionV4) async throws {
-        let expected=try await requireAdmission()
+    func terminalCredential(authRequestID:String,resolution:AuthResolutionV4,expectedIdentityGeneration expected:Int64) async throws {
         guard let generation=try await coordinator.resolveTerminalAuthentication(requestID:authRequestID,resolution:resolution,expectedIdentityGeneration:expected) else {return}
         try await client.vault.advanceIdentityFence(to:generation)
-        admissionGeneration=nil
+        if admissionGeneration==expected {admissionGeneration=nil}
     }
 
     func accept(_ raw:Data,attempt:AuthAttemptV4,generation:Int64) async throws->AccountAuthentication {

@@ -47,7 +47,6 @@ actor GatedCredentialVault:DeviceCredentialVault {
     var entered=false
     var gate:CheckedContinuation<Void,Never>?
     func credential() async throws->DeviceCredential {try await inner.credential()}
-    func replace(_ value:DeviceCredential?) async throws {await inner.replace(value)}
     func advanceIdentityFence(to generation:Int64) async throws {try await inner.advanceIdentityFence(to:generation)}
     func replace(_ value:DeviceCredential?,expectedIdentityGeneration:Int64) async throws {
         if !entered {entered=true;await withCheckedContinuation {gate=$0}}
@@ -249,6 +248,35 @@ final class AuthenticationRecoveryTests:XCTestCase,@unchecked Sendable {
         let binding=try await h.repo.accountBindingV4(),current=try? await h.vault.credential(),generation=try await h.repo.identityGenerationV4()
         XCTAssertEqual(binding,fresh.binding);XCTAssertTrue(current==credential,"the current credential must remain");XCTAssertEqual(generation,0)
         try await h.repo.close();let after=try await harness(f,root:h.root,signer:h.signer,now:Date(timeIntervalSince1970:Double(old.expiresAt+1))),persisted=try await after.repo.accountBindingV4();XCTAssertEqual(persisted,fresh.binding)
+    }
+
+    func testOldTerminalResponseCannotBorrowExplicitNewAdmissionWhileFreshAuthIsPending() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()};let original=try await harness(f)
+        _=try await original.service.signIn(requestID:"generation-A",challengeRequestID:"generation-A-challenge")
+        let old=try await original.vault.credential();try await original.repo.close();_=try f.command(["op":"clock","now":old.expiresAt+1])
+        let h=try await harness(f,root:original.root,signer:original.signer,now:Date(timeIntervalSince1970:Double(old.expiresAt+1)))
+        let freshGate=GatedAuthResponseRelay(try URLSessionAuthorityRelay(baseURL:URL(string:f.metadata.baseURL)!,environment:.development),path:"/v1/auth/apple"),oldGate=GatedAuthResponseRelay(freshGate,path:"/v1/auth/recover")
+        let client=AuthorityClient(relay:oldGate,vault:h.vault,signer:h.signer,trust:h.client.trust,now:{Date(timeIntervalSince1970:Double(old.expiresAt+1))}),service=AccountService(client:client,repository:h.repo,coordinator:h.session,deviceID:"new-client",cloudSpaceID:"fixture-cloud",apple:h.apple)
+        let accountID=try await h.repo.accountBindingV4()?.accountID
+        try await service.admitCurrentIdentity(accountID:accountID)
+        let pendingOld=Task {try await service.recover(authRequestID:"generation-A")}
+        var deadline=Date().addingTimeInterval(3)
+        while !(await oldGate.entered),Date()<deadline {try await Task.sleep(for:.milliseconds(10))}
+        let oldEntered=await oldGate.entered;XCTAssertTrue(oldEntered)
+        let ledger=try SQLiteCloudLedger(url:h.root.appendingPathComponent("generation-cloud.sqlite")),scope=try CloudBridgeTests().scope(f),lifecycle=LifecycleService(client:client,repository:h.repo,coordinator:h.session,scope:scope,ledger:ledger)
+        try await lifecycle.identityChanged()
+        try await service.admitCurrentIdentity(accountID:accountID)
+        let pendingFresh=Task {try await service.signIn(requestID:"generation-B",challengeRequestID:"generation-B-challenge")}
+        deadline=Date().addingTimeInterval(3)
+        while !(await freshGate.entered),Date()<deadline {try await Task.sleep(for:.milliseconds(10))}
+        let freshEntered=await freshGate.entered;XCTAssertTrue(freshEntered)
+        let pending=try await h.repo.pendingAuthAttemptsV4();XCTAssertEqual(pending.map(\.requestID),["generation-B"])
+        await oldGate.release();_=try await pendingOld.value
+        let generation=try await h.repo.identityGenerationV4();XCTAssertEqual(generation,1,"old response must retain its original admission generation")
+        await freshGate.release()
+        do {let fresh=try await pendingFresh.value;XCTAssertFalse(fresh.binding.suspended)}catch {XCTFail("explicit new-generation authentication must remain admissible: \(error)")}
+        let binding=try await h.repo.accountBindingV4(),current=try? await h.vault.credential();XCTAssertEqual(binding?.suspended,false);XCTAssertNotNil(current)
+        try await ledger.close()
     }
 
 }

@@ -15,6 +15,15 @@ actor ControlledAccountDeletion:CloudAccountDeletionDriver,AppWorkoutDeletionDri
     func deletePrivateZone(scope:CloudScope) async throws {cloudCalls += 1;if cloudFails {throw AuthorityError.unavailable}}
     func deleteAppCreatedWorkouts(confirmationID:String) async throws {healthCalls += 1;if healthFails {throw AuthorityError.unavailable}}
 }
+actor SingleOwnedLedgerEraser:LocalTransportDeletionDriver {
+    let ledger:SQLiteCloudLedger
+    var requestIDs:[String]=[]
+    init(_ ledger:SQLiteCloudLedger){self.ledger=ledger}
+    func purgeBusinessCopies(_ request:LocalTransportDeletionRequest) async throws {
+        let id="file-erasure-"+AuthorityWire.hash(Data((request.requestID+"\0"+request.requestDigest+"\0fixture-owned-file").utf8));requestIDs.append(id)
+        _=try await ledger.eraseLocalTransport(CloudLocalTransportEraseRequest(requestID:id,scope:request.scope))
+    }
+}
 final class LifecycleRecoveryTests:XCTestCase,@unchecked Sendable {
     func scope(_ binding:AccountBindingV4)throws->CloudScope {try CloudScope(accountID:binding.accountID,cloudSpaceID:binding.cloudSpaceID,zoneID:"matches",activationEpoch:binding.activationEpoch)}
     func testRealRevocationDeleteCommitLossRecoversByCapabilityAndIndependentChoicesSurviveReopen() async throws {
@@ -78,6 +87,45 @@ final class LifecycleRecoveryTests:XCTestCase,@unchecked Sendable {
         let remaining=try await ledger.uploads(scope:scope);XCTAssertEqual(remaining.first?.originalBytes,try upload.canonicalBytes())
         let saved=try await h.repo.deletionSagaV4(requestID:"delete-with-local-copy");XCTAssertEqual(saved?.recoveryCapability,result.recoveryCapability)
         try await ledger.close()
+    }
+
+    func testActualNonemptyLedgerPurgeReopenCanRetryRemainingCloudAndHealthWithoutUnfencing() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()};_=try f.command(["op":"revoker"])
+        let h=try await HTTPAuthorityIntegrationTests().harness(f,gateway:TrackingGateway()),start=try await h.session.prepareStart(starter:true)
+        _=try await h.session.execute(start);try await waitForCapture(h.repo,matchID:start.matchID)
+        _=try await h.session.execute(h.session.prepare(.end,matchID:start.matchID));try await waitForCapture(h.repo,matchID:start.matchID)
+        let scope=try CloudBridgeTests().scope(f),url=h.root.appendingPathComponent("one-owned-ledger.sqlite"),ledger=try SQLiteCloudLedger(url:url),bridge=CloudSessionBridge(repository:h.repo,client:h.client,policy:.development(databaseNamespace:"http-session"));try await bridge.attach(h.session)
+        let upload=try await bridge.prepareUpload(matchID:start.matchID,scope:scope);try await ledger.enqueue(upload)
+        _=try await CloudSyncService(scope:scope,ledger:ledger,driver:ReadbackCloudDriver(),sink:bridge,clock:{h.date}).synchronize()
+        let evidence=try await ledger.saveEvidence(scope:scope);_=try await bridge.acceptDevelopmentSave(upload:upload,evidence:XCTUnwrap(evidence.first),ledger:ledger)
+        _=try await AuthorityControlService(client:h.client,repository:h.repo,coordinator:h.session).normal(matchID:start.matchID,requestID:"purge-normal-release")
+        let auth=AccountService(client:h.client,repository:h.repo,coordinator:h.session,deviceID:f.metadata.credential.deviceID,cloudSpaceID:"fixture-cloud",apple:FixtureAppleSignIn(f,subject:"fixture-subject-never-stored"));try await auth.admitCurrentIdentity(accountID:scope.accountID)
+        let fresh=try await auth.signIn(requestID:"purge-fresh",challengeRequestID:"purge-fresh-challenge"),reauth=try XCTUnwrap(fresh.reauthenticationID),driver=ControlledAccountDeletion(emptyLedger:ledger,cloudFails:true,healthFails:true),eraser=SingleOwnedLedgerEraser(ledger)
+        let service=LifecycleService(client:h.client,repository:h.repo,coordinator:h.session,scope:scope,ledger:ledger,cloudDeletion:driver,healthDeletion:driver,localTransportDeletion:eraser)
+        _=try await service.requestDeletion(requestID:"purge-original-saga",reauthenticationID:reauth,cloud:.delete,local:.delete,health:.delete,healthConfirmed:true)
+        let first=try await service.resumeDeletion(requestID:"purge-original-saga");XCTAssertEqual(first.localDataProgress,.completed);XCTAssertEqual(first.cloudProgress,.failed);XCTAssertEqual(first.healthProgress,.failed);XCTAssertFalse(first.finished)
+        let empty=try await ledger.uploads(scope:scope);XCTAssertTrue(empty.isEmpty)
+        try await h.repo.close();try await ledger.close();await driver.succeed()
+        let repo=try SQLiteSessionRepository(rootDirectory:h.root,databaseNamespace:"http-session",authorityTrust:h.client.trust,cloudSavePolicy:.development(databaseNamespace:"http-session")),session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:f.metadata.credential.deviceID),clock:FixedClock(date:h.date),ids:UUIDSessionIDFactory(),permits:UnavailableStartPermitProvider(),workout:UnavailableWorkoutGateway(),environment:.development(databaseNamespace:"http-session")),reopenedLedger=try SQLiteCloudLedger(url:url),reopened=LifecycleService(client:h.client,repository:repo,coordinator:session,scope:scope,ledger:reopenedLedger,cloudDeletion:driver,healthDeletion:driver,localTransportDeletion:SingleOwnedLedgerEraser(reopenedLedger))
+        let discovered=try await repo.deletionSagasV4(),id=try XCTUnwrap(discovered.first?.intent.requestID),final=try await reopened.resumeDeletion(requestID:id)
+        XCTAssertTrue(final.finished);XCTAssertEqual(final.recoveryCapability,first.recoveryCapability)
+        let fence=try await reopenedLedger.scopeState(scope:scope);XCTAssertEqual(fence.issue,.accountChanged)
+        do {try await reopenedLedger.enqueue(upload);XCTFail("a retry must never remove the permanent file fence")}catch{}
+        let ids=await eraser.requestIDs;XCTAssertEqual(ids.count,1)
+        try await reopenedLedger.close();try await repo.close()
+    }
+
+    func testNormalMigrationWaitsForOriginalCaptureCleanupEvenAfterAbnormalRelease() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()};let gateway=TrackingGateway(suspendFinish:true),h=try await HTTPAuthorityIntegrationTests().harness(f,gateway:gateway),start=try await h.session.prepareStart(starter:true)
+        _=try await h.session.execute(start);try await waitForCapture(h.repo,matchID:start.matchID)
+        _=try await AuthorityControlService(client:h.client,repository:h.repo,coordinator:h.session).abnormal(matchID:start.matchID,requestID:"migration-pending-cleanup")
+        let deadline=Date().addingTimeInterval(3)
+        while !(await gateway.operations).contains(where:{$0.action == .finish}),Date()<deadline {try await Task.sleep(for:.milliseconds(10))}
+        let next=try await AuthenticationRecoveryTests().harness(f,subject:"fixture-subject-never-stored",deviceID:"pending-next");_=try await next.service.signIn(requestID:"pending-next-auth",challengeRequestID:"pending-next-challenge")
+        let scope=try CloudBridgeTests().scope(f),ledger=try SQLiteCloudLedger(url:h.root.appendingPathComponent("pending-cloud.sqlite")),service=LifecycleService(client:h.client,repository:h.repo,coordinator:h.session,scope:scope,ledger:ledger)
+        do {_=try await service.prepareMigration(newPhoneID:"pending-next",requestID:"must-wait-for-original-token");XCTFail("pending capture cleanup blocks migration before HTTP")}catch{}
+        let rows=try XCTUnwrap(f.command(["op":"inspect","sql":"SELECT request_id FROM requests WHERE request_id='must-wait-for-original-token'"])["rows"] as? [[String:Any]]);XCTAssertTrue(rows.isEmpty)
+        await gateway.releaseFinish();try? await waitForCapture(h.repo,matchID:start.matchID);try await ledger.close()
     }
 
 }
