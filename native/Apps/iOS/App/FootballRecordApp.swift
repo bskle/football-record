@@ -1,3 +1,4 @@
+import AppIntegration
 import MatchPresentation
 import SwiftUI
 
@@ -6,41 +7,18 @@ struct FootballRecordApp: App {
     var body: some Scene { WindowGroup { RecordingRoot() } }
 }
 private struct RecordingRoot: View {
-    @State private var model: RecordingModel?
-    @State private var failure: String?
-    @State private var replacing = false
+    @State private var assembly = AppAssembly()
+    @State private var environments = false
+    @Environment(\.scenePhase) private var phase
     var body: some View {
         Group {
-            if let model { PhoneMatchView(model: model, enterDevelopment: enterDevelopment).id(ObjectIdentifier(model)) }
-            else if let failure { Text(failure).padding() }
-            else { ProgressView("正在载入记录") }
-        }.disabled(replacing).task { if model == nil { await initialize() } }
-    }
-    private func initialize() async {
-        do {
-            #if DEBUG
-            let arguments = ProcessInfo.processInfo.arguments
-            if arguments.contains("--ui-testing"), let index = arguments.firstIndex(of: "--ui-dataset"), arguments.indices.contains(index + 1) {
-                if let scenarioIndex = arguments.firstIndex(of: "--ui-scenario"), arguments.indices.contains(scenarioIndex + 1), let scenario = DebugRecordingScenario(rawValue: arguments[scenarioIndex + 1]) {
-                    model = try await AppBootstrap.developmentScenario(scenario, dataset: arguments[index + 1])
-                    return
-                }
-                model = try AppBootstrap.development(dataset: arguments[index + 1], failFirstScore: arguments.contains("--ui-fail-first-score"), fixedClock: arguments.contains("--ui-fixed-clock"))
-                return
-            }
-            #endif
-            model = try AppBootstrap.production()
-        } catch { failure = "暂时无法载入记录，请保留本机数据后重试。" }
-    }
-    private func enterDevelopment() {
-        #if DEBUG
-        guard !replacing else { return }; replacing = true
-        Task {
-            defer { replacing = false }
-            await model?.shutdown()
-            do { model = try AppBootstrap.development(dataset: UUID().uuidString) }
-            catch { failure = "无法建立独立开发演练。" }
-        }
-        #endif
+            if let model = assembly.model {
+                PhoneMatchView(model: model, enterDevelopment: { Task { await assembly.newUISimulation() } }, openEnvironment: { environments = true }, environmentTitle: assembly.mode.title, devicePairStatus: assembly.peerStatus).id(ObjectIdentifier(model)).disabled(assembly.switching || assembly.initializing)
+            } else if let message = assembly.message {
+                VStack { Text(message); Button("重试载入") { Task { await assembly.initialize() } } }.padding()
+            } else { ProgressView("正在载入记录") }
+        }.task { await assembly.initialize() }
+          .sheet(isPresented: $environments) { EnvironmentSelectionView(assembly: assembly) }
+          .onChange(of: phase) { _, next in if next == .active { Task { await assembly.recoverCurrent() } } }
     }
 }

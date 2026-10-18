@@ -15,11 +15,16 @@ printf 'Native UI evidence: %s\n' "$run_root"
 test_args=(test)
 if [[ -n "${NATIVE_UI_TEST_FILTER:-}" ]]; then
   test_args+=("-only-testing:$NATIVE_UI_TEST_FILTER")
+elif [[ -n "${NATIVE_UI_TEST_CLASS:-}" ]]; then
+  [[ "$NATIVE_UI_TEST_CLASS" =~ ^[A-Za-z0-9_]+$ ]] || { printf 'Invalid UI test class\n' >&2; exit 2; }
+  test_args+=("-only-testing:FootballRecord-$platform-UITests/$NATIVE_UI_TEST_CLASS")
 fi
+# Simulator ad-hoc signing embeds simulated identifiers/entitlements without a real Team/profile.
+# Physical-device candidate builds remain unsigned in verify-device-candidate.sh.
 xcodebuild "${test_args[@]}" -project "$repo_root/native/FootballRecord.xcodeproj" \
   -scheme "FootballRecord-$platform" -destination "platform=$destination,id=$device" \
   -derivedDataPath "$build_root/DerivedData-$platform" \
-  -resultBundlePath "$run_root/acceptance.xcresult" CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES \
+  -resultBundlePath "$run_root/acceptance.xcresult" CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- ONLY_ACTIVE_ARCH=YES \
   2>&1 | tee "$run_root/xcodebuild-test.log"
 xcrun xcresulttool export attachments --path "$run_root/acceptance.xcresult" --output-path "$run_root/attachments" \
   2>&1 | tee "$run_root/attachments.log"
