@@ -17,7 +17,7 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
   public private(set) var busy = false
   public let development: Bool
   @ObservationIgnored let repository: SQLiteSessionRepository
-  @ObservationIgnored private var identityVerified: Bool
+  private var identityVerified: Bool
   @ObservationIgnored private let action: (@MainActor (AccountUserAction) async throws -> Void)?
   @ObservationIgnored private var generation = UUID()
   @ObservationIgnored private var stopped = false

@@ -25,6 +25,12 @@ AE0A13407429459A9C986D81 = {isa = PBXBuildFile; productRef = 3A0BA22F6862429EA61
 57959E9694FF4BC6B29FA722 = {isa = PBXBuildFile; productRef = FCCDB1BCA2944608AD7D1562; };
 710170000000000000000001 = {isa = PBXBuildFile; productRef = 710170000000000000000003; };
 710170000000000000000002 = {isa = PBXBuildFile; productRef = 710170000000000000000004; };
+B5C8A6644A05DED3BEB1A740 = {isa = PBXBuildFile; fileRef = F4A982DD4018FB97CEBF2EC5; };
+4B434978226B9248552E6447 = {isa = PBXBuildFile; fileRef = 7529CDC40D5AC062CC8CFC78; };
+F8910E5900BB8CC750ED2B01 = {isa = PBXBuildFile; fileRef = B4E05AE1A004EA2595CC4390; };
+109723A50F147E72E3B34529 = {isa = PBXBuildFile; fileRef = DAD3FAE78E8213C5776C3FCC; };
+4B4AE74F2B7EE92443940262 = {isa = PBXBuildFile; fileRef = 283ABA4C2796AF2B7089F836; };
+69E8BD1193E31604244514D6 = {isa = PBXBuildFile; fileRef = 283ABA4C2796AF2B7089F836; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -67,6 +73,11 @@ AE0A13407429459A9C986D81 = {isa = PBXBuildFile; productRef = 3A0BA22F6862429EA61
 B3DB6393ADC04592B36C6B9A = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "FootballRecord-Watch-UITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 0FE44D4A3B6D4CB2AD9B3554 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMatchView.swift; sourceTree = "<group>"; };
 9F134AB6BBB141DAB70B2D02 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchMatchView.swift; sourceTree = "<group>"; };
+F4A982DD4018FB97CEBF2EC5 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Apps/iOS/Features/Account/AccountView.swift"; sourceTree = "<group>"; };
+7529CDC40D5AC062CC8CFC78 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Apps/iOS/Features/Account/MigrationView.swift"; sourceTree = "<group>"; };
+B4E05AE1A004EA2595CC4390 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Apps/iOS/Features/Account/DeleteAccountView.swift"; sourceTree = "<group>"; };
+DAD3FAE78E8213C5776C3FCC = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Apps/Watch/Features/Account/WatchAccountView.swift"; sourceTree = "<group>"; };
+283ABA4C2796AF2B7089F836 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "UITests/NativeAccountLifecycleUITests.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -79,7 +90,7 @@ B3DB6393ADC04592B36C6B9A = {isa = PBXFileReference; explicitFileType = wrapper.c
 /* Begin PBXGroup section */
         A00000000000000000000002 = {
             isa = PBXGroup;
-            children = (D2270310F0F64E88BF337219, 66B86CBE363F4BD6A0CF2B0E, C69748A4C9DA4706BC8555E1, A00000000000000000000004 /* iOS App */, A00000000000000000000005 /* Watch App */, A00000000000000000000006 /* iOS Configuration */, A00000000000000000000007 /* Watch Configuration */, A00000000000000000000003 /* Products */, );
+            children = (F4A982DD4018FB97CEBF2EC5, D2270310F0F64E88BF337219, 66B86CBE363F4BD6A0CF2B0E, C69748A4C9DA4706BC8555E1, A00000000000000000000004 /* iOS App */, A00000000000000000000005 /* Watch App */, A00000000000000000000006 /* iOS Configuration */, A00000000000000000000007 /* Watch Configuration */, A00000000000000000000003 /* Products */, );
             sourceTree = "<group>";
         };
         A00000000000000000000003 /* Products */ = {isa = PBXGroup; children = (B3DB6393ADC04592B36C6B9A, 2583ACF1290243C2A009C4A4, F00000000000000000000010 /* FootballRecord.app */, F00000000000000000000011 /* FootballRecordWatch.app */, ); name = Products; sourceTree = "<group>"; };
@@ -147,10 +158,10 @@ DB16D69FE75F425282B75785 = {isa = PBXNativeTarget; buildConfigurationList = 66AA
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-        D00000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (87161F5AC6C44FD0B296CA76, B00000000000000000000001 /* FootballRecordApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
-        D00000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (08BE6DEF0991450B95B136CF, B00000000000000000000002 /* FootballRecordWatchApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
-F8E08F07575C4FA7813A6735 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (72FF9145115341399DDDD3E3, ); runOnlyForDeploymentPostprocessing = 0; };
-E8E50F5CAE5543B9B9271B14 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F15C76A2DC654886A3A258FD, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F8910E5900BB8CC750ED2B01, 4B434978226B9248552E6447, B5C8A6644A05DED3BEB1A740, 87161F5AC6C44FD0B296CA76, B00000000000000000000001 /* FootballRecordApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (109723A50F147E72E3B34529, 08BE6DEF0991450B95B136CF, B00000000000000000000002 /* FootballRecordWatchApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+F8E08F07575C4FA7813A6735 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (4B4AE74F2B7EE92443940262, 72FF9145115341399DDDD3E3, ); runOnlyForDeploymentPostprocessing = 0; };
+E8E50F5CAE5543B9B9271B14 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (69E8BD1193E31604244514D6, F15C76A2DC654886A3A258FD, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -185,7 +196,7 @@ F5C0E01EFACD448B9BCE45EA = {isa = PBXTargetDependency; target = A000000000000000
                 CODE_SIGN_STYLE = Automatic;
                 CURRENT_PROJECT_VERSION = 1;
                 GENERATE_INFOPLIST_FILE = NO;
-                INFOPLIST_FILE = Configuration/iOS/Info.plist;
+                INFOPLIST_FILE = Configuration/iOS/M4-Debug-Info.plist;
                 MARKETING_VERSION = 0.1.0;
                 PRODUCT_BUNDLE_IDENTIFIER = com.example.footballrecord;
                 PRODUCT_NAME = FootballRecord;
@@ -204,7 +215,7 @@ F5C0E01EFACD448B9BCE45EA = {isa = PBXTargetDependency; target = A000000000000000
                 CODE_SIGN_STYLE = Automatic;
                 CURRENT_PROJECT_VERSION = 1;
                 GENERATE_INFOPLIST_FILE = NO;
-                INFOPLIST_FILE = Configuration/Watch/Info.plist;
+                INFOPLIST_FILE = Configuration/Watch/M4-Debug-Info.plist;
                 MARKETING_VERSION = 0.1.0;
                 PRODUCT_BUNDLE_IDENTIFIER = com.example.footballrecord.watchapp;
                 PRODUCT_NAME = FootballRecordWatch;

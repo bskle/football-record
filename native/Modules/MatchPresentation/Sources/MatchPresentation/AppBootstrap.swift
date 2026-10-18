@@ -111,6 +111,10 @@ private actor DebugFailureRepository: SessionRepository {
   public func refresh() async {
     guard !closed else { return }
     await account.refresh()
+    await refreshRecording()
+  }
+  public func refreshRecording() async {
+    guard !closed else { return }
     if account.canEnterRecording { await recording.load() }
     await lifecycle.refresh(matchID: recording.snapshot?.replay.matchID)
   }

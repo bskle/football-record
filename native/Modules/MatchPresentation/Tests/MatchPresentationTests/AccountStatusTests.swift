@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import XCTest
 import CryptoKit
 import MatchStore
@@ -6,6 +7,23 @@ import MatchSession
 @testable import MatchPresentation
 
 @MainActor final class AccountStatusTests: XCTestCase {
+  func testGateObservationTracksPauseConfirmationAndStop() async throws {
+    let repo = try accountRepository("gate-observation"); try await repo.bindAccountV4(try binding(.phone))
+    let model = AccountStatusModel(repository: repo, development: true, identityVerified: true, action: { _ in })
+    await model.refresh(); XCTAssertTrue(model.canEnterRecording)
+    let paused = expectation(description: "Root sees identity pause")
+    withObservationTracking { _ = model.canEnterRecording } onChange: { paused.fulfill() }
+    model.pauseIdentity(); await model.refresh()
+    await fulfillment(of: [paused], timeout: 1); XCTAssertFalse(model.canEnterRecording)
+    let confirmed = expectation(description: "Root sees explicit identity confirmation")
+    withObservationTracking { _ = model.canEnterRecording } onChange: { confirmed.fulfill() }
+    model.confirmIdentity(); await model.refresh()
+    await fulfillment(of: [confirmed], timeout: 1); XCTAssertTrue(model.canEnterRecording)
+    let stopped = expectation(description: "Root sees context stop")
+    withObservationTracking { _ = model.canEnterRecording } onChange: { stopped.fulfill() }
+    model.stop(); await fulfillment(of: [stopped], timeout: 1); XCTAssertFalse(model.canEnterRecording)
+    try await repo.close()
+  }
   func testOldFailureCannotPublishAfterCurrentIdentityWasPaused() async throws {
     let repo = try accountRepository("account-action-gate")
     let b = try binding(.phone); try await repo.bindAccountV4(b)

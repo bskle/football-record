@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import Observation
 import XCTest
 import MatchCore
 import MatchStore
@@ -23,6 +24,8 @@ import CloudSync
     let cloudOnly = try await context.repository.snapshotV2(matchID: id)
     XCTAssertEqual(try cloudOnly.business.replay(now: Date()).state, .endedPendingSync)
     XCTAssertEqual(context.lifecycle.cloudSaved, true)
+    await context.recording.start(starter: false)
+    XCTAssertEqual(context.recording.snapshot?.replay.matchID, id, "Cloud proof alone cannot open a new match")
     let feedback = context.recording.feedbackCount
     await context.lifecycle.perform(.synchronize(id), matchID: id)
     let complete = try await context.repository.snapshotV2(matchID: id)
@@ -30,6 +33,47 @@ import CloudSync
     XCTAssertEqual(context.lifecycle.backendStatus, .releasedNormal)
     XCTAssertEqual(context.recording.feedbackCount, feedback)
     XCTAssertGreaterThan(host.cloudRecordCount, 0)
+    await context.recording.start(starter: false)
+    XCTAssertNotEqual(context.recording.snapshot?.replay.matchID, id)
+    XCTAssertEqual(context.recording.snapshot?.replay.state, .running)
+    XCTAssertEqual(context.recording.feedbackCount, feedback + 1)
+    await context.shutdown()
+  }
+  func testInitiallyUnverifiedAccountGatePublishesRealHTTPAdmission() async throws {
+    let host = try DevelopmentFixtureHost(); defer { host.close() }; host.serve()
+    let context = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+    let changed = expectation(description: "Root account gate must observe admission")
+    XCTAssertFalse(context.account.canEnterRecording)
+    withObservationTracking { _ = context.account.canEnterRecording } onChange: { changed.fulfill() }
+    await context.account.perform(.signIn)
+    XCTAssertTrue(context.account.canEnterRecording)
+    await fulfillment(of: [changed], timeout: 1)
+    await context.shutdown()
+  }
+  func testAbnormalReleaseStopsRecordingWithoutCloudCompletionAndAllowsFreshStart() async throws {
+    let host = try DevelopmentFixtureHost(); defer { host.close() }; host.serve()
+    let context = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+    await context.account.perform(.signIn); await context.recording.start(starter: true)
+    let id = try XCTUnwrap(context.recording.snapshot?.replay.matchID)
+    try await settled(context.repository, id)
+    XCTAssertFalse(context.recording.canStartNext)
+    await context.recording.refreshAuthority()
+    XCTAssertEqual(context.recording.authorityStatus, .held)
+    let feedback = context.recording.feedbackCount
+    await context.lifecycle.perform(.abnormal(id), matchID: id)
+    XCTAssertEqual(context.recording.authorityStatus, .releasedAbnormal)
+    XCTAssertFalse(context.recording.canRecord); XCTAssertTrue(context.recording.canStartNext)
+    XCTAssertNotEqual(context.recording.snapshot?.replay.state, .completed)
+    XCTAssertEqual(context.recording.feedbackCount, feedback)
+    let snapshot = try XCTUnwrap(context.recording.snapshot)
+    let projected = MatchProjection(snapshot: snapshot, now: Date(), authorityStatus: context.recording.authorityStatus)
+    XCTAssertTrue(projected.terminal); XCTAssertTrue(projected.status.contains("不完整"))
+    await context.recording.start(starter: false)
+    XCTAssertNotEqual(context.recording.snapshot?.replay.matchID, id)
+    XCTAssertEqual(context.recording.snapshot?.replay.state, .running)
+    let acquire = try await context.repository.authorityStateV4(matchID: XCTUnwrap(context.recording.snapshot?.replay.matchID), now: Date())
+    XCTAssertEqual(acquire.status, .held)
+    XCTAssertNotEqual(acquire.acquire?.body.matchID, id)
     await context.shutdown()
   }
   func testLostAuthenticationResponseReopensSameIDsAndMissingKeyFailsClosed() async throws {

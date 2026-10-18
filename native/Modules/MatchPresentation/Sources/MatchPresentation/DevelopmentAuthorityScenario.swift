@@ -243,7 +243,15 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
     let id = UUID(), task = Task { try await work() }; operations[id] = task; defer { operations[id] = nil }
     try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
   }
-  func runAccount(_ action: AccountUserAction) async throws { try await owned { try await self.accountAction(action) } }
+  func runAccount(_ action: AccountUserAction) async throws {
+    do { try await owned { try await self.accountAction(action) } }
+    catch {
+      let value = error as NSError
+      // Private finite diagnostic: no error descriptions, URLs, tokens or request bodies.
+      try? privateWrite(JSONSerialization.data(withJSONObject: ["stage":"account","domain":value.domain,"code":value.code]), to: root.appendingPathComponent("development/last-failure.json"))
+      throw error
+    }
+  }
   func accountAction(_ action: AccountUserAction) async throws {
     if action == .identityChanged {
       accountModel?.pauseIdentity(); try await ensureServices(); try await lifecycleService?.identityChanged(); await recording.shutdown(); return
@@ -340,6 +348,7 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
       _ = try await lifecycleService.resumeDeletion(requestID: id)
     case .resumeDeletion(let id): _ = try await lifecycleService.resumeDeletion(requestID: id)
     }
+    await recording.refreshAuthority()
     await accountModel?.refresh()
   }
   func publishPhoneReady() async throws {

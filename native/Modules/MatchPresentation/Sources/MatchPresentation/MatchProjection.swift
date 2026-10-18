@@ -1,6 +1,7 @@
 import Foundation
 import MatchCore
 import MatchSession
+import MatchStore
 
 /// Replays committed facts at display time. Ticks never write events or health values.
 public struct MatchProjection {
@@ -16,7 +17,7 @@ public struct MatchProjection {
   public let recent: [MatchEvent]
   public let capture: String
   public let captureWarning: String?
-  public init(snapshot: SessionSnapshot, now: Date) {
+  public init(snapshot: SessionSnapshot, now: Date, authorityStatus: AuthorityStatusV4? = nil) {
     if snapshot.store.captureRevisions.max(by: { $0.revision < $1.revision })?.metadata.gaps.isEmpty == false {
       captureWarning = "运动采集存在缺口，未补算缺失数据。"
     } else {
@@ -34,10 +35,12 @@ public struct MatchProjection {
     score = "\(r.score.forTeam) : \(r.score.against)"
     matchClock = Self.clock(r.matchDuration); fieldClock = Self.clock(r.appearanceDuration)
     onField = r.isOnField; paused = r.state == .paused
-    terminal = [.endedPendingSync, .completed, .incomplete, .conflict].contains(r.state)
+    terminal = authorityStatus == .releasedAbnormal || authorityStatus == .terminationPending || authorityStatus == .terminal || [.endedPendingSync, .completed, .incomplete, .conflict].contains(r.state)
     goals = r.personalGoals; assists = r.personalAssists
     recent = Array(r.effectiveEvents.sorted { $0.sequence > $1.sequence }.prefix(4))
-    switch r.state {
+    if authorityStatus == .releasedAbnormal { status = "记录不完整 · 后台已释放" }
+    else if authorityStatus == .terminationPending || authorityStatus == .terminal { status = "后台待终结" }
+    else { switch r.state {
     case .notStarted: status = "等待开赛确认"
     case .running: status = "记录中"
     case .paused: status = "已暂停"
@@ -45,6 +48,7 @@ public struct MatchProjection {
     case .completed: status = "已完整保存"
     case .incomplete: status = "记录不完整"
     case .conflict: status = "记录需核对"
+    }
     }
     switch snapshot.capturePhase {
     case .notRequested: capture = "未开始采集"
