@@ -52,6 +52,15 @@ public struct CloudScope: Codable, Sendable, Equatable, Hashable {
     }
     public var stableZoneKey: String { CloudCodec.hash(Data((accountID + "\0" + cloudSpaceID + "\0" + zoneID).utf8)) }
     var key: String { get throws { try CloudCodec.hash(self, domain: "scope") } }
+    // Identity follows the original UTF-8 bytes used by the stable/SQL keys, not Unicode equivalence.
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.activationEpoch == rhs.activationEpoch && lhs.accountID.utf8.elementsEqual(rhs.accountID.utf8)
+            && lhs.cloudSpaceID.utf8.elementsEqual(rhs.cloudSpaceID.utf8) && lhs.zoneID.utf8.elementsEqual(rhs.zoneID.utf8)
+    }
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(Data(accountID.utf8)); hasher.combine(Data(cloudSpaceID.utf8)); hasher.combine(Data(zoneID.utf8))
+        hasher.combine(activationEpoch)
+    }
     private enum CodingKeys: String, CodingKey { case accountID, cloudSpaceID, zoneID, activationEpoch }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)

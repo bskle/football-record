@@ -6,6 +6,8 @@
 
 `CloudScope` 固定 accountID / cloudSpaceID / zoneID / activationEpoch。`stableZoneKey` 不包含 epoch；新 epoch 的 fetch 可以读取同一稳定 zone 的合法历史。历史读取不授予旧 epoch 当前写入权限：`CloudUpload` 要求 record 与当前完整 scope 相同，旧 pending 不自动换账号、zone 或 epoch。023 bridge 仍须验证只读恢复授权。
 
+scope 的相等与 Hashable 使用三个 ID 的原 UTF-8 bytes 加 epoch，与既有 stable-zone/SQL key 身份保持一致。Unicode NFC/NFD 字符串即使在 Swift String 中规范等价，只要原 bytes 不同就是不同 scope；不会在枚举清理、upload 或 save readback 边界合并。既有编码、hash域和keys不归一化、不改写。
+
 `CloudMatchFacts` 复用 MatchCore 的 start identity、完整 events（含 correction / deleted tombstone）与非健康 capture metadata；不保存 permit、后台 release 或 completion。`CloudPayload` 只有 `MatchFactsV1` / `CheckpointV1` / `DeletionV1` 的固定 typed 内容，没有开放 properties 或健康/GPS字段。解码后 canonical round-trip 拒绝未知字段/枚举；record ID 由稳定 zone、类型、match 与完整内容摘要域 hash 派生。纯结构回放的临时 development permit 不进入 payload 或台账，不能成为授权来源。
 
 每份业务 payload 上限 8 MiB。Data/base64 的外层 envelope 单独限为 64 MiB；一个下载批次最多 64 records 且仍受 envelope 总量限制，超限显式失败，不截断。合法近 8 MiB typed payload 已测试 enqueue、close/reopen 原 bytes 相等。时间写入使用 checked Int64 毫秒转换，超范围有限 Date 也会被拒绝。
