@@ -36,6 +36,18 @@ Apple auth 的 responseLost 不能依赖重新消费原 challenge/JWT/code。成
 
 schema2新增absence和缺row恢复nonce表，只持久 `HMAC(tokenDerivationKey, domain + canonical[authRequestID,deviceID,keyID])` opaque fence及独立域的scoped nonce HMAC，不保存新增可关联account/device/authID、公钥、Apple输入或原token。永久fence在删号后保留防止旧attempt复活，无新增身份关联，不能称绝对不可识别；持久key配置须稳定，schema1升级与fingerprint检查在同初始化事务，失败回滚且不改旧结果bytes。新requestID不允许重用已消费nonce，关闭重开也拒重放。恢复beforeCommit失败或COMMIT后丢响应仍是unknown，保原attempt再用新nonce恢复；404/401/timeout及其他网络失败不能当knownAbandoned或将原auth视为已关闭。只有收到已验证的knownAbandoned/knownRevoked/knownExpired，客户端才能显式结束原unknown尝试并新建正常auth（新ID/challenge），不得自动绕过未知gate。公开auth响应中的token只在内存codec重构，requests原结果存不含secret的固定claims。
 
+### 2.1 Watch 登记的显式封闭恢复（NATIVE-036）
+
+首次登记和显式恢复必须是独立typed action，并在Watch→Phone转发中保留区别。不能根据Phone本地是否已有attempt推断首次是否已发送，也不能把GET404、原POST401、timeout或丢响应当终态。新增已鉴权 `POST /v1/devices/watches/recover`（`recoverWatch`），正文严格为原 `version, requestID, watchID, watchPublicKey, challengeID, deviceProof`，保留原完整登记意图和Watch签名；当前active Phone为恢复path提供fresh会话PoP，不更换原业务ID或Watch证明。
+
+两入口均先按原account/requestID/operation=`registerWatch`/完整canonical digest查已持久结果。原已登记结果优先，恢复原receipt/session/credential且不延长原有效期；原封闭结果直接逐bytes重放，不进入旧sessionClaims/credential重构分支。同账号同ID异意图/操作仍409。缺原结果时，恢复核当前active Phone/account/epoch、既有Watch不得换账号/key/角色、原stored challenge的ID/watchID/公钥指纹/hash，以及覆盖原完整正文的Watch challenge域签名。仅此封闭核验可忽略challenge到期或consumed；不消费全局challenge，不新增device/session/epoch。缺challenge、非法证明、旧Phone凭据、事务失败均不提供终态证明。
+
+同一SQL事务写入原requests结果和永久opaque封闭bit。响应为 `{status:"knownAbandoned",receipt}`；receipt沿用 `football-record.authority.receipt.v1` 及原canonical格式，签名body含 `operation:"registerWatch", result:"knownAbandoned"`、原requestID/full requestDigest、可信accountID/activationEpoch和 `registration:{watchID,watchPublicKey}`。客户端须验证固定environment/keyID/公钥签名及全部原attempt绑定后才能封闭，不能只信未签名status。重复recover、GET和迟到原register返回同一已存bytes；原已登记/封闭receipt均不改写。
+
+无新schema：复用schema2的 `auth_absence_fences`，以独立域 `football-record.watch-registration-closed.v1` 对 `[accountID,requestID,fullDigest,watchID,keyFingerprint]` 做tokenDerivationKey HMAC，仅保存不可直接关联的opaque ID。tuple刻意不含epoch；bit跨删号保留，避免未登记challenge未关联account、旧requests被清后，同anon新epoch用TTL内旧proof复活。两入口stored-first后、任何登记变更前查bit；原row已删但bit仍在则401，不在新epoch重签封闭。其他account/key/意图的bit不取消本域原请求；封闭不消费他账号可使用的challenge。此永久控制不声称绝对匿名，不新增Apple/token/subject列。
+
+knownAbandoned只证明该原当前域attempt已封闭且不能未来晚commit，不宣称历史从未committed。客户端持久验证过的closed proof后才可显式新challenge/新requestID，迟到成功不得覆盖closed；该Store/转发状态机由023独立实现。原PoP/domain/历史receipt和v2bytes保持，不因本机恢复修复开放production bootstrap，真实Apple/WC/设备仍待026。
+
 ## 3. HTTP 控制协议 v1
 
 基础 URL 由配置注入；production 只允许 HTTPS allowlist，development 仅允许 loopback。正文上限 16 KiB、JSON object、固定版本 `1`，每个端点按下表拒绝未知字段、重复 JSON key、超长/非法类型、非有限数、额外嵌套内容。所有 ID 是 1～128 字节受限 ASCII `[A-Za-z0-9._:-]`；digest 为 64 个小写 hex；时间为整数 Unix 秒，epoch 为正整数且不越 JS safe integer / Swift Int64 边界。服务不接收任意 properties 字典。
@@ -48,6 +60,7 @@ schema2新增absence和缺row恢复nonce表，只持久 `HMAC(tokenDerivationKey
 | `POST /v1/auth/apple` | `version, requestID, challengeID, identityToken, authorizationCode, deviceID, devicePublicKey, deviceProof, cloudSpaceID` | 已验证匿名会话；第二机 waitingMigration；raw Apple 字段只 transient |
 | `POST /v1/auth/recover` | `version, requestID, authRequestID, deviceID, keyID, nonce, issuedAt, deviceProof` + optional `devicePublicKey` | 无Bearer，原row优先恢复原session；可选公钥完整新PoP可在缺row时原子fence并knownAbandoned，不消费旧Apple输入 |
 | `POST /v1/devices/watches` | `version, requestID, watchID, watchPublicKey, challengeID, deviceProof` | 当前 active iPhone 登记；同 watch 不改绑他人账号 |
+| `POST /v1/devices/watches/recover` | 原完整 `version, requestID, watchID, watchPublicKey, challengeID, deviceProof` | 当前 active Phone fresh PoP；原已登记结果优先，缺row验证原Watch证明后原子签名封闭；见2.1 |
 | `POST /v1/locks/acquire` | `version, requestID, matchID, recordingDeviceID, activationEpoch` | 原子获得 lock / 同请求原结果；已有锁返回 originalMatch，不能新开 |
 | `POST /v1/locks/terminate` | `version, requestID, matchID, lockID, recordingDeviceID, activationEpoch, mode, cloudConfirmationID, contentCommitment` | `mode=normal` 仅原 recorder（可经手机代理）；`mode=abnormal` 仅当前 active iPhone，后两字段省略；精确比较原 lock 才释放 |
 | `POST /v1/peers/grants` | `version, requestID, localDeviceID, remoteDeviceID, activationEpoch, pairingID` | 仅同账号登记 pair，固定 grant / epoch / 有效期 |
