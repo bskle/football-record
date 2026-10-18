@@ -80,18 +80,41 @@ import SQLite3
     let id = try XCTUnwrap(pair.model.snapshot?.replay.matchID)
     await pair.model.syncStatus.retry(); await pair.settle()
     XCTAssertTrue(pair.model.syncStatus.projection(terminal: false).peerPersisted)
+    let original = try await pair.localRepository.snapshotV2(matchID: id)
     let path = await pair.localRepository.databaseURL.path
     var db: OpaquePointer?
     XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
     defer { sqlite3_close(db) }
-    XCTAssertEqual(sqlite3_exec(db, "ALTER TABLE sync_routes_v3 RENAME TO held_routes", nil, nil, nil), SQLITE_OK)
+    // Counts being stable does not stop the pair's asynchronous SQLite writers.
+    // Hold a real competing writer until the injector has observed SQLITE_BUSY.
+    var writer: OpaquePointer?
+    XCTAssertEqual(sqlite3_open(path, &writer), SQLITE_OK)
+    defer { sqlite3_exec(writer, "ROLLBACK", nil, nil, nil); sqlite3_close(writer) }
+    let acquired = await executeFaultSQL(writer, "BEGIN IMMEDIATE")
+    XCTAssertEqual(acquired, SQLITE_OK, "The controlled writer must acquire its real transaction")
+    guard acquired == SQLITE_OK else { await pair.model.shutdown(); return }
+    let rename = "ALTER TABLE sync_routes_v3 RENAME TO held_routes"
+    let immediate = sqlite3_exec(db, rename, nil, nil, nil)
+    XCTAssertEqual(immediate, SQLITE_BUSY, "The original single-attempt injector cannot acquire the held writer")
+    print("NATIVE-035 controlled writer: original injector returned \(immediate)")
+    let blocked = expectation(description: "Fault injector encounters the held SQLite writer")
+    let injecting = Task { await executeFaultSQL(db, rename, onBusy: { blocked.fulfill() }) }
+    await fulfillment(of: [blocked], timeout: 2)
+    XCTAssertEqual(sqlite3_exec(writer, "ROLLBACK", nil, nil, nil), SQLITE_OK)
+    let injected = await injecting.value
+    XCTAssertEqual(injected, SQLITE_OK, "Real schema fault must be injected: \(String(cString: sqlite3_errmsg(db)))")
+    guard injected == SQLITE_OK else { await pair.model.shutdown(); return }
     await pair.lifecycle.wake()
     for _ in 0..<100 { if pair.model.syncStatus.unavailable != nil { break }; await Task.yield() }
     XCTAssertNil(pair.model.syncStatus.state)
     XCTAssertEqual(pair.model.syncStatus.unavailable, .blockedIntegrity)
     XCTAssertFalse(pair.model.syncStatus.projection(terminal: false).peerPersisted)
     XCTAssertNil(pair.model.syncStatus.projection(terminal: false).pendingCount)
-    XCTAssertEqual(sqlite3_exec(db, "ALTER TABLE held_routes RENAME TO sync_routes_v3", nil, nil, nil), SQLITE_OK)
+    let restored = await executeFaultSQL(db, "ALTER TABLE held_routes RENAME TO sync_routes_v3")
+    XCTAssertEqual(restored, SQLITE_OK, "Original schema must be restored: \(String(cString: sqlite3_errmsg(db)))")
+    guard restored == SQLITE_OK else { await pair.model.shutdown(); return }
+    let restoredFacts = try await pair.localRepository.snapshotV2(matchID: id)
+    XCTAssertEqual(restoredFacts.business.events, original.business.events)
     // A legitimate later local commit and its real peer ACK recover the notification.
     await pair.model.perform(.leaveField)
     await pair.model.syncStatus.retry(); await pair.settle()
@@ -100,7 +123,21 @@ import SQLite3
     XCTAssertNil(pair.model.syncStatus.unavailable)
     XCTAssertNotNil(pair.model.syncStatus.state)
     XCTAssertTrue(pair.model.syncStatus.projection(terminal: false).peerPersisted)
+    let peer = try await pair.remoteRepository.snapshotV2(matchID: id)
+    XCTAssertEqual(peer.business.events, pair.model.snapshot?.store.business.events)
     await pair.model.shutdown()
+  }
+  /// This external injector has no busy handler. Yield only for a real competing
+  /// writer, with a monotonic deadline; schema/IO errors still fail immediately.
+  private func executeFaultSQL(_ db: OpaquePointer?, _ sql: String, onBusy: (() -> Void)? = nil) async -> Int32 {
+    let clock = ContinuousClock(), deadline = clock.now.advanced(by: .seconds(5))
+    var reportedBusy = false
+    while true {
+      let result = sqlite3_exec(db, sql, nil, nil, nil)
+      guard result == SQLITE_BUSY, clock.now < deadline else { return result }
+      if !reportedBusy { reportedBusy = true; onBusy?() }
+      await Task.yield()
+    }
   }
   func testTransportFailureDoesNotBlockRecordingOrProduceExtraFeedback() async throws {
     let syncClock = ControlledSyncClock()
