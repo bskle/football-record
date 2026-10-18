@@ -22,3 +22,5 @@ Follow frozen [M4 plan section 12](../../superpowers/plans/2026-10-18-native-m4.
 Slices: actual loopback forms/signatures/identity validation; actual reference HTTP/file SQLite lifecycle faults; privacy and complete old/new regression. Tests first, observed red before implementation, explicit-path Conventional Commits. No long-branch advance/merge/push/archive by author.
 
 Slice 1 completed: strict callable revoker/client-secret factories and in-memory verified Apple context extensions; full automatic round 82/82. Lifecycle material hook/recovery and final privacy evidence remain next; no completed production claim.
+
+Slice 2 completed: transient verified material binding/disposal and original-saga HTTP/SQLite recovery. Full round 92/92; original base is unchanged and latest verified dev will be ordinarily merged before final input freeze. Privacy sentinel scans and final evidence remain next.

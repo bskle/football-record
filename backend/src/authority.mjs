@@ -1,6 +1,7 @@
+import {isVerifiedApple} from './apple-verifier.mjs';
 import {validatePayload} from './codec.mjs';
 import {installLifecycle} from './lifecycle.mjs';
-import {randomUUID} from 'node:crypto';
+import {randomUUID,createHmac} from 'node:crypto';
 import {authorityConfig} from './config.mjs';
 import {openDatabase,transaction,fail} from './database.mjs';
 import {canonicalJSON,makeReceipt,sha256,signedBody} from './receipt.mjs';
@@ -59,7 +60,31 @@ export function createAuthority(options) {
     return signedBody(config.receiptPrivateKey,{...r,accountID:ctx.accountID,receiptID:receipt.receiptID,environment:config.environment,keyID:config.receiptKeyID,requestDigest:sha256(canonicalJSON(r)),status:held?'held':matches&&terminal?'terminal':'mismatch',observedAt:config.clock.now(),expiresAt:config.clock.now()+60},'football-record.authority.live-lock.v1');
   });}
   function requestBytes(ctx,id){return transaction(db,config,()=>{validate(ctx,{active:false});const row=db.prepare('SELECT result FROM requests WHERE account_id=? AND request_id=?').get(ctx.accountID,id);if(!row){if(db.prepare('SELECT 1 FROM deletions WHERE account_id=? AND delete_request_id=?').get(ctx.accountID,id))fail('unavailable',503,true);fail('notFound',404);}return Buffer.from(row.result);});}
-  const api={acquire,terminate,liveStatus,requestBytes,close:()=>db.close()};
-  const state={db,config,validate,stored,persist,write,transientReauthCodes:new Map()};
+  const transientReauthCodes=new Map();
+  const disposeReauthMaterial=material=>{
+    if(material&&typeof material==='object'){material.authorizationCode='';material.expectedApple=undefined;material.binding=undefined;material.expiresAt=0;}
+  };
+  function dropReauthMaterial(id){const material=transientReauthCodes.get(id);transientReauthCodes.delete(id);disposeReauthMaterial(material);}
+  function pruneReauthMaterial(){
+    for(const [id,material]of transientReauthCodes){
+      if(!material||typeof material!=='object'||material.expiresAt<config.clock.now()||!db.prepare('SELECT 1 FROM reauthentications WHERE reauthentication_id=?').get(id))dropReauthMaterial(id);
+    }
+  }
+  function storeReauthMaterial(id,material){
+    pruneReauthMaterial();dropReauthMaterial(id);
+    if(transientReauthCodes.size>=256)dropReauthMaterial(transientReauthCodes.keys().next().value);
+    transientReauthCodes.set(id,material);
+  }
+  function takeReauthMaterial(id,ctx){
+    pruneReauthMaterial();const material=transientReauthCodes.get(id);transientReauthCodes.delete(id);
+    const binding=material?.binding;
+    if(!material||!binding||binding.reauthenticationID!==id||binding.accountID!==ctx.accountID||binding.deviceID!==ctx.deviceID||binding.keyID!==ctx.keyID||binding.activationEpoch!==ctx.activationEpoch||!isVerifiedApple(material.expectedApple,config.environment)||createHmac('sha256',config.accountHMACKey).update(material.expectedApple.issuer+'\n'+material.expectedApple.subject).digest('hex')!==ctx.accountID){
+      disposeReauthMaterial(material);fail('reauthenticationRequired',403);
+    }
+    return material;
+  }
+  function clearReauthMaterial(){for(const id of transientReauthCodes.keys())dropReauthMaterial(id);}
+  const api={acquire,terminate,liveStatus,requestBytes,close:()=>{clearReauthMaterial();db.close();}};
+  const state={db,config,validate,stored,persist,write,transientReauthCodes,storeReauthMaterial,takeReauthMaterial,dropReauthMaterial,pruneReauthMaterial,disposeReauthMaterial};
   states.set(api,state);installLifecycle(api,state);return api;
 }

@@ -31,7 +31,8 @@ export function createDeviceAuth({authority,appleVerifier}){
    validatePayload('authApple',r);
    const c=checkChallenge(r,r.devicePublicKey,r.deviceID);
    const verified=await appleVerifier.verify(r.identityToken,c.challenge_hash);
-   return transaction(db,config,()=>{
+   state.pruneReauthMaterial();let createdReauthenticationID;
+   try{return transaction(db,config,()=>{
     checkChallenge(r,r.devicePublicKey,r.deviceID);
     const accountID=createHmac('sha256',config.accountHMACKey).update(verified.issuer+'\n'+verified.subject).digest('hex');
     let a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(accountID);
@@ -46,11 +47,11 @@ export function createDeviceAuth({authority,appleVerifier}){
     const first=stored(ctx,r,'authApple');if(first)fail('unauthorized',401);
     db.prepare('UPDATE challenges SET consumed=1 WHERE challenge_id=?').run(r.challengeID);
     const s=session(ctx),result={receipt:makeReceipt(config,ctx,r,'authApple',role==='phone'?'registered':'waitingMigration'),sessionClaims:{sessionID:s.session_id,expiresAt:s.expires_at}};
-    if(prior){const id=randomUUID();db.prepare('INSERT INTO reauthentications VALUES(?,?,?,?,?,?,0)').run(id,accountID,r.deviceID,keyID,verified.issuedAt,verified.issuedAt+300);result.reauthenticationID=id;state.transientReauthCodes.set(id,r.authorizationCode);
+    if(prior){const id=randomUUID();db.prepare('INSERT INTO reauthentications VALUES(?,?,?,?,?,?,0)').run(id,accountID,r.deviceID,keyID,verified.issuedAt,verified.issuedAt+300);result.reauthenticationID=id;createdReauthenticationID=id;state.storeReauthMaterial(id,{authorizationCode:r.authorizationCode,expectedApple:verified,binding:Object.freeze({...ctx,reauthenticationID:id}),expiresAt:verified.issuedAt+300});
       db.prepare("UPDATE deletions SET reauthentication_id=? WHERE account_id=? AND device_id=? AND state IN ('requested','lockReconciled')").run(id,accountID,r.deviceID);}
     const bytes=Buffer.from(canonicalJSON(result));persist(ctx,r,'authApple',result);db.prepare('INSERT INTO auth_records VALUES(?,?,?,?,?,?,?)').run(r.requestID,r.deviceID,accountID,sha256(canonicalJSON(r)),r.devicePublicKey,s.session_id,bytes);
     return output(bytes,s);
-   });
+   });}catch(error){if(createdReauthenticationID&&!db.prepare('SELECT 1 FROM reauthentications WHERE reauthentication_id=?').get(createdReauthenticationID))state.dropReauthMaterial(createdReauthenticationID);throw error;}
  }
  function recover(r){validatePayload('authRecover',r);return transaction(db,config,()=>{
    const row=db.prepare('SELECT * FROM auth_records WHERE auth_request_id=? AND device_id=?').get(r.authRequestID,r.deviceID);
