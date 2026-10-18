@@ -61,11 +61,12 @@ import WatchConnectivity
 
 /// SDK objects stay in this synchronous owner. Lock order is storage -> driver;
 /// no WC object or native reply closure crosses an actor/Task boundary.
-public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, @unchecked Sendable {
+public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, DeviceSyncStorageBoundDriving, @unchecked Sendable {
     private let lock = NSLock()
     private let session: WCSession?
     private let proxy: WCDelegateProxy
     private let storage: DeviceSyncStorageContext
+    var storageContext: DeviceSyncStorageContext { storage }
     private var callbacks: DriverCallbacks?
     private var pending: [UUID: DriverSettlement<TransportReply>] = [:]
     private var activating = false

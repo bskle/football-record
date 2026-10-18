@@ -128,6 +128,14 @@ public final class DeviceSyncStorageContext: @unchecked Sendable {
             return try body()
         }
     }
+    func requireSameGate(as other: DeviceSyncStorageContext) throws {
+        guard managed == other.managed, rootIdentity == other.rootIdentity,
+              ownerLock.identity == other.ownerLock.identity,
+              databaseIdentity == other.databaseIdentity,
+              identities[1].1 == other.identities[1].1 else { throw DeviceSyncErasureError.unsupportedLayout }
+        // Validate each retained gate without nesting locks from different roots.
+        try withLocked {}; try other.withLocked {}
+    }
     func withActive<T>(_ body: () throws -> T) throws -> T {
         try withLocked {
             let state = try ledger.state()

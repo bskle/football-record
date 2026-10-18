@@ -51,6 +51,12 @@ public protocol WCSessionDriving: Sendable {
     func enqueueFile(_ transfer: DriverFileTransfer) async throws
 }
 
+// Optional internal capability: the built-in driver and controlled host drivers
+// prove that synchronous SDK dispatch uses the collection's retained storage gate.
+protocol DeviceSyncStorageBoundDriving: WCSessionDriving {
+    var storageContext: DeviceSyncStorageContext { get }
+}
+
 /// Handles cancellation-before-install, concurrent reply/error, and late callbacks once.
 final class DriverSettlement<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()

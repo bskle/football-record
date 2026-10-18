@@ -22,7 +22,13 @@ public actor WCSessionTransport: SyncTransport, DeviceSyncLocalTransportErasing 
     var sends: [String: (String, UUID, Task<Void, any Error>)] = [:]
     public init(driver: any WCSessionDriving, inbox: DurableFileInbox, outboxDirectory: URL) throws {
         guard inbox.directory != outboxDirectory.standardizedFileURL else { throw DeviceSyncError.fileIO }
-        self.driver = driver; self.inbox = inbox; outgoing = try OutgoingFileQueue(directory: outboxDirectory)
+        let outgoing = try OutgoingFileQueue(directory: outboxDirectory)
+        guard inbox.storage.managed == outgoing.storage.managed else { throw DeviceSyncErasureError.unsupportedLayout }
+        if inbox.storage.managed { try inbox.storage.requireSameGate(as: outgoing.storage) }
+        if let bound = driver as? any DeviceSyncStorageBoundDriving {
+            try inbox.storage.requireSameGate(as: bound.storageContext)
+        }
+        self.driver = driver; self.inbox = inbox; self.outgoing = outgoing
     }
     public func deliveries() -> AsyncStream<SyncDelivery> {
         let id = UUID(), (stream, continuation) = AsyncStream<SyncDelivery>.makeStream(bufferingPolicy: .bufferingNewest(256))
@@ -51,7 +57,11 @@ public actor WCSessionTransport: SyncTransport, DeviceSyncLocalTransportErasing 
     public func erase(_ request: DeviceSyncLocalEraseRequest) async throws -> DeviceSyncEraseResult {
         guard inbox.storage.managed, outgoing.storage.managed, inbox.storage.rootIdentity == outgoing.storage.rootIdentity else { throw DeviceSyncErasureError.unsupportedLayout }
         notifyTrustInvalidated(.accountChanged)
-        let erasureDriver = (driver as? any DeviceSyncErasureDriving) ?? UnavailableDeviceSyncErasureDriver()
+        let erasureDriver: any DeviceSyncErasureDriving
+        if let bound = driver as? any DeviceSyncStorageBoundDriving, let capable = driver as? any DeviceSyncErasureDriving {
+            try inbox.storage.requireSameGate(as: bound.storageContext)
+            erasureDriver = capable
+        } else { erasureDriver = UnavailableDeviceSyncErasureDriver() }
         return try await DeviceSyncErasureService(context: inbox.storage, driver: erasureDriver).erase(request)
     }
     public func activate() async {

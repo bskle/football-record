@@ -9,9 +9,10 @@ actor ErasureDispatchBarrier {
     func pause() async { entered = true; await withCheckedContinuation { continuation = $0 } }
     func release() { continuation?.resume(); continuation = nil }
 }
-final class GateDispatchDriver: WCSessionDriving, DeviceSyncErasureDriving, @unchecked Sendable {
+final class GateDispatchDriver: WCSessionDriving, DeviceSyncErasureDriving, DeviceSyncStorageBoundDriving, @unchecked Sendable {
     enum Phase { case beforeFile, afterFile, afterMessage }
     let context: DeviceSyncStorageContext
+    var storageContext: DeviceSyncStorageContext { context }
     let phase: Phase
     let barrier = ErasureDispatchBarrier()
     private let lock = NSLock()
@@ -221,4 +222,43 @@ extension DeviceSyncErasureDriverTests {
         let alias = f.root.deletingLastPathComponent().appendingPathComponent("devicesync/outbox/" + transfer.url.lastPathComponent)
         if FileManager.default.fileExists(atPath: alias.path) { XCTAssertTrue(deviceSyncSourceInsideRoot(alias, root: f.context.root), "case alias is the same actual owned outbox") }
     }
+}
+
+
+extension DeviceSyncErasureDriverTests {
+    func testAssemblyRejectsTwoManagedRoots() throws {
+        let first = try ManagedErasureFixture(), second = try ManagedErasureFixture(account: "second")
+        XCTAssertThrowsError(try WCSessionTransport(driver: FakeWCDriver(), inbox: first.inbox(), outboxDirectory: second.root.appendingPathComponent("outbox")))
+    }
+    func testAssemblyRejectsManagedAndStandaloneMixInBothDirections() throws {
+        let f = try ManagedErasureFixture()
+        let standalone = FileManager.default.temporaryDirectory.appendingPathComponent("standalone-" + UUID().uuidString)
+        XCTAssertThrowsError(try WCSessionTransport(driver: FakeWCDriver(), inbox: f.inbox(), outboxDirectory: standalone.appendingPathComponent("outgoing")))
+        let inbox = try DurableFileInbox(directory: standalone.appendingPathComponent("incoming"))
+        XCTAssertThrowsError(try WCSessionTransport(driver: FakeWCDriver(), inbox: inbox, outboxDirectory: f.root.appendingPathComponent("outbox")))
+    }
+    func testAssemblyRejectsThirdRootBoundDriverButAcceptsSameActualGate() throws {
+        let first = try ManagedErasureFixture(), third = try ManagedErasureFixture(account: "third")
+        XCTAssertThrowsError(try WCSessionTransport(driver: GateDispatchDriver(context: third.context, phase: .beforeFile), inbox: first.inbox(), outboxDirectory: first.root.appendingPathComponent("outbox")))
+        let reopened = try DeviceSyncStorageContext(root: first.root)
+        XCTAssertNoThrow(try WCSessionTransport(driver: GateDispatchDriver(context: reopened, phase: .beforeFile), inbox: first.inbox(), outboxDirectory: first.root.appendingPathComponent("outbox")))
+    }
+    func testUnboundCustomDriverCannotClaimErasureCompletion() async throws {
+        let f = try ManagedErasureFixture(), raw = Data("unbound-driver-original".utf8)
+        let transfer = try f.queue().stage(raw, id: "original")
+        let transport = try WCSessionTransport(driver: UnboundDrainedWCDriver(), inbox: f.inbox(), outboxDirectory: f.root.appendingPathComponent("outbox"))
+        let result = try await transport.erase(f.request)
+        XCTAssertEqual(result, .pending(.unresolved))
+        XCTAssertEqual(try Data(contentsOf: transfer.url), raw)
+        XCTAssertNil(try f.context.withLocked { try f.context.ledger.state().receipt })
+    }
+}
+private struct UnboundDrainedWCDriver: WCSessionDriving, DeviceSyncErasureDriving {
+    func install(_ callbacks: DriverCallbacks) async {}
+    func activate() async {}
+    func snapshot() async -> DriverSnapshot { DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false) }
+    func sendMessage(_ bytes: Data) async throws -> TransportReply { .unavailable }
+    func outstandingFiles() async -> [DriverFileTransfer] { [] }
+    func enqueueFile(_ transfer: DriverFileTransfer) async throws { throw DeviceSyncError.unavailable }
+    func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus { .drained }
 }
