@@ -115,7 +115,7 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 
 命令：`PATH=/Users/liam/.local/bin:$PATH NSUnbufferedIO=YES NATIVE_NODE_BINARY=/Users/liam/.local/bin/node NATIVE_BUILD_ROOT=/private/tmp/football-m4-023-build bash scripts/native/verify.sh`。
 
-运行source `094c690775809eb9ce40d82d19a139ff5d9ea4d3`，Xcode27.0(27A266a)、Swift6.4、Node22.23.1。全部202个tracked backend/native/verify.sh输入的Git blob及SHA256已记 `023-final-run-inputs.json`。此后因审阅发现删除scope与登记客户端缺口已扩产品输入，不能把此轮当final；最终SHA/clean另记manifest；没有改写既有提交。
+运行source `094c690775809eb9ce40d82d19a139ff5d9ea4d3`，Xcode27.0(27A266a)、Swift6.4、Node22.23.1。全部202个tracked backend/native/verify.sh输入的Git blob及SHA256已记 `023-094-run-inputs.json`。此后因审阅发现删除scope与登记客户端缺口已扩产品输入，不能把此轮当final；最终SHA/clean另记manifest；没有改写既有提交。
 
 | 层次 | 本轮实际结果 | 原日志 |
 | --- | --- | --- |

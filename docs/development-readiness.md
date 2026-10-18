@@ -1,10 +1,12 @@
 # 原生开发准备检查
 
-当前检查日期：2026-10-19（上海；历史原检查为2026-10-14/16/18）。历史证据日期不改写。bootstrap见[NATIVE-000](native/tasks/NATIVE-000.md)，首次同步见[GIT-001](native/tasks/GIT-001.md)，M1 / M2快照见[GIT-002](native/tasks/GIT-002.md)、[GIT-003](native/tasks/GIT-003.md)，M3历史治理见[GIT-004](native/tasks/GIT-004.md)，M4责任补充见[GIT-005](native/tasks/GIT-005.md)，当前本地交付见[GIT-006](native/tasks/GIT-006.md)。
+当前检查日期：2026-10-19（上海；历史原检查为2026-10-14/16/18）。历史证据日期不改写。bootstrap见[NATIVE-000](native/tasks/NATIVE-000.md)，首次同步见[GIT-001](native/tasks/GIT-001.md)，M1 / M2快照见[GIT-002](native/tasks/GIT-002.md)、[GIT-003](native/tasks/GIT-003.md)，M3历史治理见[GIT-004](native/tasks/GIT-004.md)，M4责任补充见[GIT-005](native/tasks/GIT-005.md)，历史本地交付见[GIT-006](native/tasks/GIT-006.md)，当前交接见[GIT-007](native/tasks/GIT-007.md)。
 
-截至2026-10-19，[GIT-006](native/tasks/GIT-006.md)登记 `dev=origin/dev=225851d9c00feda5e1d4579293c881bdf89bb090`。021/022之后的027、029～033均已exact双审、实际no-ff/对应merge复验/同步/实际归档和safe branch-d。Node128是032实际merge `aa9977805dfb172cf1ece605d1f575cf7684df72` 的旧后端层；033当前merge本轮为Cloud80及两项fresh最低simulator SDK源编译与merge输入相符，未重跑未改backend的Node128。它们都不是一次全App运行，早期Node56/Cloud42与下方历史App252保留原日期/层次。
+截至2026-10-19，[GIT-007](native/tasks/GIT-007.md)登记 `dev=origin/dev=2642b426ee0ade276316a348537f72c0b2a1ed8a`。023执行source `5ee7bd33721a9015e23dfe23fd0e31c15fafd211`、final `f7f7a3bceb3000fd6d655d4724089601870eeb4d` 已root+m2 whole exact PASS；actual merge2642全树等于f7，root单轮591/0（Node161、Core包257=44/149/47/17、Cloud80、Account54、Presentation39）、12最低sim SDK产品和2无签名generic sim App通过并同步，原生树已归档/安全删分支。223产品输入及19份merge日志绑定本轮，094失败/27d570/早期选测保留旧层不混入。
 
-028 final `0fa3dff4d3232e72257f6fa115ecada873f086db` 已源码/最终双审，29host及四triple最低SDK只证明受控软件/编译，SDK树保留待026，不入dev。023仍唯一作者收尾，未freeze/final/合入；checkpoint选测不作为交付。024/025待正式接口交接，026集中所有真实账号/设备/签名/容器/部署验收。此轮只改六文档，不调用用户HealthStore，不声称M4已完成。
+034本机ops readiness（Node145/0）、035 Presentation测试竞争修复（39/0）、036 Watch登记闭合恢复参考后台（Node161/0）各自已双审、actual merge验证、同步、原生实际归档与safe-d，完整SHA见GIT-007；034备份点恢复不证明持续durability/RPO/epoch高水位或实际部署。024/025已正式各树推进：base17f+accepted whole023 f7，输入产品与actual2642相同；仍无final/未入dev，不计在途selected结果。024默认无真实SDK调用、候选待026，025尚待完整UI/Debug纵向和两端Debug/Release构建/UI验收，entitlements仅reserved。
+
+008/010/016/018/028仍held，02829host/四SDK不代替真实设备；旧queued五树+017 active保留。所有真实SDK/账号/设备/签名/安装/部署、026 owned catalog组合擦除仍延后，生产Unavailable且M4未完成。此次仅七文档，不重跑产品/SDK，不操作用户设备。
 
 结论：M1与M2的006/007/011/009/012、M3的013/014/015/017已双审集成并同步。历史已验证App组合 `b0070c90d91bf9d7741b7a7ed24165f1ad27383d`，实际merge单轮252项宿主测试（44 Core + 106 Store + 46 Session + 17 MatchSync + 39 Presentation）、8项最低SDK产品、2个无签名App及iOS / Watch各1项XCUI spot通过。当前M4模块证据见上文；本批文档合并后的实际dev/origin HEAD以Git现场为准。主线复用同一SQLite facade / Session / MatchSync，采集gateway、transport及生产trusted peer仍unavailable。017作者此前双端各9项XCUI及375pt深色最大字体1项视觉检查保留其输入层次，旧009证据不改写。历史M1的70项与M2的166项等证据仍只证明当时组合，见各任务验证卡及当前治理台账。
 
@@ -39,13 +41,13 @@
 
 | 项目 | 检查结果 | 处理阶段 |
 |---|---|---|
-| 原生工程 | 013/014/015/017已双审集成；历史b0070c9实际merge252宿主/8SDK/2App及两端各1UI spot通过；M4新模块未装配 | 主线unavailable采集/传输/生产trust；016已编译双审，018本机final已双审及331全量通过，真机门槛保留 |
+| 原生工程 | 023已actual merge2642：591/0、12最低sim SDK产品、2无签名generic sim App；历史b0070c9 App252仍独立保留 | 本机控制/同facade纵向通过不等于SDK/设备E2E；024/025在途，生产Unavailable，008/010/016/018仍held |
 | Xcode / 运行环境 | Xcode 27.0（27A266a）/ Swift 6.4；上述产品组合自动验证与 iOS 27 / watchOS 27 模拟器复验通过；最低 iOS 17 / watchOS 10 已编译 | 未实际运行最低系统；无签名 SDK 构建不替代真机能力验收。历史 Desktop FinderInfo / codesign 失败及隔离重跑保留于 GIT-002 |
 | 签名与 CloudKit | 仅配置本地 Bundle ID 占位，未注册；本人Team/profile/能力签名与CloudKit容器未验收 | 010可审配置/指引本机部分完成；安装/授权待本人，CloudKit留M4 |
-| 唯一比赛锁后台 | 021/027/030/032本地reference软件已双审入dev；最新后端证据为032实际merge Node128，033未重跑；无已部署生产环境 | AppleRevoker、peer角色与auth absence恢复仅本地自动证据；真实Apple、Serverless适配/持久配置/TLS留026，本地SQLite不称生产部署 |
-| 私有云与业务事务 | 022/029/031/033已入dev；033实际merge Cloud80与两项fresh最低SDK源输入相符，未接真实CloudKit/业务facade | 023同facade事务/024 CloudKit仍待交接验收；033仅单ledger四canonical逻辑擦除，026还须owned catalog+staging+Store聚合，保护saga/capability/028 selection |
+| 唯一比赛锁后台 | 034/036已入dev，023实际merge本轮Node161；无已部署生产环境 | 034仅匹配配置/权限、备份点恢复与隔离TLS smoke；持续durability/RPO/epoch高水位、真实Apple及部署留026 |
+| 私有云与业务事务 | 023同facade本机软件已双审入dev，当前merge单轮Cloud80/Account54；024 CloudKit SDK仍在独立树进行 | 真实CloudKit/iCloud与026全owned catalog+staging+Store组合清理仍待；saga/capability/028 selection继续保护 |
 | 真机行为 | 本人设备协助延期；真实采集/后台/锁屏/恢复及配对同步未验 | 008/010/016/018保留，不提前入dev。WC transferFile不支持Simulator，fake/SDK/两sim UI不替代真通信 |
-| Git 与远端 | 三永久分支；dev已同步225851d9c00feda5e1d4579293c881bdf89bb090；main/release仍59edac8原型，release尚无原生冻结候选 | 已授权public同步，PR/CI/server保护未配置；代码同步不等于发布 |
+| Git 与远端 | 三永久分支；dev已同步2642b426ee0ade276316a348537f72c0b2a1ed8a；main/release仍59edac8原型，release尚无原生冻结候选 | 已授权public同步，PR/CI/server保护未配置；代码同步不等于发布 |
 
 供应商和后续模块拆分由开发者按方案决定；[NATIVE-001 子计划](superpowers/plans/2026-10-15-native-foundation.md) 已固定单个共享 SwiftPM 包的工程边界，NATIVE-003 已实现系统 SQLite 事务库并完成故障与重开测试。系统杀进程、物理断电和真机存储压力尚未实测。正式名称已确定为球历 / `football-record`；图标、未来付费边界、热图和 PC 路线不再次阻止开工。
 
@@ -67,7 +69,7 @@
 
 ## M2 历史证据与当前 M3 执行边界
 
-M3历史事实见[GIT-004](native/tasks/GIT-004.md)，当前M4交付见上文/[GIT-006](native/tasks/GIT-006.md)；NATIVE-013与009截图等保留为历史证据。[M3合同](native/contracts/m3-durable-sync.md)已由014/015实现不可变完整快照、原outbox/receipt保留、持久ACK与同Session接收桥，017呈现持久状态。M4前生产permit/trusted peer unavailable，Debug两隔离DB及稳定身份fixture持续标“开发模拟锁 / 开发配对”，只证明协议。peer ACK不等于云已同步/后台终结，不制造completed或释放锁。005/006/007/011/012/GIT-003及013/014/015已归档安全删分支；旧五树和017仍queued且实际active，分支保留不盲重试；008/010/016/018因设备验收依赖保留；019已合018、实际归档并安全删分支。
+M3历史事实见[GIT-004](native/tasks/GIT-004.md)，当前M4交付见上文/[GIT-007](native/tasks/GIT-007.md)；NATIVE-013与009截图等保留为历史证据。[M3合同](native/contracts/m3-durable-sync.md)已由014/015实现不可变完整快照、原outbox/receipt保留、持久ACK与同Session接收桥，017呈现持久状态。M4前生产permit/trusted peer unavailable，Debug两隔离DB及稳定身份fixture持续标“开发模拟锁 / 开发配对”，只证明协议。peer ACK不等于云已同步/后台终结，不制造completed或释放锁。005/006/007/011/012/GIT-003及013/014/015已归档安全删分支；旧五树和017仍queued且实际active，分支保留不盲重试；008/010/016/018因设备验收依赖保留；019已合018、实际归档并安全删分支。
 
 [会话采集合约](native/contracts/m2-session-capture.md)固定先保存后反馈、采集持久对账、v1→v2兼容和原outbox，012补齐恢复fail-closed与原请求重试。010本机整包已双审，真实设备项延期；017已完成共享工程装配，018在独立树串行接手Apps / 工程所有权。
 
@@ -81,8 +83,6 @@ M3历史事实见[GIT-004](native/tasks/GIT-004.md)，当前M4交付见上文/[G
 
 ## M4 可继续事项与保留门槛
 
-027/029～033本地软件交付与精确SHA见GIT-006；023仍需完成同facade纵向，不以checkpoint选测或未启用模块视作M4完成。旧acquire必须验证fresh live status；cloud proof和正常后台释放与当前完整facts/captureDigest同时匹配后才创建CompletionProofV2。032已冻结knownAbandoned为当前不可恢复+永久阻迟到commit；404/401/timeout仍unknown，不能据此换ID绕过。
+023本机同facade/控制/闭合恢复已whole双审并实际合入；591/0是2642本轮，不是历史或各任务相加。024客户端AS/Keychain/CloudKit在其16路径内推进，默认SDK执行关闭，须两个模块×四triple共8项最低sim/device编译；025在39精确UI/App/工程路径内推进，独占共享工程但不得写无真实值的reserved entitlements。024/025都未final/未入dev，运行中的选测不作为完整交付。
 
-033已验证的永久fence只覆盖单ledger文件目标account/cloudSpace/zone跨epoch的四类canonical。它不是整个本地删除、CloudKit删除、物理介质/备份擦除证明；026需枚举完整owned ledger catalog、024 owned CKAsset staging和023 Store，保留独立saga/capability/028 selection，恢复保留云时先失效旧actors再显式选择新namespace，旧文件不unfence。028首阶段未操作用户HealthStore；29host/四SDK不代替真实source/权限与单独Health确认。
-
-024客户端AuthenticationServices/Keychain/CloudKit和025唯一工程/UI待正式接口交接；027的真实Apple exchange/revoke、iCloud双身份、Team/签名/容器、Watch自身或手机代理联网、CloudKit保存与服务释放、两机迁移及028实际删除均留026。008/010/016/018物理门槛和旧queued五树+017保持，不因本地进度提前合设备候选或重试清理；工程继续不新增产品审批。
+008/010/016/018/028及024 SDK候选真实门槛前保持独立树；026仍须验真实Apple/Keychain/iCloud/CloudKit/Health/WC、签名/安装/后台与部署，并聚合完整owned ledger catalog、024 owned staging、023 Store，保护独立saga/capability/028 selection。033单文件逻辑擦除不等于组合完成；034一致备份点恢复不等于持续durability/RPO或epoch高水位保全。main/release仍原型，无原生冻结候选；用户既有推进/同步授权不新增审批。
