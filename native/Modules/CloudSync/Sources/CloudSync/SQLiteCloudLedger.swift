@@ -7,6 +7,16 @@ enum CloudSQLValue {
     var string: String? { if case .text(let x) = self { x } else { nil } }
     var data: Data? { if case .blob(let x) = self { x } else { nil } }
     var number: Int64? { if case .integer(let x) = self { x } else { nil } }
+    // Only SQL NULL denotes no issue. Unknown non-NULL persisted values must not resume progress.
+    func optionalIssue() throws -> CloudIssue? {
+        switch self {
+        case .null: return nil
+        case .text(let raw):
+            guard let issue = CloudIssue(rawValue: raw) else { throw CloudError(.invalidPayload) }
+            return issue
+        default: throw CloudError(.invalidPayload)
+        }
+    }
 }
 final class CloudSQL: @unchecked Sendable {
     private var handle: OpaquePointer?
@@ -118,7 +128,7 @@ public actor SQLiteCloudLedger: CloudLedger {
             guard let raw = row[0].data, let state = row[1].string.flatMap(CloudDeliveryState.init(rawValue:)), let count = row[2].number, count >= 0, row[5].string == CloudCodec.hash(raw) else { throw CloudError(.invalidPayload) }
             let upload = try CloudCodec.decode(CloudUpload.self, raw)
             guard upload.scope == scope else { throw CloudError(.accountChanged) }
-            return CloudUploadEntry(upload: upload, originalBytes: raw, state: state, attemptCount: Int(count), issue: row[3].string.flatMap(CloudIssue.init(rawValue:)), nextAttemptAt: row[4].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
+            return CloudUploadEntry(upload: upload, originalBytes: raw, state: state, attemptCount: Int(count), issue: try row[3].optionalIssue(), nextAttemptAt: row[4].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
         }
     }
     public func failUpload(id: String, issue: CloudIssue, at: Date, nextAttemptAt: Date?) throws {
@@ -144,7 +154,7 @@ public actor SQLiteCloudLedger: CloudLedger {
             guard let raw = row[0].data, let state = row[1].string.flatMap(CloudDeliveryState.init(rawValue:)), let count = row[2].number, count >= 0 else { throw CloudError(.invalidPayload) }
             let batch = try CloudCodec.decode(CloudFetchBatch.self, raw)
             guard batch.scope == scope, try batch.digest == row[5].string else { throw CloudError(.invalidPayload) }
-            return CloudBatchEntry(batch: batch, originalBytes: raw, state: state, attemptCount: Int(count), issue: row[3].string.flatMap(CloudIssue.init(rawValue:)), nextAttemptAt: row[4].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
+            return CloudBatchEntry(batch: batch, originalBytes: raw, state: state, attemptCount: Int(count), issue: try row[3].optionalIssue(), nextAttemptAt: row[4].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
         }
     }
     public func acknowledge(_ acknowledgement: CloudImportAcknowledgement) throws {
@@ -170,7 +180,7 @@ public actor SQLiteCloudLedger: CloudLedger {
     public func scopeState(scope: CloudScope) throws -> CloudScopeState {
         guard let row = try sql.rows("SELECT issue,attempts,retry_ms FROM cloud_scope_state WHERE scope=?", [.text(try scope.key)]).first else { return CloudScopeState(issue: nil, attemptCount: 0, nextAttemptAt: nil) }
         guard let count = row[1].number, count >= 0 else { throw CloudError(.invalidPayload) }
-        return CloudScopeState(issue: row[0].string.flatMap(CloudIssue.init(rawValue:)), attemptCount: Int(count), nextAttemptAt: row[2].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
+        return CloudScopeState(issue: try row[0].optionalIssue(), attemptCount: Int(count), nextAttemptAt: row[2].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
     }
     public func recordScopeIssue(scope: CloudScope, issue: CloudIssue, at: Date, nextAttemptAt: Date?) throws {
         let now = try CloudCodec.milliseconds(at), retry = try nextAttemptAt.map(CloudCodec.milliseconds)

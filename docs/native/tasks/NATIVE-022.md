@@ -32,6 +32,8 @@
 - [x] 022.3 typed 冲突/配额/partial/unknown/accountChanged、持久 backoff、tokenExpired generation reset、remote missing 不删本地、明确 tombstone 不复活；完整 conditional save / manifest / part 回读检查仅产生 DevelopmentCloudSaveEvidence。
 - [x] 审查反馈已先红后修：近 8MiB payload 的 base64 envelope 重开、有限超 Int64 毫秒日期、v1 不兼容结构 failed-open 不改库、逻辑 record 条件保存/tag、坏 batch 不被下次唤醒跳过、账号切换 check→SQL 进度事务 TOCTOU。相同既有 receipt 可只读重放，新 stage/ACK/evidence 写入在事务内复查持久 fence。
 
-实际同步后 `CloudSync` 单轮 **39 项 host**（16 Conflict + 10 Ledger + 13 Service）通过；iOS17 simulator / watchOS10 simulator 的 `CloudSync` target 各 1 项通过。两个 SDK 是同步前已验证源码的证据层次；`a15b841` 只引入 021 backend/两卡，97 项 native/脚本/本模块文件的同步前后 SHA256 相等，原 native diff 为空，故保留 SDK 层次并重跑同步后 host，不冒称再次编译。详见 [验证卡](../validation/NATIVE-022.md) 与 [模块交接说明](../../../native/Modules/CloudSync/README.md)。
+正式审阅发现 `d37c597` 的可选 issue loader 将非 NULL 未知枚举误当 nil；该旧 SHA 不算最终 PASS。先补三个真实文件 SQL 红例，再统一严格区分 SQL NULL / 合法 CloudIssue / 非法值；未知 scope（原 accountChanged）、upload、batch issue 均以 invalidPayload 停止，不调用 driver 或业务 sink，原文件与原 bytes 保留。
+
+修复后 `CloudSync` 单轮 **42 项 host**（16 Conflict + 3 IssueDecoding + 10 Ledger + 13 Service）通过；源码改变后已重新执行 iOS17 simulator / watchOS10 simulator 的 `CloudSync` target，各 1 项通过。历史同步节点 `a15b841` 只引入 021 backend/两卡，当时 97 项 native/脚本/模块文件同步前后 SHA256 相等；该旧 SDK 层次仍保留，但不替代本次修复后的两项重新编译。详见 [验证卡](../validation/NATIVE-022.md) 与 [模块交接说明](../../../native/Modules/CloudSync/README.md)。
 
 三个实现提交：`46ba945`、`af9eda1`、`6a7b59fbaacdd2d47d5313ec1d08f8279ed39495`。最终可审 SHA、六项 Git 输入、文件 hash、红绿日志 SHA manifest、双审/合并状态由树外 registry 保存，避免为写入自身 SHA 再生成提交。作者冻结后停止写入，后续合并/同步/归档仅由主代理执行。

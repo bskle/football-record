@@ -40,6 +40,8 @@ sink 必须在现有业务 facade 同一事务内：先查询并重放首次 rec
 
 accountChanged 是持久 scope fence，重开不自动解除。服务在网络前后复查；stage / ACK / save evidence 的新进度写入还在各自 SQLite 事务内复查，防止检查后账号切换的竞争。已有完全相同 receipt 可以只读重放；历史读取与本地 pending 意图可保留。新账号/epoch 需新 scope，旧上传不重绑。
 
+scope / upload / batch 的可选持久 issue 只将 SQL NULL 视为无 issue；非 NULL 必须是已知 CloudIssue 枚举，否则抛 invalidPayload，保留原文件与原 bytes，并在任何 driver 调用或业务导入前停止。不会把未知状态自动清除或当作恢复正常。
+
 ## 验证与交接
 
 ```sh
