@@ -24,6 +24,6 @@
 
 实际产品新增可选erasure协议、稳定request与最小receipt、cloud schema4永久fence/receipt控制表；原CloudLedger协议、CloudModels canonical/hash、Core与其他模块不改。按column_bytes严格UTF8/NUL解码TEXT，严格校验四表原bytes/scope/digest/ACK及新控制receipt/fence关系；单事务删除后再次枚举验证目标零，全部canonical写入事务持久复查。
 
-原实现真实fence红2/9；NUL文本红1/14；receipt缺fence的控制一致性红1/4。最终完整单轮 **74/74**（原53+新增21）与fresh iOS17/watch10 simulator target编译exit0，无warning；详见 [验证卡](../validation/NATIVE-033.md)。真机不适用：隔离SQLite和受控driver，不调用真实CloudKit/账号/设备，不宣称整个本地删除、物理介质/备份擦除或023整体验收。
+原实现真实fence红2/9；NUL文本红1/14；receipt缺fence的控制一致性红1/4；错误重试检查后发生purge的竞态红1/1，最外层复查持久scope后统一返回terminal issue。最终完整单轮 **75/75**（原53+新增22）与最终源码fresh iOS17/watch10 simulator target编译exit0，无warning；详见 [验证卡](../validation/NATIVE-033.md)。真机不适用：隔离SQLite和受控driver，不调用真实CloudKit/账号/设备，不宣称整个本地删除、物理介质/备份擦除或023整体验收。
 
-coherent产品提交后普通同步已验证032目标aa9977；其变更仅backend/合同/032两卡，Native零delta。同步组合完整host再跑74/74；42项package/source编译输入与本轮fresh双SDK逐hash相同，保留各原日志及实际输入层次。source=final/精确SHA与审阅状态留树外manifest，作者clean停写。
+coherent产品提交后普通同步已验证032目标aa9977；其变更仅backend/合同/032两卡，Native零delta。同步组合曾完整host74/74并保留该层42项输入hash；随后错误重试竞态修复对同步组合再跑最终75/75和两fresh最低SDK，最终42项输入独立绑定。保留各原日志及实际输入层次。source=final/精确SHA与审阅状态留树外manifest，作者clean停写。

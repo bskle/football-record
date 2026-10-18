@@ -14,6 +14,14 @@ public actor CloudSyncService {
     public func synchronize() async throws -> CloudSyncOutcome {
         guard !running else { return CloudSyncOutcome(issue: .unknown) }
         running = true; defer { running = false }
+        do { return try await synchronizeOnce() }
+        catch {
+            // Erasure can commit between an error-path scope check and retry persistence.
+            if try await ledger.scopeState(scope: scope).issue == .accountChanged { return CloudSyncOutcome(issue: .accountChanged) }
+            throw error
+        }
+    }
+    private func synchronizeOnce() async throws -> CloudSyncOutcome {
         let scopeState = try await ledger.scopeState(scope: scope)
         if scopeState.issue == .accountChanged { return CloudSyncOutcome(issue: .accountChanged) }
         if let next = scopeState.nextAttemptAt, next > clock() { return CloudSyncOutcome(issue: scopeState.issue) }
