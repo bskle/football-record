@@ -50,4 +50,24 @@ final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
         do {_=try await s.commit(StoreCommit(commandID:"new",expectedGeneration:0,descriptor:MatchDescriptor(startIntent:start,starter:true),events:[],packets:[]));XCTFail()}catch{}
     }
 
+    func testLegacyNotFoundResolutionDoesNotCloseAnUnknownAuthAttempt() async throws {
+        let c=try context(),s=try store(c),attempt=try AuthAttemptV4(requestID:"legacy-unknown",deviceID:"phone",publicKey:AuthorityWire.base64URL(c.key.publicKey.rawRepresentation),cloudSpaceID:"cloud",challengeID:"legacy-challenge",requestDigest:String(repeating:"a",count:64),environment:.development)
+        try await s.saveAuthAttemptV4(attempt);try await s.close()
+        let db=try SQLite(url:c.url,fault:nil),raw=try Canonical.data(AuthResolutionV4.knownNotFound)
+        try db.execute("INSERT INTO lifecycle_steps_v4 VALUES (?,?,?)",[.text("auth-resolved:"+attempt.requestID),.blob(raw),.text(Canonical.hash(raw))]);try db.close()
+        let reopened=try store(c),pending=try await reopened.pendingAuthAttemptsV4();XCTAssertEqual(pending,[attempt])
+        do {try await reopened.resolveAuthAttemptV4(requestID:attempt.requestID,resolution:.knownNotFound);XCTFail()}catch{}
+        try await reopened.close()
+    }
+
+    func testTwoConnectionsAdmitOnlyOneUnresolvedAuthAttemptAtomically() async throws {
+        let c=try context(),a=try store(c),b=try store(c)
+        func attempt(_ id:String)throws->AuthAttemptV4 {try AuthAttemptV4(requestID:id,deviceID:"phone",publicKey:AuthorityWire.base64URL(c.key.publicKey.rawRepresentation),cloudSpaceID:"cloud",challengeID:"challenge-"+id,requestDigest:String(repeating:"b",count:64),environment:.development)}
+        let first=try attempt("first"),second=try attempt("second")
+        func save(_ store:MatchStore,_ attempt:AuthAttemptV4) async->Bool {do {try await store.saveAuthAttemptV4(attempt);return true}catch{return false}}
+        async let x=save(a,first);async let y=save(b,second)
+        let results=await [x,y];XCTAssertEqual(results.filter{$0}.count,1)
+        try await a.close();try await b.close();let reopened=try store(c),pending=try await reopened.pendingAuthAttemptsV4();XCTAssertEqual(pending.count,1);try await reopened.close()
+    }
+
 }

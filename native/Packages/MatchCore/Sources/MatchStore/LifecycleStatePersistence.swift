@@ -58,7 +58,7 @@ extension MatchStore {
                 guard r.result==expected,(intent.operation != .prepareMigration || m.oldPhoneID==b.deviceID || (m.newPhoneID==b.deviceID && b.role == .waiting)),(intent.operation != .activateMigration && intent.operation != .forceMigration) || (m.newPhoneID==b.deviceID && epoch>m.oldActivationEpoch) else {throw AuthorityError.intentMismatch}
                 if intent.fields.checkpointID != nil {guard m.checkpointID==intent.fields.checkpointID,m.contentCommitment==intent.fields.contentCommitment else {throw AuthorityError.intentMismatch}}
                 try writeV4(StoredLifecycleControlV4(intent:intent,accountID:b.accountID,epoch:epoch,raw:receipt.raw),table:"lifecycle_steps_v4",id:"migration-latest")
-                if (r.result == .checkpointAccepted && m.oldPhoneID==b.deviceID) || r.result == .activated {try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
+                if (r.result == .checkpointAccepted && m.oldPhoneID==b.deviceID) || r.result == .activated {_=try advanceIdentityGenerationLockedV4();try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
             case .lostRecovery:
                 guard r.result == .grantIssued,let grant=r.lostRecovery,grant.newPhoneID==b.deviceID,grant.migrationID==intent.fields.migrationID,grant.expiresAt>=r.issuedAt,grant.expiresAt<=9_007_199_254_740_991,grant.expiresAt-r.issuedAt<=300,intent.fields.originalActivationEpoch==b.activationEpoch,r.matchID==intent.fields.matchID,r.lockID==intent.fields.lockID,r.recordingDeviceID==intent.fields.originalRecordingDeviceID else {throw AuthorityError.intentMismatch}
             case .terminateLost:
@@ -99,6 +99,7 @@ extension MatchStore {
             let verified=try VerifiedAuthorityReceiptV1.verify(receipt.raw,expected:AuthorityExpectedIntent(saga.intent,accountID:saga.accountID,epoch:saga.activationEpoch),trust:trust)
             guard verified.body.result == .deleted,verified.body.deletion?.backend=="backendDeleted",verified.body.deletion?.apple=="revoked" else {throw AuthorityError.intentMismatch}
             if saga.backendDeleted {guard saga.backendReceipt==receipt.raw else {throw AuthorityError.conflict};return saga}
+            _=try advanceIdentityGenerationLockedV4()
             saga.backendDeleted=true;saga.backendReceipt=receipt.raw;saga.lastIssue=nil;saga.revision += 1
             try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+requestID)
             if let b=try currentBindingV4() {guard b.accountID==saga.accountID else {throw AuthorityError.identityChanged};try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}

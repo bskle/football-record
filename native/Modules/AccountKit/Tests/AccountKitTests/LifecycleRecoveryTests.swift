@@ -67,6 +67,7 @@ final class LifecycleRecoveryTests:XCTestCase,@unchecked Sendable {
         let controls=AuthorityControlService(client:h.client,repository:h.repo,coordinator:h.session)
         _=try await controls.abnormal(matchID:start.matchID,requestID:"delete-first-abnormal");try await waitForCapture(h.repo,matchID:start.matchID)
         let apple=FixtureAppleSignIn(f,subject:"fixture-subject-never-stored"),auth=AccountService(client:h.client,repository:h.repo,coordinator:h.session,deviceID:f.metadata.credential.deviceID,cloudSpaceID:"fixture-cloud",apple:apple)
+        try await auth.admitCurrentIdentity(accountID:try await h.repo.accountBindingV4()?.accountID)
         let fresh=try await auth.signIn(requestID:"delete-original-phone-fresh",challengeRequestID:"delete-original-phone-challenge"),reauth=try XCTUnwrap(fresh.reauthenticationID),scope=try scope(fresh.binding)
         let ledger=try SQLiteCloudLedger(url:h.root.appendingPathComponent("nonempty-transport.sqlite")),bridge=CloudSessionBridge(repository:h.repo,client:h.client);try await bridge.attach(h.session)
         let upload=try await bridge.prepareUpload(matchID:start.matchID,scope:scope);try await ledger.enqueue(upload)

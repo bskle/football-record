@@ -40,6 +40,7 @@ extension MatchStore {
     public func accountBindingV4() throws -> AccountBindingV4? { try currentBindingV4() }
     public func suspendAccountV4() throws {
         try db.transaction {
+            _=try advanceIdentityGenerationLockedV4()
             guard let b=try currentBindingV4() else { return }
             try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")
             try fail(.beforeCommit)

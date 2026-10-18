@@ -40,7 +40,9 @@ final class MigrationRecoveryTests:XCTestCase,@unchecked Sendable {
         let batch=try CloudFetchBatch(scope:scope,batchID:"full-final-download",records:records,expectedAppliedToken:nil,nextToken:Data([1,2]),fetchGeneration:0,moreComing:false)
         _=try await nextBridge.importBatch(batch)
         let activated=try await nextService.activateMigration(migrationID:migration.migrationID,requestID:"activate-after-download");XCTAssertEqual(activated.body.result,.activated)
+        try await next.service.admitCurrentIdentity(accountID:try await next.repo.accountBindingV4()?.accountID)
         guard case .knownRevoked=try await next.service.recover(authRequestID:"next-waiting") else {return XCTFail()}
+        try await next.service.admitCurrentIdentity(accountID:try await next.repo.accountBindingV4()?.accountID)
         let fresh=try await next.service.signIn(requestID:"next-active-fresh",challengeRequestID:"next-active-challenge");XCTAssertEqual(fresh.binding.role,.phone);XCTAssertGreaterThan(fresh.binding.activationEpoch,waiting.binding.activationEpoch)
         let ids=try await next.repo.matchIDs();XCTAssertTrue(ids.isEmpty)
         if let started {let history=try await next.repo.cloudHistoryV4(scope:CloudSessionBridge.coreScope(scope));XCTAssertEqual(history.first?.facts.startIntent,started.startIntent);do {try await next.repo.validateAuthorityStartV4(started.startIntent!,now:old.date);XCTFail()}catch{}}
@@ -71,6 +73,7 @@ final class MigrationRecoveryTests:XCTestCase,@unchecked Sendable {
             let thirdBridge=CloudSessionBridge(repository:third.repo,client:third.client);try await thirdBridge.attach(third.session)
             _=try await thirdBridge.importBatch(CloudFetchBatch(scope:newScope,batchID:"second-download",records:[secondUpload.record],expectedAppliedToken:nil,nextToken:Data([3]),fetchGeneration:0,moreComing:false))
             _=try await thirdService.activateMigration(migrationID:second.migrationID,requestID:"second-activate")
+            try await third.service.admitCurrentIdentity(accountID:try await third.repo.accountBindingV4()?.accountID)
             let thirdFresh=try await third.service.signIn(requestID:"third-active-fresh",challengeRequestID:"third-active-challenge");XCTAssertGreaterThan(thirdFresh.binding.activationEpoch,fresh.binding.activationEpoch)
             let savedFirst=try await reopened.repo.lifecycleReceiptV4(requestID:"activate-after-download");XCTAssertEqual(savedFirst,activated.raw)
             try await reopened.repo.close();try await thirdLedger.close()
@@ -107,6 +110,7 @@ final class MigrationRecoveryTests:XCTestCase,@unchecked Sendable {
         do {_=try await readyService.forceMigration(migrationID:migration.migrationID,reauthenticationID:reauth,requestID:"used-reauth-force");XCTFail()}catch{}
         let again=try await ready.service.signIn(requestID:"force-fresh",challengeRequestID:"force-fresh-challenge"),forceID=try XCTUnwrap(again.reauthenticationID)
         let activated=try await readyService.forceMigration(migrationID:migration.migrationID,reauthenticationID:forceID,requestID:"eligible-force");XCTAssertGreaterThan(activated.body.activationEpoch,scope.activationEpoch)
+        try await ready.service.admitCurrentIdentity(accountID:try await ready.repo.accountBindingV4()?.accountID)
         let active=try await ready.service.signIn(requestID:"lost-active-fresh",challengeRequestID:"lost-active-challenge");XCTAssertEqual(active.binding.role,.phone)
         let noOldMatch=try await ready.repo.matchIDs();XCTAssertTrue(noOldMatch.isEmpty)
         let oldFacts=try await old.repo.snapshotV2(matchID:start.matchID);XCTAssertEqual(try oldFacts.business.replay(now:old.date).state,.running)

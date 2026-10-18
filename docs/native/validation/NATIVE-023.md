@@ -73,3 +73,10 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - peer / 已审032联调 / SDK编译仍在执行，未标 whole023完成或双审。
 
 - 已审032普通合入 `aa9977805dfb172cf1ece605d1f575cf7684df72`，本树 merge `5cdd9be166db1a20330fa6c49805b15d843cf26d`。client recover 总带原 strict publicKey，完整参与原 domain 签名。notSent / beforeCommit 红2→绿：knownAbandoned仅结束原tuple未知尝试，显式新ID/challenge方可登录；迟到原auth bytes实际401，错误key不能恢复原DB。recover丢响应仍unknown并阻新ID，原COMMITlost仍同session，knownExpired/迁移knownRevoked各可显式fresh。选测 Auth5+Migration4=9/0，日志 `023-5-auth-abandon-*`；不宣称真实Apple。
+
+## 三项 auth 提前审阅修复
+
+- S23-lifecycle-1/2：actual Node HTTP 404 与同service双 gated Apple await 红2项/3断言；404/401/timeout均保持unknown。Store同BEGIN IMMEDIATE只准一个未知attempt，两个真实连接也只一赢家。旧knownNotFound行保留但仍pending，新写拒绝，非任意resolved行解除门闩。
+- S23-lifecycle-3：actual HTTP signIn/recover先server commit、响应挂起，identityChanged完成后旧callback红4断言→绿。schema4控制行保存identity generation，auth save/accept事务CAS；AccountService必须显式admitCurrentIdentity，旧实例/自动reload不能给自己刷新代次。受控当前双身份显式admission、原ID对账与完整fresh Apple正向仍通过。
+- vault增加单调advanceIdentityFence与原子conditional replace；SQL accept后挂起vault写、完成身份fence、再放旧写会被拒。024必须把该原子性延伸到真实Keychain写入，不能在检查后await无条件写。默认生产SDK仍Unavailable。
+- 选测Auth9 + Migration4 + Lifecycle4单轮17/0；StoreLifecycle6/0，含两个文件连接与旧记录重开。证据 `023-5-auth-gates-red.log`、`023-5-auth-identity-fence-red.log`、`023-5-auth-identity-fence-green.log`、`023-5-auth-store-gates-green.log`。whole回归/peer仍后续。

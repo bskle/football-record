@@ -22,6 +22,17 @@ public actor AccountService {
     let apple:any AppleSignInDriver
     public init(client:AuthorityClient,repository:any AccountLifecycleRepository & AuthorityRepository,coordinator:any AccountLifecycleCoordinator,deviceID:String,cloudSpaceID:String,apple:any AppleSignInDriver){self.client=client;self.repository=repository;self.coordinator=coordinator;self.deviceID=deviceID;self.cloudSpaceID=cloudSpaceID;self.apple=apple}
 
+    private var admissionGeneration:Int64?
+    /// Call explicitly only after the current Apple/cloud identity boundary agrees with this facade.
+    public func admitCurrentIdentity(accountID:String?=nil) async throws {
+        try await ensureFacade();let binding=try await repository.accountBindingV4()
+        if let binding {guard binding.accountID==accountID,binding.cloudSpaceID==cloudSpaceID,binding.deviceID==deviceID,binding.environment==client.trust.environment else {throw AuthorityError.identityChanged}}
+        for attempt in try await repository.authAttemptsV4() where attempt.deviceID==deviceID {guard attempt.publicKey==client.signer.publicKey else {throw AuthorityError.identityChanged}}
+        let generation=try await repository.identityGenerationV4();try await client.vault.advanceIdentityFence(to:generation)
+        guard try await repository.identityGenerationV4()==generation,try await repository.accountBindingV4()==binding else {throw AuthorityError.identityChanged}
+        admissionGeneration=generation
+    }
+    func requireAdmission() async throws->Int64 {guard let generation=admissionGeneration,try await repository.identityGenerationV4()==generation else {throw AuthorityError.identityChanged};return generation}
     struct ChallengeRequest:Encodable {let version=1;let requestID,deviceID,devicePublicKey:String}
     struct Challenge:Codable {let version:Int;let requestID,challengeID:String;let expiresAt:Int64;let challenge:String?;let status:String?}
     struct AuthRequest:Encodable {let version=1;let requestID,challengeID,identityToken,authorizationCode,deviceID,devicePublicKey,cloudSpaceID:String}
@@ -33,7 +44,7 @@ public actor AccountService {
     func object<T:Encodable>(_ value:T)throws->[String:Any] {try JSONSerialization.jsonObject(with:AuthorityWire.encode(value)) as! [String:Any]}
     func bytes(_ value:[String:Any])throws->Data {try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.withoutEscapingSlashes])}
     public func signIn(requestID:String,challengeRequestID:String) async throws->AccountAuthentication {
-        try await ensureFacade()
+        try await ensureFacade();let generation=try await requireAdmission()
         if try await repository.authAttemptV4(requestID:requestID) != nil {
             guard case .authenticated(let result)=try await recover(authRequestID:requestID) else {throw AuthorityError.identityChanged};return result
         }
@@ -49,12 +60,12 @@ public actor AccountService {
         var full=try object(auth);full["deviceProof"]=AuthorityWire.base64URL(signature)
         let raw=try bytes(full),attempt=try AuthAttemptV4(requestID:requestID,deviceID:deviceID,publicKey:client.signer.publicKey,cloudSpaceID:cloudSpaceID,challengeID:challenge.challengeID,requestDigest:AuthorityWire.hash(raw),environment:client.trust.environment)
         // Persist only the immutable binding/digest before the first network mutation.
-        try await coordinator.saveAuthAttempt(attempt)
+        try await coordinator.saveAuthAttempt(attempt,expectedIdentityGeneration:generation)
         let response=try await client.unsigned(path:"/v1/auth/apple",body:raw)
-        return try await accept(response,attempt:attempt)
+        return try await accept(response,attempt:attempt,generation:generation)
     }
     public func recover(authRequestID:String) async throws->AuthenticationRecovery {
-        try await ensureFacade()
+        try await ensureFacade();let generation=try await requireAdmission()
         guard let attempt=try await repository.authAttemptV4(requestID:authRequestID),attempt.deviceID==deviceID,attempt.cloudSpaceID==cloudSpaceID,attempt.publicKey==client.signer.publicKey,attempt.environment==client.trust.environment else {throw AuthorityError.identityChanged}
         let request=RecoverRequest(requestID:UUID().uuidString,authRequestID:authRequestID,deviceID:deviceID,keyID:attempt.keyID,nonce:UUID().uuidString,devicePublicKey:attempt.publicKey,issuedAt:try seconds())
         let unsigned=try object(request),signature=try await client.signer.sign(AuthorityWire.signedInput("football-record.device.auth-recover.v1",body:bytes(unsigned)))
@@ -62,8 +73,7 @@ public actor AccountService {
         let raw:Data
         do {raw=try await client.unsigned(path:"/v1/auth/recover",body:bytes(full))}
         catch let failure as AuthorityHTTPFailure {
-            if failure.code=="notFound" {try await coordinator.resolveAuthAttempt(requestID:authRequestID,resolution:.knownNotFound);return .knownNotFound}
-            if failure.code=="unauthorized" || failure.retryable {return .unresolved}
+            if failure.code=="notFound" || failure.code=="unauthorized" || failure.retryable {return .unresolved}
             throw failure
         } catch is URLError {return .unresolved}
         if let object=try JSONSerialization.jsonObject(with:raw) as? [String:Any],Set(object.keys)==["status"] {
@@ -72,14 +82,17 @@ public actor AccountService {
             if object["status"] as? String=="knownExpired" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownExpired);return .knownExpired}
             throw AuthorityError.invalidWire
         }
-        return .authenticated(try await accept(raw,attempt:attempt))
+        return .authenticated(try await accept(raw,attempt:attempt,generation:generation))
     }
     func terminalCredential(authRequestID:String,resolution:AuthResolutionV4) async throws {
         try await coordinator.resolveAuthAttempt(requestID:authRequestID,resolution:resolution)
+        let current=try await repository.currentAuthRequestIDV4()
+        guard current==nil || current==authRequestID else {return}
         if let lifecycle=coordinator as? any LifecycleInboundCoordinator {try await lifecycle.suspendAccount();try await lifecycle.setAnalyticsEnabled(false)}
-        try await client.vault.replace(nil)
+        let generation=try await repository.identityGenerationV4();try await client.vault.advanceIdentityFence(to:generation)
+        admissionGeneration=nil
     }
-    func accept(_ raw:Data,attempt:AuthAttemptV4) async throws->AccountAuthentication {
+    func accept(_ raw:Data,attempt:AuthAttemptV4,generation:Int64) async throws->AccountAuthentication {
         guard raw.count<=65536,let value=try JSONSerialization.jsonObject(with:raw) as? [String:Any],try bytes(value)==raw,
               Set(value.keys)==Set(["receipt","sessionClaims","credential","context"]+(value["reauthenticationID"] == nil ? []:["reauthenticationID"])) else {throw AuthorityError.invalidWire}
         func decode<T:Decodable>(_ type:T.Type,_ key:String)throws->T {guard let object=value[key] else {throw AuthorityError.invalidWire};return try JSONDecoder().decode(type,from:JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.withoutEscapingSlashes]))}
@@ -92,8 +105,9 @@ public actor AccountService {
         switch receipt.body.result {case .registered:role = .phone;case .waitingMigration:role = .waiting;default:throw AuthorityError.intentMismatch}
         let binding=try AccountBindingV4(accountID:credential.accountID,cloudSpaceID:attempt.cloudSpaceID,deviceID:deviceID,activationEpoch:credential.activationEpoch,role:role,environment:client.trust.environment)
         let reauth=value["reauthenticationID"] as? String;if let reauth {try AuthorityWire.identifier(reauth)}
-        try await coordinator.acceptAuthentication(attempt:attempt,binding:binding,receipt:receipt)
-        try await client.vault.replace(credential)
+        try await coordinator.acceptAuthentication(attempt:attempt,binding:binding,receipt:receipt,expectedIdentityGeneration:generation)
+        try await client.vault.replace(credential,expectedIdentityGeneration:generation)
+        guard try await repository.identityGenerationV4()==generation else {throw AuthorityError.identityChanged}
         return AccountAuthentication(binding:binding,receipt:receipt,reauthenticationID:reauth)
     }
 }

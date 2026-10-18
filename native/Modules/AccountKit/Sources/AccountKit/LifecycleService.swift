@@ -12,14 +12,14 @@ public struct UnavailableCloudAccountDeletionDriver:CloudAccountDeletionDriver {
 public struct UnavailableAppWorkoutDeletionDriver:AppWorkoutDeletionDriver {public init(){};public func deleteAppCreatedWorkouts(confirmationID:String) async throws {throw AuthorityError.unavailable}}
 public actor LifecycleService {
     let client:AuthorityClient
-    let repository:any SessionRepository & AuthorityRepository & CloudImportRepository & LifecycleStateRepository
+    let repository:any SessionRepository & AuthorityRepository & CloudImportRepository & LifecycleStateRepository & AccountLifecycleRepository
     let coordinator:any LifecycleInboundCoordinator
     let scope:CloudScope
     let ledger:any CloudLedger
     let cloudDeletion:any CloudAccountDeletionDriver
     let healthDeletion:any AppWorkoutDeletionDriver
     let localTransportDeletion:any LocalTransportDeletionDriver
-    public init(client:AuthorityClient,repository:any SessionRepository & AuthorityRepository & CloudImportRepository & LifecycleStateRepository,coordinator:any LifecycleInboundCoordinator,scope:CloudScope,ledger:any CloudLedger,cloudDeletion:any CloudAccountDeletionDriver=UnavailableCloudAccountDeletionDriver(),healthDeletion:any AppWorkoutDeletionDriver=UnavailableAppWorkoutDeletionDriver(),localTransportDeletion:any LocalTransportDeletionDriver=UnavailableLocalTransportDeletionDriver()){self.client=client;self.repository=repository;self.coordinator=coordinator;self.scope=scope;self.ledger=ledger;self.cloudDeletion=cloudDeletion;self.healthDeletion=healthDeletion;self.localTransportDeletion=localTransportDeletion}
+    public init(client:AuthorityClient,repository:any SessionRepository & AuthorityRepository & CloudImportRepository & LifecycleStateRepository & AccountLifecycleRepository,coordinator:any LifecycleInboundCoordinator,scope:CloudScope,ledger:any CloudLedger,cloudDeletion:any CloudAccountDeletionDriver=UnavailableCloudAccountDeletionDriver(),healthDeletion:any AppWorkoutDeletionDriver=UnavailableAppWorkoutDeletionDriver(),localTransportDeletion:any LocalTransportDeletionDriver=UnavailableLocalTransportDeletionDriver()){self.client=client;self.repository=repository;self.coordinator=coordinator;self.scope=scope;self.ledger=ledger;self.cloudDeletion=cloudDeletion;self.healthDeletion=healthDeletion;self.localTransportDeletion=localTransportDeletion}
 
     func facade() async throws {guard await coordinator.syncRepositoryIdentity()==repository.syncRepositoryIdentity() else {throw AuthorityError.identityChanged}}
     func binding(allowSuspended:Bool=false) async throws->AccountBindingV4 {
@@ -73,7 +73,7 @@ public actor LifecycleService {
             do {
                 let receipt=try await deleteOnServer(saga)
                 saga=try await coordinator.acceptDeletion(requestID:requestID,receipt:receipt,expectedRevision:saga.revision)
-                try await client.vault.replace(nil)
+                try await client.vault.advanceIdentityFence(to:repository.identityGenerationV4())
             } catch {return try await save(saga) {$0.lastIssue=issue(error)}}
         }
         try await ledger.recordScopeIssue(scope:scope,issue:.accountChanged,at:client.now(),nextAttemptAt:nil)
@@ -103,7 +103,7 @@ public actor LifecycleService {
     public func identityChanged() async throws {
         try await facade();try await coordinator.suspendAccount();try await coordinator.setAnalyticsEnabled(false)
         try await ledger.recordScopeIssue(scope:scope,issue:.accountChanged,at:client.now(),nextAttemptAt:nil)
-        try await client.vault.replace(nil)
+        try await client.vault.advanceIdentityFence(to:repository.identityGenerationV4())
     }
     public func setAnalyticsEnabled(_ value:Bool) async throws {try await facade();if value {_=try await binding()};try await coordinator.setAnalyticsEnabled(value)}
     public func enqueueAnalytics(_ event:AnalyticsEventV4) async throws {try await facade();try await coordinator.enqueueAnalytics(event)}

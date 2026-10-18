@@ -13,11 +13,15 @@ public struct AuthAttemptV4:Codable,Sendable,Equatable {
 public enum AuthResolutionV4:String,Codable,Sendable {case knownRevoked,knownExpired,knownNotFound,knownAbandoned}
 public protocol AccountLifecycleRepository:Sendable {
     func syncRepositoryIdentity() async->SyncRepositoryIdentity
+    func identityGenerationV4() async throws->Int64
+    func currentAuthRequestIDV4() async throws->String?
+    func authAttemptsV4() async throws->[AuthAttemptV4]
+    func authResolutionV4(requestID:String) async throws->AuthResolutionV4?
     func pendingAuthAttemptsV4() async throws->[AuthAttemptV4]
     func resolveAuthAttemptV4(requestID:String,resolution:AuthResolutionV4) async throws
     func authAttemptV4(requestID:String) async throws->AuthAttemptV4?
-    func saveAuthAttemptV4(_ attempt:AuthAttemptV4) async throws
-    func acceptAuthenticationV4(attempt:AuthAttemptV4,binding:AccountBindingV4,receipt:VerifiedAuthorityReceiptV1) async throws
+    func saveAuthAttemptV4(_ attempt:AuthAttemptV4,expectedIdentityGeneration:Int64) async throws
+    func acceptAuthenticationV4(attempt:AuthAttemptV4,binding:AccountBindingV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64) async throws
 }
 
 public enum LifecycleIssueV4:String,Codable,Sendable {case unavailable,reauthenticationRequired,accountChanged,waitingPeriod,blocked,unknown}

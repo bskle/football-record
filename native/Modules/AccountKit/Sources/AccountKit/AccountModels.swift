@@ -14,12 +14,18 @@ public struct DeviceCredential: Decodable, Sendable, Equatable {
 public protocol DeviceCredentialVault: Sendable {
     func credential() async throws -> DeviceCredential
     func replace(_ credential:DeviceCredential?) async throws
+    /// Atomic across the actual credential write; a late SDK callback cannot lower this fence.
+    func advanceIdentityFence(to generation:Int64) async throws
+    func replace(_ credential:DeviceCredential?,expectedIdentityGeneration:Int64) async throws
 }
 public actor MemoryDeviceCredentialVault: DeviceCredentialVault {
+    private var generation:Int64=0
     private var current:DeviceCredential?
     public init(_ credential:DeviceCredential?=nil) { current=credential }
     public func credential() throws -> DeviceCredential { guard let current else { throw AuthorityError.unavailable };return current }
     public func replace(_ credential:DeviceCredential?) { current=credential }
+    public func advanceIdentityFence(to value:Int64)throws {guard value>=generation else {throw AuthorityError.identityChanged};if value>generation {generation=value;current=nil}}
+    public func replace(_ credential:DeviceCredential?,expectedIdentityGeneration:Int64)throws {guard generation==expectedIdentityGeneration else {throw AuthorityError.identityChanged};current=credential}
 }
 public protocol DeviceProofSigner: Sendable {
     var publicKey:String { get }
