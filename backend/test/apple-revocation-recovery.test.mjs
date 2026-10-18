@@ -80,5 +80,5 @@ test('DB WAL captured logs receipts and errors contain no raw code token Apple s
  scan();h.apple.controls.exchangeStatus=400;h.apple.controls.errorSentinel='APPLE-ERROR-SENTINEL-'+d.fresh.request.authorizationCode;const failed=await h.call(d.login,'/v1/accounts/delete',d.request);assert.equal(failed.data.code,'reauthenticationRequired');needles.push(h.apple.controls.errorSentinel);scan([failed.text]);
  h.apple.controls.exchangeStatus=undefined;const fresh=await h.login(d.login.d);needles.push(fresh.request.identityToken,fresh.request.authorizationCode,fresh.credential.token);const done=await h.call(d.login,'/v1/accounts/delete',d.request);assert.equal(done.status,200);scan([done.text]);
  const status=await h.raw('/v1/accounts/delete-status',req({deleteRequestID:d.request.requestID,recoveryCapability:d.capability}));scan([status.text]);
- assert.equal(h.f.inspect('PRAGMA user_version')[0].user_version,1);assert.equal(JSON.stringify(h.f.inspect("SELECT sql FROM sqlite_master WHERE type='table'")).includes('expectedApple'),false);
+ assert.equal(h.f.inspect('PRAGMA user_version')[0].user_version,2);assert.equal(JSON.stringify(h.f.inspect("SELECT sql FROM sqlite_master WHERE type='table'")).includes('expectedApple'),false);
 });

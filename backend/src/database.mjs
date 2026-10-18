@@ -6,7 +6,7 @@ export function openDatabase(config) {
   try {
     db.exec('PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA secure_delete=ON;');
     const version=db.prepare('PRAGMA user_version').get().user_version;
-    if(version>1)throw new Error('unsupported database version');
+    if(version>2)throw new Error('unsupported database version');
     db.exec(`BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS epoch_allocator(id INTEGER PRIMARY KEY CHECK(id=1),value INTEGER NOT NULL) STRICT;
@@ -21,6 +21,8 @@ export function openDatabase(config) {
       CREATE TABLE IF NOT EXISTS challenge_requests(request_id TEXT PRIMARY KEY,request_digest TEXT NOT NULL,challenge_id TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS sessions(session_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,device_id TEXT NOT NULL,key_id TEXT NOT NULL,activation_epoch INTEGER NOT NULL,expires_at INTEGER NOT NULL,token_hash TEXT NOT NULL UNIQUE,revoked INTEGER NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS auth_records(auth_request_id TEXT NOT NULL,device_id TEXT NOT NULL,account_id TEXT NOT NULL,request_digest TEXT NOT NULL,public_key TEXT NOT NULL,session_id TEXT NOT NULL,public_result BLOB NOT NULL,PRIMARY KEY(auth_request_id,device_id)) STRICT;
+      CREATE TABLE IF NOT EXISTS auth_absence_fences(fence_id TEXT PRIMARY KEY) STRICT;
+      CREATE TABLE IF NOT EXISTS auth_recovery_nonces(fence_id TEXT NOT NULL,nonce_hash TEXT NOT NULL,PRIMARY KEY(fence_id,nonce_hash)) STRICT;
       CREATE TABLE IF NOT EXISTS nonces(session_id TEXT NOT NULL,nonce TEXT NOT NULL,PRIMARY KEY(session_id,nonce)) STRICT;
       CREATE TABLE IF NOT EXISTS reauthentications(reauthentication_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,device_id TEXT NOT NULL,key_id TEXT NOT NULL,issued_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed INTEGER NOT NULL) STRICT;
 
@@ -33,7 +35,7 @@ export function openDatabase(config) {
       CREATE TABLE IF NOT EXISTS restrictions(account_id TEXT PRIMARY KEY,state TEXT NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS analytics_events(account_id TEXT NOT NULL,request_id TEXT NOT NULL,day INTEGER NOT NULL,metric TEXT NOT NULL,count INTEGER NOT NULL,app_version TEXT NOT NULL,os_family TEXT NOT NULL,os_major INTEGER NOT NULL,qualification TEXT NOT NULL,PRIMARY KEY(account_id,request_id)) STRICT;
       CREATE TABLE IF NOT EXISTS analytics_aggregate(day INTEGER NOT NULL,metric TEXT NOT NULL,count INTEGER NOT NULL,PRIMARY KEY(day,metric)) STRICT;
-      PRAGMA user_version=1;`);
+      PRAGMA user_version=2;`);
     const fingerprint=db.prepare('SELECT value FROM metadata WHERE key=?').get('configuration');
     if(fingerprint&&fingerprint.value!==config.fingerprint)throw new Error('persistent key configuration mismatch');
     db.prepare('INSERT OR IGNORE INTO metadata VALUES(?,?)').run('configuration',config.fingerprint);
