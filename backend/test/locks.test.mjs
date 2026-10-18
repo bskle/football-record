@@ -4,7 +4,11 @@ import { startFixtureAuthority, tempDB } from './support.mjs';
 
 test('two independent workers preserve one lock across reopen', async t => {
   const f = await startFixtureAuthority({databasePath: tempDB()}); t.after(()=>f.close());
+  assert.match(f.baseURL,/^http:\/\/127[.]0[.]0[.]1:/);
   const results = await f.raceWorkers(['request-a','request-b']);
+  t.diagnostic(JSON.stringify(f.lastWorkerEvidence));
+  assert.equal(f.lastWorkerEvidence.threadIDs.every(id=>id>0),true);
+  assert.equal(new Set(f.lastWorkerEvidence.threadIDs).size,2);
   assert.equal(results.filter(r=>r.body.result==='held').length,1);
   assert.equal(results.filter(r=>r.body.result==='originalMatch').length,1);
   assert.equal(new Set(results.map(r=>r.body.lockID)).size,1);

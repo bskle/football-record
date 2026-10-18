@@ -1,4 +1,5 @@
 import {fail} from './database.mjs';
+import {canonicalJSON} from './receipt.mjs';
 export const metrics=['registered','activeDay','matchCompleted','matchIncomplete','watchRecorded','syncSucceeded','syncFailed','recoverySucceeded','recoveryFailed'];
 export function validateMetric(r){
  const fields=['version','requestID','metric','count','appVersion','osFamily','osMajor','qualification'];
@@ -6,5 +7,5 @@ export function validateMetric(r){
 }
 export function createAnalyticsQueue({send}){
  let enabled=false,queue=[];
- return {get pendingCount(){return queue.length;},setEnabled(value){enabled=value===true;if(!enabled)queue=[];},enqueue(r){validateMetric(r);if(enabled&&!queue.some(x=>x.requestID===r.requestID))queue.push(structuredClone(r));},async flush(){while(enabled&&queue.length){const current=queue[0];await send(current);if(enabled&&queue[0]?.requestID===current.requestID)queue.shift();}},logout(){enabled=false;queue=[];}};
+ return {get pendingCount(){return queue.length;},setEnabled(value){enabled=value===true;if(!enabled)queue=[];},enqueue(r){validateMetric(r);if(enabled){const prior=queue.find(x=>x.requestID===r.requestID);if(prior&&canonicalJSON(prior)!==canonicalJSON(r))fail('idempotencyConflict');if(!prior)queue.push(structuredClone(r));}},async flush(){while(enabled&&queue.length){const current=queue[0];await send(current);if(enabled&&queue[0]?.requestID===current.requestID)queue.shift();}},logout(){enabled=false;queue=[];}};
 }

@@ -56,14 +56,14 @@ test('delete saga retains stage on revocation failure then capability recovers c
  const request=req({reauthenticationID:fresh.result.reauthenticationID,recoveryCapabilityDigest:sha256(capability)});
  f.config.appleRevoker=async()=>{throw Error('transient secret revocation failure');};
  await assert.rejects(f.authority.deleteAccount(l.context,request),e=>e.code==='reauthenticationRequired');
- assert.equal(f.inspect('SELECT state FROM deletions')[0].state,'lockReconciled');assert.equal(f.inspect('SELECT count(*) AS n FROM sessions')[0].n>0,true);
+ assert.equal(f.inspect('SELECT state FROM deletions')[0].state,'lockReconciled');assert.equal(f.inspect("SELECT count(*) AS n FROM sessions WHERE account_id='"+l.context.accountID+"'")[0].n>0,true);
  await f.restart();a=await authSetup(f);const again=await a.login(l.d);
  // A new reauthentication cannot change the original delete business intent: retry via the bound saga-specific proof.
  f.config.appleRevoker=async()=>({revoked:true});
  f.faults.afterDeleteCommitResponseLost=true;
  await assert.rejects(f.authority.deleteAccount(l.context,request),e=>e.code==='responseLost');f.faults.afterDeleteCommitResponseLost=false;
  assert.equal(f.inspect('SELECT count(*) AS n FROM auth_records')[0].n,0);
- assert.equal(f.inspect('SELECT count(*) AS n FROM sessions')[0].n,0);
+ assert.equal(f.inspect("SELECT count(*) AS n FROM sessions WHERE account_id='"+l.context.accountID+"'")[0].n,0);
  assert.equal(f.inspect('SELECT count(*) AS n FROM qualifications')[0].n,0);
  await f.restart();
  const status=f.authority.deleteStatus(req({deleteRequestID:request.requestID,recoveryCapability:capability}));assert.equal(status.status,'backendDeleted');assert.equal(status.receipt.body.result,'deleted');
@@ -143,4 +143,27 @@ test('after migration old phone fresh same-key login is waiting at current epoch
  f.authority.terminate(current.context,req({matchID:held.body.matchID,lockID:held.body.lockID,recordingDeviceID:watch.deviceID,activationEpoch:ctx.activationEpoch,mode:'abnormal'}));
  const returnMigration=f.authority.prepareMigration(current.context,req({newPhoneID:old.d.deviceID,activationEpoch:current.credential.activationEpoch}));assert.equal(returnMigration.body.result,'waitingMigration');
  await assert.rejects(a.login(watch),e=>e.code==='unauthorized');
+});
+
+test('S21-pre1 pending deletion and either migration are persistently exclusive across reopen',async t=>{
+ const f=await startFixtureAuthority();t.after(()=>f.close());let {a,old,waiting}=await phones(f);const fresh=await a.login(old.d),cap=randomBytes(32).toString('base64url');
+ const deletion=req({reauthenticationID:fresh.result.reauthenticationID,recoveryCapabilityDigest:sha256(cap)});await assert.rejects(f.authority.deleteAccount(old.context,deletion),e=>e.code==='unavailable');await f.restart();a=await authSetup(f);
+ assert.throws(()=>f.authority.prepareMigration(old.context,req({newPhoneID:waiting.d.deviceID,activationEpoch:old.credential.activationEpoch})),e=>e.code==='migrationBlocked');
+ assert.throws(()=>f.authority.requestLostMigration(waiting.context,req({newPhoneID:waiting.d.deviceID,cloudSpaceID:'fixture-cloud'})),e=>e.code==='migrationBlocked');
+ assert.equal(f.inspect('SELECT state FROM deletions')[0].state,'lockReconciled');
+ await a.login(old.d);f.config.appleRevoker=async()=>({revoked:true});assert.equal((await f.authority.deleteAccount(old.context,deletion)).body.result,'deleted');
+});
+for(const kind of ['normal','lost'])test('S21-pre1 '+kind+' migration excludes creating a delete saga',async t=>{
+ const f=await startFixtureAuthority();t.after(()=>f.close());const {a,old,waiting}=await phones(f),fresh=await a.login(old.d);
+ if(kind==='normal')f.authority.prepareMigration(old.context,req({newPhoneID:waiting.d.deviceID,activationEpoch:old.credential.activationEpoch}));else f.authority.requestLostMigration(waiting.context,req({newPhoneID:waiting.d.deviceID,cloudSpaceID:'fixture-cloud'}));
+ await assert.rejects(f.authority.deleteAccount(old.context,req({reauthenticationID:fresh.result.reauthenticationID,recoveryCapabilityDigest:sha256(randomBytes(32).toString('base64url'))})),e=>e.code==='migrationBlocked');assert.equal(f.inspect('SELECT count(*) AS n FROM deletions')[0].n,0);
+});
+test('S21-pre2 delete reserves the same account-wide request ID namespace in both directions across reopen',async t=>{
+ const f=await startFixtureAuthority();t.after(()=>f.close());let {a,old}=await phones(f),fresh=await a.login(old.d);
+ const metric={version:1,requestID:'shared-operation-id',metric:'activeDay',count:1,appVersion:'1.0',osFamily:'iOS',osMajor:17,qualification:'free'};f.authority.analytics(old.context,metric);
+ await assert.rejects(f.authority.deleteAccount(old.context,{version:1,requestID:metric.requestID,reauthenticationID:fresh.result.reauthenticationID,recoveryCapabilityDigest:sha256(randomBytes(32).toString('base64url'))}),e=>e.code==='idempotencyConflict');
+ const deletion={version:1,requestID:'reserved-delete-id',reauthenticationID:fresh.result.reauthenticationID,recoveryCapabilityDigest:sha256(randomBytes(32).toString('base64url'))};await assert.rejects(f.authority.deleteAccount(old.context,deletion),e=>e.code==='unavailable');await f.restart();
+ assert.throws(()=>f.authority.analytics(old.context,{...metric,requestID:deletion.requestID}),e=>e.code==='idempotencyConflict');
+ assert.throws(()=>f.authority.acquire(old.context,{...matchRequest(old),requestID:deletion.requestID}),e=>e.code==='idempotencyConflict');
+ assert.throws(()=>f.authority.requestBytes(old.context,deletion.requestID),e=>e.code==='unavailable');
 });

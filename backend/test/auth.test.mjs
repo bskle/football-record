@@ -24,7 +24,7 @@ test('signature failure, replayed challenge, UUID key rotation and second phone 
 test('auth commit response lost recovers original credential using fresh bound device proof after reopen',async t=>{
  const f=await startFixtureAuthority({databasePath:tempDB()});t.after(()=>f.close());let a=await authSetup(f);const d=a.device(),{r}=a.request(d);
  f.faults.afterCommitResponseLost=true;await assert.rejects(a.auth.authenticate(r),e=>e.code==='responseLost');f.faults.afterCommitResponseLost=false;
- const before=f.inspect('SELECT token_hash,session_id FROM sessions')[0];
+ const before=f.inspect("SELECT token_hash,session_id FROM sessions WHERE device_id='"+d.deviceID+"'")[0];
  await f.restart();a=await authSetup(f);
  const req={version:1,requestID:randomUUID(),authRequestID:r.requestID,deviceID:d.deviceID,keyID:d.keyID,nonce:randomUUID(),issuedAt:f.clock.now()};
  const {signRecover}=await import('../src/device-auth.mjs');req.deviceProof=signRecover(d.privateKey,req);

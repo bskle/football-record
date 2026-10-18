@@ -1,3 +1,4 @@
+import {validatePayload} from './codec.mjs';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
 import {transaction,fail,nextEpoch} from './database.mjs';
 import {canonicalJSON,sha256,makeReceipt,decodeBase64URL} from './receipt.mjs';
@@ -5,13 +6,14 @@ import {validateMetric} from './analytics.mjs';
 export function installLifecycle(api,state){
  const {db,config,validate,stored,persist,write}=state;
  const migrationDTO=m=>({migrationID:m.migration_id,kind:m.kind,state:m.state,oldPhoneID:m.old_phone_id,newPhoneID:m.new_phone_id,oldActivationEpoch:m.old_epoch,cloudSpaceID:m.cloud_space_id,requestedAt:m.requested_at,eligibleAt:m.eligible_at,checkpointID:m.checkpoint_id,contentCommitment:m.content_commitment});
+ const noDeletion=ctx=>{if(db.prepare('SELECT 1 FROM deletions WHERE account_id=?').get(ctx.accountID))fail('migrationBlocked');};
  const activeLock=account=>db.prepare('SELECT * FROM active_locks WHERE account_id=?').get(account);
- function migration(ctx,id){const m=db.prepare('SELECT * FROM migrations WHERE migration_id=? AND account_id=?').get(id,ctx.accountID);if(!m)fail('migrationBlocked');return m;}
+ function migration(ctx,id){noDeletion(ctx);const m=db.prepare('SELECT * FROM migrations WHERE migration_id=? AND account_id=?').get(id,ctx.accountID);if(!m)fail('migrationBlocked');return m;}
  function reauth(ctx,id,min=0){const r=db.prepare('SELECT * FROM reauthentications WHERE reauthentication_id=?').get(id);if(!r||r.account_id!==ctx.accountID||r.device_id!==ctx.deviceID||r.key_id!==ctx.keyID||r.consumed||r.issued_at<min||r.issued_at>config.clock.now()+60||r.expires_at<config.clock.now())fail('reauthenticationRequired',403);return r;}
  const consume=id=>db.prepare('UPDATE reauthentications SET consumed=1 WHERE reauthentication_id=?').run(id);
  function prepareMigration(ctx,r){return write(ctx,r,'prepareMigration',({a,d})=>{
    if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID||r.activationEpoch!==ctx.activationEpoch)fail('activationMismatch',403);
-   if(activeLock(ctx.accountID)||a.migration_id)fail('migrationBlocked');
+   noDeletion(ctx);if(activeLock(ctx.accountID)||a.migration_id)fail('migrationBlocked');
    const target=db.prepare("SELECT * FROM devices WHERE device_id=? AND account_id=? AND role='waiting' AND activation_epoch=?").get(r.newPhoneID,ctx.accountID,ctx.activationEpoch);if(!target)fail('migrationBlocked');
    const id=randomUUID(),now=config.clock.now();db.prepare('INSERT INTO migrations VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,ctx.accountID,'normal','oldPhonePrepared',ctx.deviceID,r.newPhoneID,ctx.activationEpoch,a.cloud_space_id,now,now,'','');
    db.prepare('UPDATE accounts SET migration_id=? WHERE account_id=?').run(id,ctx.accountID);
@@ -37,7 +39,7 @@ export function installLifecycle(api,state){
    return activate(ctx,r,m);
  },{active:false});}
  function requestLostMigration(ctx,r){return write(ctx,r,'requestLostMigration',({a,d})=>{
-   if(d.role!=='waiting'||r.newPhoneID!==ctx.deviceID)fail('activationMismatch',403);if(r.cloudSpaceID!==a.cloud_space_id)fail('cloudIdentityMismatch',403);
+   noDeletion(ctx);if(d.role!=='waiting'||r.newPhoneID!==ctx.deviceID)fail('activationMismatch',403);if(r.cloudSpaceID!==a.cloud_space_id)fail('cloudIdentityMismatch',403);
    let m=a.migration_id?migration(ctx,a.migration_id):undefined;
    if(m&&(m.kind!=='lost'||m.new_phone_id!==ctx.deviceID||m.state==='activated'))fail('migrationBlocked');
    if(!m){const id=randomUUID(),now=config.clock.now();db.prepare('INSERT INTO migrations VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(id,ctx.accountID,'lost','waitingPeriod',a.active_phone_id,ctx.deviceID,ctx.activationEpoch,a.cloud_space_id,now,now+604800,'','');db.prepare('UPDATE accounts SET migration_id=? WHERE account_id=?').run(id,ctx.accountID);m=migration(ctx,id);}
@@ -67,10 +69,12 @@ export function installLifecycle(api,state){
    if(ctx.deviceID!==a.active_phone_id||r.activationEpoch!==ctx.activationEpoch)fail('activationMismatch',403);
    const local=db.prepare('SELECT * FROM devices WHERE device_id=? AND account_id=? AND activation_epoch=?').get(r.localDeviceID,ctx.accountID,ctx.activationEpoch),remote=db.prepare('SELECT * FROM devices WHERE device_id=? AND account_id=? AND activation_epoch=?').get(r.remoteDeviceID,ctx.accountID,ctx.activationEpoch);
    if(!local||!remote||local.role==='waiting'||remote.role==='waiting'||local.device_id===remote.device_id)fail('activationMismatch',403);
-   const grantID=randomUUID(),grant={grantID,pairingID:r.pairingID,localDeviceID:local.device_id,remoteDeviceID:remote.device_id,localPublicKey:local.public_key,remotePublicKey:remote.public_key,expiresAt:config.clock.now()+3600};
-   const result=makeReceipt(config,ctx,r,'peerGrant','grantIssued',{}, {peerGrant:grant});db.prepare('INSERT INTO peer_grants VALUES(?,?,?,?,?,?,?)').run(grantID,ctx.accountID,ctx.activationEpoch,r.pairingID,local.device_id,remote.device_id,Buffer.from(canonicalJSON(result)));return result;
+   const prior=db.prepare('SELECT * FROM peer_grants WHERE account_id=? AND activation_epoch=? AND pairing_id=?').get(ctx.accountID,ctx.activationEpoch,r.pairingID);if(prior&&(prior.local_device_id!==r.localDeviceID||prior.remote_device_id!==r.remoteDeviceID))fail('idempotencyConflict');
+   const grantID=prior?.grant_id??randomUUID(),grant={grantID,pairingID:r.pairingID,localDeviceID:local.device_id,remoteDeviceID:remote.device_id,localPublicKey:local.public_key,remotePublicKey:remote.public_key,expiresAt:config.clock.now()+3600};
+   const result=makeReceipt(config,ctx,r,'peerGrant','grantIssued',{}, {peerGrant:grant});db.prepare('INSERT INTO peer_grants VALUES(?,?,?,?,?,?,?) ON CONFLICT(grant_id) DO UPDATE SET result=excluded.result').run(grantID,ctx.accountID,ctx.activationEpoch,r.pairingID,local.device_id,remote.device_id,Buffer.from(canonicalJSON(result)));return result;
  });}
  function deleteStatus(r){
+   validatePayload('deleteStatus',r);
    let cap;try{cap=decodeBase64URL(r.recoveryCapability,32);}catch{fail('unauthorized',401);}
    return transaction(db,config,()=>{
     db.prepare('DELETE FROM deletion_receipts WHERE expires_at<?').run(config.clock.now());
@@ -81,8 +85,10 @@ export function installLifecycle(api,state){
    });
  }
  async function deleteAccount(ctx,r){
+   validatePayload('deleteAccount',r);
    const saga=transaction(db,config,()=>{
      const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
+     stored(ctx,r,'deleteAccount');if(a.migration_id)fail('migrationBlocked');
      let s=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID),digest=sha256(canonicalJSON(r));
      if(s&&(s.delete_request_id!==r.requestID||s.request_digest!==digest))fail('idempotencyConflict');
      if(!s){reauth(ctx,r.reauthenticationID);db.prepare('INSERT INTO deletions VALUES(?,?,?,?,?,?,?,?)').run(ctx.accountID,ctx.deviceID,r.requestID,digest,r.recoveryCapabilityDigest,'requested',r.reauthenticationID,config.clock.now());s=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);}
@@ -117,6 +123,14 @@ export function installLifecycle(api,state){
    if(accepted){const day=Math.floor(config.clock.now()/86400);db.prepare('INSERT INTO analytics_events VALUES(?,?,?,?,?,?,?,?,?)').run(ctx.accountID,r.requestID,day,r.metric,r.count,r.appVersion,r.osFamily,r.osMajor,r.qualification);db.prepare('INSERT INTO analytics_aggregate VALUES(?,?,?) ON CONFLICT(day,metric) DO UPDATE SET count=count+excluded.count').run(day,r.metric,r.count);}
    return {version:1,requestID:r.requestID,accepted};
  });}
- function analyticsSummary(){const day=Math.floor(config.clock.now()/86400);const active=days=>db.prepare('SELECT count(DISTINCT account_id) AS n FROM analytics_events WHERE day>=?').get(day-days+1).n;return {dau:active(1),wau:active(7),mau:active(30),metrics:db.prepare('SELECT day,metric,sum(count) AS count FROM analytics_aggregate GROUP BY day,metric').all(),versions:db.prepare('SELECT app_version AS appVersion,count(DISTINCT account_id) AS accounts FROM analytics_events GROUP BY app_version').all(),lastActive:db.prepare('SELECT account_id AS accountID,max(day) AS lastActiveDay FROM analytics_events GROUP BY account_id').all()};}
+ function analyticsSummary(){
+   const day=Math.floor(config.clock.now()/86400),active=days=>db.prepare('SELECT count(DISTINCT account_id) AS n FROM analytics_events WHERE day>=?').get(day-days+1).n;
+   const metrics=db.prepare('SELECT day,metric,sum(count) AS count FROM analytics_aggregate GROUP BY day,metric').all();
+   const total=metric=>metrics.filter(x=>x.metric===metric).reduce((sum,x)=>sum+x.count,0),ratio=(success,failure)=>({succeeded:total(success),total:total(success)+total(failure)});
+   return {dau:active(1),wau:active(7),mau:active(30),matchCount:total('matchCompleted')+total('matchIncomplete'),rates:{sync:ratio('syncSucceeded','syncFailed'),recovery:ratio('recoverySucceeded','recoveryFailed')},metrics,
+    devices:db.prepare('SELECT role,count(*) AS count FROM devices GROUP BY role').all(),qualifications:db.prepare("SELECT coalesce(q.qualification,'free') AS qualification,count(*) AS count FROM accounts a LEFT JOIN qualifications q ON q.account_id=a.account_id GROUP BY coalesce(q.qualification,'free')").all(),
+    versions:db.prepare('SELECT app_version AS appVersion,count(DISTINCT account_id) AS accounts FROM analytics_events GROUP BY app_version').all(),lastActive:db.prepare('SELECT account_id AS accountID,max(day) AS lastActiveDay FROM analytics_events GROUP BY account_id').all()};
+ }
+
  Object.assign(api,{prepareMigration,checkpointMigration,activateMigration,requestLostMigration,lostRecovery,terminateLost,forceMigration,peerGrant,deleteAccount,deleteStatus,analytics,analyticsSummary});
 }

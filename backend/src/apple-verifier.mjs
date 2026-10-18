@@ -21,7 +21,8 @@ function verifier({audiences,clock,fetchJWKS,environment}){
   }
   return Object.freeze({verify:check,environment});
 }
-export function createAppleVerifier({audiences,clock={now:()=>Math.floor(Date.now()/1000)}}){
-  return verifier({audiences,clock,environment:'production',fetchJWKS:async()=>{const response=await fetch(TRUSTED_JWKS,{redirect:'error',signal:AbortSignal.timeout(5000)});if(!response.ok)throw Error();const bytes=Buffer.from(await response.arrayBuffer());if(bytes.length>65536)throw Error();return parseStrictJSON(bytes.toString('utf8'));}});
+export function createAppleVerifier({audiences,clock={now:()=>Math.floor(Date.now()/1000)},environment='production'}){
+  if(!['development','production'].includes(environment))throw Error('invalid verifier environment');
+  return verifier({audiences,clock,environment,fetchJWKS:async()=>{const response=await fetch(TRUSTED_JWKS,{redirect:'error',signal:AbortSignal.timeout(5000)});if(!response.ok)throw Error();const bytes=Buffer.from(await response.arrayBuffer());if(bytes.length>65536)throw Error();return parseStrictJSON(bytes.toString('utf8'));}});
 }
 export function createDevelopmentAppleVerifier({audiences,clock,fetchJWKS}){return verifier({audiences,clock,fetchJWKS,environment:'development'});}

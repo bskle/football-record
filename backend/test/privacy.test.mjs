@@ -19,3 +19,10 @@ test('analytics defaults off, disabling drops unsent optional queue, stable requ
  assert.equal(f.inspect('SELECT sum(count) AS n FROM analytics_events')[0].n,1);
  const stats=f.authority.analyticsSummary();assert.equal(stats.dau,1);assert.equal(stats.wau,1);assert.equal(stats.mau,1);
 });
+
+test('anonymous summary reports match outcomes device/qualification buckets and integer success ratios',async t=>{
+ const f=await startFixtureAuthority();t.after(()=>f.close());f.config.analyticsEnabled=true;
+ for(const [metric,count]of [['matchCompleted',2],['matchIncomplete',1],['syncSucceeded',3],['syncFailed',1],['recoverySucceeded',1],['recoveryFailed',1]])f.authority.analytics(f.context,{...base,requestID:'summary-'+metric,metric,count});
+ const s=f.authority.analyticsSummary();assert.equal(s.matchCount,3);assert.deepEqual(s.rates.sync,{succeeded:3,total:4});assert.deepEqual(s.rates.recovery,{succeeded:1,total:2});assert.ok(s.devices.some(x=>x.role==='phone'&&x.count===1));assert.ok(s.qualifications.some(x=>x.qualification==='free'));
+ const {createAnalyticsQueue}=await import('../src/analytics.mjs');const queue=createAnalyticsQueue({send:async()=>{}});queue.setEnabled(true);queue.enqueue(base);assert.throws(()=>queue.enqueue({...base,count:2}),e=>e.code==='idempotencyConflict');
+});

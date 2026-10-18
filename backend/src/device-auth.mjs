@@ -1,3 +1,4 @@
+import {validatePayload} from './codec.mjs';
 import {createHmac,randomBytes,randomUUID,sign,verify,timingSafeEqual} from 'node:crypto';
 import {authorityState} from './authority.mjs';
 import {canonicalJSON,sha256,edPublicKey,decodeBase64URL,makeReceipt} from './receipt.mjs';
@@ -13,7 +14,7 @@ export function createDeviceAuth({authority,appleVerifier}){
  function credential(s){return {token:tokenFor(s),sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};}
  function session(ctx){const s={session_id:randomUUID(),account_id:ctx.accountID,device_id:ctx.deviceID,key_id:ctx.keyID,activation_epoch:ctx.activationEpoch,expires_at:config.clock.now()+2592000};db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(s.session_id,s.account_id,s.device_id,s.key_id,s.activation_epoch,s.expires_at,sha256(tokenFor(s)));return s;}
  function consumeNonce(sessionID,nonce){if(db.prepare('SELECT 1 FROM nonces WHERE session_id=? AND nonce=?').get(sessionID,nonce))fail('unauthorized',401);db.prepare('INSERT INTO nonces VALUES(?,?)').run(sessionID,nonce);}
- function challenge(r){return transaction(db,config,()=>{
+ function challenge(r){validatePayload('challenge',r);return transaction(db,config,()=>{
    try{edPublicKey(r.devicePublicKey);}catch{fail('invalidPayload',422);}
    const digest=sha256(canonicalJSON(r)),prior=db.prepare('SELECT * FROM challenge_requests WHERE request_id=?').get(r.requestID);
    let c;if(prior){if(prior.request_digest!==digest)fail('idempotencyConflict');c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(prior.challenge_id);}
@@ -27,6 +28,7 @@ export function createDeviceAuth({authority,appleVerifier}){
  function checkChallenge(r,publicKey,deviceID){const c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(r.challengeID);if(!c||c.consumed||c.expires_at<config.clock.now()||c.device_id!==deviceID||c.key_fingerprint!==sha256(publicKey))fail('unauthorized',401);const proof={...r,challengeSHA256:c.challenge_hash};delete proof.deviceProof;if(!signatureOK(publicKey,'football-record.device.challenge.v1',proof,r.deviceProof))fail('unauthorized',401);return c;}
  function output(record,s){return {...JSON.parse(Buffer.from(record)),credential:credential(s),context:{accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch}};}
  async function authenticate(r){
+   validatePayload('authApple',r);
    const c=checkChallenge(r,r.devicePublicKey,r.deviceID);
    const verified=await appleVerifier.verify(r.identityToken,c.challenge_hash);
    return transaction(db,config,()=>{
@@ -50,7 +52,7 @@ export function createDeviceAuth({authority,appleVerifier}){
     return output(bytes,s);
    });
  }
- function recover(r){return transaction(db,config,()=>{
+ function recover(r){validatePayload('authRecover',r);return transaction(db,config,()=>{
    const row=db.prepare('SELECT * FROM auth_records WHERE auth_request_id=? AND device_id=?').get(r.authRequestID,r.deviceID);
    const body={...r};delete body.deviceProof;
    if(!row||sha256(row.public_key)!==r.keyID||!Number.isSafeInteger(r.issuedAt)||Math.abs(config.clock.now()-r.issuedAt)>60||!signatureOK(row.public_key,'football-record.device.auth-recover.v1',body,r.deviceProof))fail('unauthorized',401);
@@ -71,7 +73,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    const ctx={accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,sessionID:s.session_id};
    return transaction(db,config,()=>{const current=db.prepare('SELECT revoked FROM sessions WHERE session_id=?').get(s.session_id);if(!current||current.revoked)fail('unauthorized',401);validate(ctx,{active:false});consumeNonce(s.session_id,proof.nonce);return ctx;});
  }
- function registerWatch(ctx,r){return transaction(db,config,()=>{
+ function registerWatch(ctx,r){validatePayload('registerWatch',r);return transaction(db,config,()=>{
    const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
    const old=stored(ctx,r,'registerWatch');if(old){const s=db.prepare('SELECT * FROM sessions WHERE session_id=?').get(old.sessionClaims.sessionID);return {...old,credential:credential(s)};}
    checkChallenge(r,r.watchPublicKey,r.watchID);
