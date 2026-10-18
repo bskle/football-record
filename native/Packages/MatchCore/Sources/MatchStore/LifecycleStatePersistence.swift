@@ -58,7 +58,7 @@ extension MatchStore {
                 guard r.result==expected,(intent.operation != .prepareMigration || m.oldPhoneID==b.deviceID || (m.newPhoneID==b.deviceID && b.role == .waiting)),(intent.operation != .activateMigration && intent.operation != .forceMigration) || (m.newPhoneID==b.deviceID && epoch>m.oldActivationEpoch) else {throw AuthorityError.intentMismatch}
                 if intent.fields.checkpointID != nil {guard m.checkpointID==intent.fields.checkpointID,m.contentCommitment==intent.fields.contentCommitment else {throw AuthorityError.intentMismatch}}
                 try writeV4(StoredLifecycleControlV4(intent:intent,accountID:b.accountID,epoch:epoch,raw:receipt.raw),table:"lifecycle_steps_v4",id:"migration-latest")
-                if (r.result == .checkpointAccepted && m.oldPhoneID==b.deviceID) || r.result == .activated {_=try advanceIdentityGenerationLockedV4();try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
+                if (r.result == .checkpointAccepted && m.oldPhoneID==b.deviceID && b.activationEpoch==m.oldActivationEpoch) || (r.result == .activated && b.activationEpoch==m.oldActivationEpoch) {_=try advanceIdentityGenerationLockedV4();try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
             case .lostRecovery:
                 guard r.result == .grantIssued,let grant=r.lostRecovery,grant.newPhoneID==b.deviceID,grant.migrationID==intent.fields.migrationID,grant.expiresAt>=r.issuedAt,grant.expiresAt<=9_007_199_254_740_991,grant.expiresAt-r.issuedAt<=300,intent.fields.originalActivationEpoch==b.activationEpoch,r.matchID==intent.fields.matchID,r.lockID==intent.fields.lockID,r.recordingDeviceID==intent.fields.originalRecordingDeviceID else {throw AuthorityError.intentMismatch}
             case .terminateLost:
@@ -67,9 +67,10 @@ extension MatchStore {
             }
             let value=StoredLifecycleControlV4(intent:intent,accountID:b.accountID,epoch:epoch,raw:receipt.raw)
             try writeV4(value,table:"lifecycle_steps_v4",id:key)
-            try fail(.afterReceipt);try fail(.beforeCommit)
+            try confirmControlLockedV4(intent);try fail(.afterReceipt);try fail(.beforeCommit)
         };if fault == .afterCommit {throw StoreError.responseLost}
     }
+    public func deletionSagasV4()throws->[DeletionSagaV4] {try db.rows("SELECT payload,checksum FROM lifecycle_steps_v4 WHERE id LIKE 'deletion:%' ORDER BY rowid").map {try checkedV4(DeletionSagaV4.self,row:$0,table:"lifecycle_steps_v4",key:"deletion")}}
     public func deletionSagaV4(requestID:String)throws->DeletionSagaV4? {try readLifecycleV4(DeletionSagaV4.self,"deletion:"+requestID)}
     public func createDeletionSagaV4(_ saga:DeletionSagaV4)throws {
         try db.transaction {
@@ -104,7 +105,7 @@ extension MatchStore {
             try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+requestID)
             if let b=try currentBindingV4() {guard b.accountID==saga.accountID else {throw AuthorityError.identityChanged};try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
             var analytics=try analyticsStateV4();analytics.enabled=false;analytics.pending=[];try writeV4(analytics,table:"lifecycle_steps_v4",id:"analytics-state")
-            try fail(.afterReceipt);try fail(.beforeCommit);return saga
+            try confirmControlLockedV4(saga.intent);try fail(.afterReceipt);try fail(.beforeCommit);return saga
         };if fault == .afterCommit {throw StoreError.responseLost};return result
     }
     public func eraseLocalBusinessV4(requestID:String,expectedRevision:Int64)throws->DeletionSagaV4 {

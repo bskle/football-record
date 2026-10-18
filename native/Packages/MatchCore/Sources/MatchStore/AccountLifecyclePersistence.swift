@@ -19,6 +19,19 @@ extension MatchStore {
     static func authResolutionClosesV4(_ resolution:AuthResolutionV4)->Bool {switch resolution {case .knownRevoked,.knownExpired,.knownAbandoned:true;case .knownNotFound:false}}
     public func authAttemptsV4()throws->[AuthAttemptV4] {try db.rows("SELECT payload,checksum FROM lifecycle_steps_v4 WHERE id LIKE 'auth-attempt:%' ORDER BY rowid").map {try checkedV4(AuthAttemptV4.self,row:$0,table:"lifecycle_steps_v4",key:"auth-attempt")}}
     public func authResolutionV4(requestID:String)throws->AuthResolutionV4? {try readLifecycleV4(AuthResolutionV4.self,"auth-resolved:"+requestID)}
+    public func resolveTerminalAuthenticationV4(requestID:String,resolution:AuthResolutionV4,expectedIdentityGeneration:Int64)throws->Int64? {
+        guard resolution == .knownRevoked || resolution == .knownExpired else {throw AuthorityError.invalidWire}
+        let generation=try db.transaction {()->Int64? in
+            guard try authAttemptV4(requestID:requestID) != nil else {throw AuthorityError.intentMismatch}
+            try writeV4(resolution,table:"lifecycle_steps_v4",id:"auth-resolved:"+requestID)
+            let current=try currentAuthRequestIDV4()
+            guard (current==nil || current==requestID),try identityGenerationV4()==expectedIdentityGeneration else {return nil}
+            let generation=try advanceIdentityGenerationLockedV4()
+            if let b=try currentBindingV4() {try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}
+            var analytics=try analyticsStateV4();analytics.enabled=false;analytics.pending=[];try writeV4(analytics,table:"lifecycle_steps_v4",id:"analytics-state")
+            try fail(.beforeCommit);return generation
+        };if fault == .afterCommit {throw StoreError.responseLost};return generation
+    }
     public func resolveAuthAttemptV4(requestID:String,resolution:AuthResolutionV4)throws {
         guard Self.authResolutionClosesV4(resolution) else {throw AuthorityError.invalidWire}
         try db.transaction {guard try authAttemptV4(requestID:requestID) != nil else {throw AuthorityError.intentMismatch};try writeV4(resolution,table:"lifecycle_steps_v4",id:"auth-resolved:"+requestID);try fail(.beforeCommit)}

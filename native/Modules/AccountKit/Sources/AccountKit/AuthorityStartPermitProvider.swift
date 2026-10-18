@@ -15,9 +15,12 @@ public actor AuthorityStartPermitProvider: StartPermitProvider {
         guard let coordinator,let binding=try await repository.accountBindingV4(),!binding.suspended,binding.deviceID==intent.recordingDeviceID,binding.environment==client.trust.environment else { throw AuthorityError.identityChanged }
         let control=try ControlIntentV1.acquire(intent,epoch:binding.activationEpoch)
         _ = try await coordinator.prepareAuthorityControl(control)
+        try await ControlQueueSupport.begin(control,coordinator:coordinator,at:now())
         let raw:Data
-        do { raw=try await client.query(requestID:control.requestID) }
-        catch let failure as AuthorityHTTPFailure where failure.code=="notFound" { raw=try await client.send(control) }
+        do {
+            do {raw=try await client.query(requestID:control.requestID)}
+            catch let failure as AuthorityHTTPFailure where failure.code=="notFound" {raw=try await client.send(control)}
+        } catch {try await ControlQueueSupport.failed(control,error:error,coordinator:coordinator,at:now());throw error}
         let receipt=try VerifiedAuthorityReceiptV1.verify(raw,expected:AuthorityExpectedIntent(control,accountID:binding.accountID,epoch:binding.activationEpoch),trust:client.trust)
         _ = try await coordinator.acceptAuthorityResult(receipt)
         guard receipt.body.result == .held,receipt.body.matchID==intent.matchID,receipt.body.recordingDeviceID==intent.recordingDeviceID else { throw AuthorityError.terminalLock }

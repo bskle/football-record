@@ -31,6 +31,7 @@ final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
         let backend=try await s.acceptDeletionV4(requestID:"delete",receipt:receipt,expectedRevision:0);XCTAssertTrue(backend.backendDeleted);XCTAssertFalse(backend.finished)
         let local=try await s.eraseLocalBusinessV4(requestID:"delete",expectedRevision:backend.revision);XCTAssertEqual(local.localProgress,.completed);try await s.close()
         let r=try store(c),saved=try await r.deletionSagaV4(requestID:"delete"),reopened=try XCTUnwrap(saved);XCTAssertEqual(reopened.recoveryCapability,saga.recoveryCapability);XCTAssertEqual(reopened.cloudProgress,.pending);XCTAssertEqual(reopened.healthProgress,.pending)
+        let discovered=try await r.deletionSagasV4();XCTAssertEqual(discovered.map{$0.intent.requestID},["delete"])
         var next=reopened;next.cloudProgress = .failed;next.revision += 1;try await r.updateDeletionSagaV4(next,expectedRevision:reopened.revision)
         do {try await r.updateDeletionSagaV4(next,expectedRevision:reopened.revision);XCTFail()}catch{}
     }

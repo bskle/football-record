@@ -189,7 +189,7 @@ extension MatchStore {
             operationIDs: request.newCaptureOperations.map(\.id) + request.captureOperationUpdates.map(\.operationID),
             businessOutboxIDs: request.businessOutbox.map(\.id))
     }
-    private func verifiedCommandV2(commandID: String, row: [SQLValue], validateAbsence: Bool = true) throws -> CommittedCommandV2 {
+    func verifiedCommandV2(commandID: String, row: [SQLValue], validateAbsence: Bool = true) throws -> CommittedCommandV2 {
         let request = try checkedCapture(StoreCommitV2.self, raw: row[0], checksum: row[1], table: "commands_v2", key: commandID)
         let receipt = try decode(CommitReceiptV2.self, row[2], table: "commands_v2", key: commandID)
         guard request.commandID == commandID, request.descriptor.matchID == row[3].string, receipt == (try expectedReceipt(request)),

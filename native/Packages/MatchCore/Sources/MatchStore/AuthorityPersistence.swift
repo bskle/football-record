@@ -60,11 +60,11 @@ extension MatchStore {
         if let epoch=intent.fields.activationEpoch { guard epoch==b.activationEpoch else { throw AuthorityError.identityChanged } }
         if intent.operation == .acquire { guard try !migrationBlocksBusinessV4(),try !deletionBlocksBusinessV4(),b.role != .waiting else { throw AuthorityError.identityChanged } }
         let raw=try Canonical.data(intent)
-        try db.execute("INSERT INTO control_intents_v4 VALUES (?,?,?,?)",[.text(intent.requestID),.text(intent.matchID),.blob(raw),.text(Canonical.hash(raw))]);try fail(.beforeCommit)
+        try db.execute("INSERT INTO control_intents_v4 VALUES (?,?,?,?)",[.text(intent.requestID),.text(intent.matchID),.blob(raw),.text(Canonical.hash(raw))]);try readyControlLockedV4(intent);try fail(.beforeCommit)
         return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest)
     }
     public func pendingControlsV4() throws -> [ControlIntentV1] {
-        try db.rows("SELECT i.payload,i.checksum FROM control_intents_v4 i LEFT JOIN authority_results_v4 r ON r.request_id=i.id WHERE r.id IS NULL ORDER BY i.rowid").map { try checkedV4(ControlIntentV1.self,row:$0,table:"control_intents_v4",key:"pending") }
+        try controlQueueV4().filter{$0.state != .confirmed}.map(\.intent)
     }
     func resultV4(_ requestID:String) throws -> StoredAuthorityResult? {
         guard let row=try db.rows("SELECT payload,checksum FROM authority_results_v4 WHERE request_id=?",[.text(requestID)]).first else { return nil }
@@ -106,7 +106,7 @@ extension MatchStore {
             let stored=StoredAuthorityResult(intent:intent,raw:receipt.raw,receipt:output),raw=try Canonical.data(stored)
             try db.execute("INSERT INTO authority_results_v4 VALUES (?,?,?,?,?)",[.text(r.receiptID),.text(r.requestID),.text(r.matchID),.blob(raw),.text(Canonical.hash(raw))])
             if !r.matchID.isEmpty { try writeV4(projection,table:"authority_projection_v4",idColumn:"match_id",id:r.matchID) }
-            try fail(.afterReceipt);try fail(.beforeCommit);return output
+            try confirmControlLockedV4(intent);try fail(.afterReceipt);try fail(.beforeCommit);return output
         }
         if fault == .afterCommit { throw StoreError.responseLost };return result
     }

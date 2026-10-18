@@ -31,15 +31,19 @@ public actor AuthorityControlService {
     }
     public func reconcile(_ intent:ControlIntentV1) async throws->VerifiedAuthorityReceiptV1 {
         let b=try await checkedBinding()
-        let raw:Data
-        do {raw=try await client.query(requestID:intent.requestID)}
-        catch let error as AuthorityHTTPFailure where error.code=="notFound" {raw=try await client.send(intent)}
-        let receipt=try VerifiedAuthorityReceiptV1.verify(raw,expected:AuthorityExpectedIntent(intent,accountID:b.accountID,epoch:b.activationEpoch),trust:client.trust)
-        _=try await coordinator.acceptAuthorityResult(receipt)
-        return receipt
+        try await ControlQueueSupport.begin(intent,coordinator:coordinator,at:client.now())
+        do {
+            let raw:Data
+            do {raw=try await client.query(requestID:intent.requestID)}
+            catch let error as AuthorityHTTPFailure where error.code=="notFound" {raw=try await client.send(intent)}
+            let receipt=try VerifiedAuthorityReceiptV1.verify(raw,expected:AuthorityExpectedIntent(intent,accountID:b.accountID,epoch:b.activationEpoch),trust:client.trust)
+            _=try await coordinator.acceptAuthorityResult(receipt);return receipt
+        } catch {try await ControlQueueSupport.failed(intent,error:error,coordinator:coordinator,at:client.now());throw error}
     }
+
     public func reconcilePending() async throws->[VerifiedAuthorityReceiptV1] {
-        let pending=try await repository.pendingControlsV4();var results:[VerifiedAuthorityReceiptV1]=[]
-        for intent in pending where intent.operation != .acquire {results.append(try await reconcile(intent))};return results
+        guard let queue=repository as? any ControlQueueRepository else {throw AuthorityError.unavailable}
+        var results:[VerifiedAuthorityReceiptV1]=[]
+        for entry in try await queue.controlQueueV4() where entry.intent.operation == .terminate && [.ready,.inFlight,.retryScheduled].contains(entry.state) && (entry.nextAttemptAt.map{$0<=client.now()} ?? true) {results.append(try await reconcile(entry.intent))};return results
     }
 }

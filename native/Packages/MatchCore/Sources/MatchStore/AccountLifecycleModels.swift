@@ -18,6 +18,7 @@ public protocol AccountLifecycleRepository:Sendable {
     func authAttemptsV4() async throws->[AuthAttemptV4]
     func authResolutionV4(requestID:String) async throws->AuthResolutionV4?
     func pendingAuthAttemptsV4() async throws->[AuthAttemptV4]
+    func resolveTerminalAuthenticationV4(requestID:String,resolution:AuthResolutionV4,expectedIdentityGeneration:Int64) async throws->Int64?
     func resolveAuthAttemptV4(requestID:String,resolution:AuthResolutionV4) async throws
     func authAttemptV4(requestID:String) async throws->AuthAttemptV4?
     func saveAuthAttemptV4(_ attempt:AuthAttemptV4,expectedIdentityGeneration:Int64) async throws
@@ -40,6 +41,10 @@ public struct DeletionSagaV4:Codable,Sendable,Equatable {
     public var lastIssue:LifecycleIssueV4?
     public var revision:Int64
     public var backendReceipt:Data?
+    public var localDataProgress:ClientDeletionProgressV4 {
+        let values=[localProgress,localTransportProgress]
+        if values.contains(.failed) {return .failed};if values.contains(.running) {return .running};if values.contains(.pending) {return .pending};return values.contains(.retained) ? .retained:.completed
+    }
     public var finished:Bool {backendDeleted && [cloudProgress,localProgress,localTransportProgress,healthProgress].allSatisfy {$0 == .completed || $0 == .retained}}
     public init(intent:ControlIntentV1,accountID:String,activationEpoch:Int64,recoveryCapability:String,cloudChoice:ClientDeletionChoiceV4,localChoice:ClientDeletionChoiceV4,healthChoice:ClientDeletionChoiceV4,healthConfirmed:Bool)throws {
         try AuthorityWire.identifier(accountID);_=try AuthorityWire.decodeBase64URL(recoveryCapability,count:32)
@@ -71,6 +76,7 @@ public protocol LifecycleStateRepository:Sendable {
     func lifecycleReceiptV4(requestID:String) async throws->Data?
     func acceptLifecycleResultV4(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1) async throws
     func latestMigrationV4() async throws->AuthorityMigrationV1?
+    func deletionSagasV4() async throws->[DeletionSagaV4]
     func deletionSagaV4(requestID:String) async throws->DeletionSagaV4?
     func createDeletionSagaV4(_ saga:DeletionSagaV4) async throws
     func updateDeletionSagaV4(_ saga:DeletionSagaV4,expectedRevision:Int64) async throws

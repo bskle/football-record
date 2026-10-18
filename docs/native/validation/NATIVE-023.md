@@ -90,3 +90,12 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - ProductionPeerTests聚焦6/0：四SQL fault close/reopen、同packet ID异bytes隔离、换pair暂停且不改旧target、同grant刷新保持原packet、原ACK只确认交付；同facade/Session/受控transport纵向phone无Workout，Watch peer terminal仅finish原token且authority仍held、无normal/completed。日志 `023-4-peer-runtime-red.log` / `023-4-peer-session-green.log`。
 - 原始测试构造API/捕获pending→dispatch→settled顺序错误均已修正。外层设备签名可重建，验证不变的是原v2 payload bytes；不把外层签名随机性当原payload变化。
 - 当前整包检查点Core252/0（Core44/Store144/Session47/Sync17）及AccountKit37/0包含后续控制队列WIP，见`023-4-core-checkpoint.log` / `023-4-account-checkpoint.log`，不代表whole023冻结。实际WC/Keychain/设备/生产bootstrap仍未启用。
+
+## 持久控制与终态竞争收尾 checkpoint
+
+- 控制队列用既有schema4控制行保存原typed intent、attempt、有限issue、backoff、确认；查询/网络在Session队列与SQL外，begin/failure/firstresult在同facade队列内。原结果优先，迟到失败不覆盖confirmed；文件beforeCommit/afterCommit close/reopen通过。成功lifecycle receipt不再误列pending。
+- actualHTTP未准备intent红→绿；普通prepareControl也不得代替专用normal云proof witness或abnormal incomplete+command+terminationPending事务，额外红2断言→绿。reconcilePending只派对应控制类型，生命周期与lock控制不混发，auto retry遵守持久backoff。
+- S23-lifecycle-3b实际HTTP A过期恢复挂起、B新auth提交、旧A再暂停红4→绿；auth-current/identity generation条件暂停现同Store事务CAS，原A resolution保留，仅成功CAS返回generation可推进vault，不冻结B。红日志仅定点redact一次性development fixture credential，断言改为不展开凭据；没有真实用户凭据。
+- 激活COMMIT丢响应→knownRevoked→显式当前admission/fresh新epoch登录→原activation request对账新增红1→绿；对账不再暂停已验证当前epoch，仍保原request/receipt。
+- `authAttemptsV4/authResolutionV4`、`controlQueueV4`、`latestMigrationV4`、`deletionSagasV4`供025重开发现原ID，`localDataProgress`聚合内部Store/transport为一个本地结果。LocalTransportDeletionRequest只传scope+原saga requestID/digest，026可稳定派生每ownedfile子ID，不含capability/凭据。
+- checkpoint完整Core252/0（44/144/47/17）与AccountKit39/0（Auth10/Cloud7/Control3/HTTP10/Lifecycle4/Migration5）。日志 `023-5-controls-core-checkpoint.log` / `023-5-controls-account-checkpoint.log`。接033永久filefence组合与最终SDK/全回归仍后续，不预填review/merge通过。

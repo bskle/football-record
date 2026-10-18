@@ -6,7 +6,7 @@ import MatchSession
 import CloudSync
 @testable import AccountKit
 final class MigrationRecoveryTests:XCTestCase,@unchecked Sendable {
-    func normalMigration(nonempty:Bool,secondRound:Bool=false) async throws {
+    func normalMigration(nonempty:Bool,secondRound:Bool=false,loseActivation:Bool=false) async throws {
         let f=try NodeAuthorityFixture();defer {f.close()}
         let old=try await HTTPAuthorityIntegrationTests().harness(f,gateway:TrackingGateway()),scope=try CloudBridgeTests().scope(f),ledger=try SQLiteCloudLedger(url:old.root.appendingPathComponent("migration-cloud.sqlite"))
         let bridge=CloudSessionBridge(repository:old.repo,client:old.client,policy:.development(databaseNamespace:"http-session"));try await bridge.attach(old.session)
@@ -39,11 +39,25 @@ final class MigrationRecoveryTests:XCTestCase,@unchecked Sendable {
         let nextBridge=CloudSessionBridge(repository:next.repo,client:next.client);try await nextBridge.attach(next.session)
         let batch=try CloudFetchBatch(scope:scope,batchID:"full-final-download",records:records,expectedAppliedToken:nil,nextToken:Data([1,2]),fetchGeneration:0,moreComing:false)
         _=try await nextBridge.importBatch(batch)
-        let activated=try await nextService.activateMigration(migrationID:migration.migrationID,requestID:"activate-after-download");XCTAssertEqual(activated.body.result,.activated)
-        try await next.service.admitCurrentIdentity(accountID:try await next.repo.accountBindingV4()?.accountID)
-        guard case .knownRevoked=try await next.service.recover(authRequestID:"next-waiting") else {return XCTFail()}
-        try await next.service.admitCurrentIdentity(accountID:try await next.repo.accountBindingV4()?.accountID)
-        let fresh=try await next.service.signIn(requestID:"next-active-fresh",challengeRequestID:"next-active-challenge");XCTAssertEqual(fresh.binding.role,.phone);XCTAssertGreaterThan(fresh.binding.activationEpoch,waiting.binding.activationEpoch)
+        let activated:VerifiedAuthorityReceiptV1,fresh:AccountAuthentication
+        if loseActivation {
+            _=try f.command(["op":"fault","value":"activateMigration"])
+            do {_=try await nextService.activateMigration(migrationID:migration.migrationID,requestID:"activate-after-download");XCTFail()}catch{}
+            _=try f.command(["op":"fault","value":NSNull()])
+            guard case .knownRevoked=try await next.service.recover(authRequestID:"next-waiting") else {return XCTFail()}
+            try await next.service.admitCurrentIdentity(accountID:try await next.repo.accountBindingV4()?.accountID)
+            fresh=try await next.service.signIn(requestID:"next-active-fresh",challengeRequestID:"next-active-challenge")
+            let currentScope=try CloudScope(accountID:scope.accountID,cloudSpaceID:scope.cloudSpaceID,zoneID:scope.zoneID,activationEpoch:fresh.binding.activationEpoch),currentService=LifecycleService(client:next.client,repository:next.repo,coordinator:next.session,scope:currentScope,ledger:nextLedger),intentValue=try await next.repo.lifecycleControlIntentV4(requestID:"activate-after-download"),intent=try XCTUnwrap(intentValue)
+            activated=try await currentService.reconcileLifecycle(intent)
+            let current=try await next.repo.accountBindingV4();XCTAssertEqual(current,fresh.binding,"original activation reconciliation must preserve already freshly verified current-epoch auth")
+        } else {
+            activated=try await nextService.activateMigration(migrationID:migration.migrationID,requestID:"activate-after-download")
+            try await next.service.admitCurrentIdentity(accountID:try await next.repo.accountBindingV4()?.accountID)
+            guard case .knownRevoked=try await next.service.recover(authRequestID:"next-waiting") else {return XCTFail()}
+            try await next.service.admitCurrentIdentity(accountID:try await next.repo.accountBindingV4()?.accountID)
+            fresh=try await next.service.signIn(requestID:"next-active-fresh",challengeRequestID:"next-active-challenge")
+        }
+        XCTAssertEqual(activated.body.result,.activated);XCTAssertEqual(fresh.binding.role,.phone);XCTAssertGreaterThan(fresh.binding.activationEpoch,waiting.binding.activationEpoch)
         let ids=try await next.repo.matchIDs();XCTAssertTrue(ids.isEmpty)
         if let started {let history=try await next.repo.cloudHistoryV4(scope:CloudSessionBridge.coreScope(scope));XCTAssertEqual(history.first?.facts.startIntent,started.startIntent);do {try await next.repo.validateAuthorityStartV4(started.startIntent!,now:old.date);XCTFail()}catch{}}
         if secondRound {
@@ -80,6 +94,7 @@ final class MigrationRecoveryTests:XCTestCase,@unchecked Sendable {
         }
         try await ledger.close();try await nextLedger.close()
     }
+    func testActivationCommitLossFreshAuthThenOriginalReconcilePreservesCurrentActivation() async throws {try await normalMigration(nonempty:false,loseActivation:true)}
     func testTwoNormalMigrationRoundsReopenAndOldReceiptsNeverRollbackCurrentRound() async throws {try await normalMigration(nonempty:false,secondRound:true)}
     func testEmptyAccountFinalCheckpointAndNewPhoneActivationRequireDownloadedControl() async throws {try await normalMigration(nonempty:false)}
     func testFullOriginalSessionFactsFinalCheckpointRestoreHistoryWithoutOldRecordingRights() async throws {try await normalMigration(nonempty:true)}

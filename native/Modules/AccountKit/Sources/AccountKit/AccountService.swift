@@ -85,13 +85,12 @@ public actor AccountService {
         return .authenticated(try await accept(raw,attempt:attempt,generation:generation))
     }
     func terminalCredential(authRequestID:String,resolution:AuthResolutionV4) async throws {
-        try await coordinator.resolveAuthAttempt(requestID:authRequestID,resolution:resolution)
-        let current=try await repository.currentAuthRequestIDV4()
-        guard current==nil || current==authRequestID else {return}
-        if let lifecycle=coordinator as? any LifecycleInboundCoordinator {try await lifecycle.suspendAccount();try await lifecycle.setAnalyticsEnabled(false)}
-        let generation=try await repository.identityGenerationV4();try await client.vault.advanceIdentityFence(to:generation)
+        let expected=try await requireAdmission()
+        guard let generation=try await coordinator.resolveTerminalAuthentication(requestID:authRequestID,resolution:resolution,expectedIdentityGeneration:expected) else {return}
+        try await client.vault.advanceIdentityFence(to:generation)
         admissionGeneration=nil
     }
+
     func accept(_ raw:Data,attempt:AuthAttemptV4,generation:Int64) async throws->AccountAuthentication {
         guard raw.count<=65536,let value=try JSONSerialization.jsonObject(with:raw) as? [String:Any],try bytes(value)==raw,
               Set(value.keys)==Set(["receipt","sessionClaims","credential","context"]+(value["reauthenticationID"] == nil ? []:["reauthenticationID"])) else {throw AuthorityError.invalidWire}

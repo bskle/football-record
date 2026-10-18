@@ -11,7 +11,7 @@ actor ControlledAccountDeletion:CloudAccountDeletionDriver,AppWorkoutDeletionDri
     var cloudCalls=0,healthCalls=0
     init(emptyLedger:any CloudLedger,cloudFails:Bool=false,healthFails:Bool=false){self.emptyLedger=emptyLedger;self.cloudFails=cloudFails;self.healthFails=healthFails}
     func succeed(){cloudFails=false;healthFails=false}
-    func purgeBusinessCopies(scope:CloudScope) async throws {guard try await emptyLedger.uploads(scope:scope).isEmpty,try await emptyLedger.batches(scope:scope).isEmpty,try await emptyLedger.conflicts(scope:scope).isEmpty,try await emptyLedger.saveEvidence(scope:scope).isEmpty else {throw AuthorityError.unavailable}}
+    func purgeBusinessCopies(_ request:LocalTransportDeletionRequest) async throws {let scope=request.scope;guard try await emptyLedger.uploads(scope:scope).isEmpty,try await emptyLedger.batches(scope:scope).isEmpty,try await emptyLedger.conflicts(scope:scope).isEmpty,try await emptyLedger.saveEvidence(scope:scope).isEmpty else {throw AuthorityError.unavailable}}
     func deletePrivateZone(scope:CloudScope) async throws {cloudCalls += 1;if cloudFails {throw AuthorityError.unavailable}}
     func deleteAppCreatedWorkouts(confirmationID:String) async throws {healthCalls += 1;if healthFails {throw AuthorityError.unavailable}}
 }

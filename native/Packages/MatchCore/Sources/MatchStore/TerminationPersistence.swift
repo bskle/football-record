@@ -5,13 +5,14 @@ extension MatchStore {
         let result=try db.transaction {
             let b=try activeBindingV4(),state=try authorityStateV4(matchID:matchID,now:now)
             if let prior=try controlV4(requestID) {
-                guard prior.operation == .terminate,prior.matchID==matchID,prior.fields.mode=="normal" else {throw AuthorityError.conflict};return prior
+                guard prior.operation == .terminate,prior.matchID==matchID,prior.fields.mode=="normal",try readLifecycleV4(CloudSaveInputV1.self,"normal-intent:"+requestID) != nil else {throw AuthorityError.conflict};return prior
             }
             guard let acquire=state.acquire,state.status == .held,acquire.body.recordingDeviceID==b.deviceID,
                   let cloud=try matchingCloudSaveV4(matchID:matchID) else {throw CloudImportError.proofUnavailable}
             var f=AuthorityFields();f.matchID=matchID;f.lockID=acquire.body.lockID;f.recordingDeviceID=acquire.body.recordingDeviceID;f.activationEpoch=b.activationEpoch;f.mode="normal";f.cloudConfirmationID=cloud.input.confirmationID;f.contentCommitment=cloud.input.factDigest
             let intent=try ControlIntentV1(requestID:requestID,operation:.terminate,fields:f)
-            _=try prepareControlLockedV4(intent);return intent
+            _=try prepareControlLockedV4(intent)
+            try writeV4(cloud.input,table:"lifecycle_steps_v4",id:"normal-intent:"+requestID);return intent
         };if fault == .afterCommit {throw StoreError.responseLost};return result
     }
     public func prepareAbnormalTerminationV4(intent:ControlIntentV1,request:StoreCommitV2)throws->ControlIntentReceiptV4 {

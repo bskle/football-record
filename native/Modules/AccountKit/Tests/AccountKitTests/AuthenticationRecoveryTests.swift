@@ -55,6 +55,30 @@ actor GatedCredentialVault:DeviceCredentialVault {
     }
     func release(){gate?.resume();gate=nil}
 }
+actor GatedTerminalCoordinator:AccountLifecycleCoordinator,LifecycleInboundCoordinator {
+    let base:MatchSession
+    var entered=false
+    var gate:CheckedContinuation<Void,Never>?
+    init(_ base:MatchSession){self.base=base}
+    func hold() async {entered=true;await withCheckedContinuation {gate=$0}}
+    func release(){gate?.resume();gate=nil}
+    func syncRepositoryIdentity() async->SyncRepositoryIdentity {await base.syncRepositoryIdentity()}
+    func resolveAuthAttempt(requestID:String,resolution:AuthResolutionV4) async throws {try await base.resolveAuthAttempt(requestID:requestID,resolution:resolution)}
+    func saveAuthAttempt(_ attempt:AuthAttemptV4,expectedIdentityGeneration:Int64) async throws {try await base.saveAuthAttempt(attempt,expectedIdentityGeneration:expectedIdentityGeneration)}
+    func acceptAuthentication(attempt:AuthAttemptV4,binding:AccountBindingV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64) async throws {try await base.acceptAuthentication(attempt:attempt,binding:binding,receipt:receipt,expectedIdentityGeneration:expectedIdentityGeneration)}
+    func resolveTerminalAuthentication(requestID:String,resolution:AuthResolutionV4,expectedIdentityGeneration:Int64) async throws->Int64? {await hold();return try await base.resolveTerminalAuthentication(requestID:requestID,resolution:resolution,expectedIdentityGeneration:expectedIdentityGeneration)}
+    func suspendAccount() async throws {await hold();try await base.suspendAccount()}
+    func prepareLifecycleControl(_ intent:ControlIntentV1) async throws->ControlIntentReceiptV4 {try await base.prepareLifecycleControl(intent)}
+    func acceptMigrationCheckpoint(migrationID:String,proof:VerifiedAccountCheckpointV4) async throws {try await base.acceptMigrationCheckpoint(migrationID:migrationID,proof:proof)}
+    func acceptLifecycleResult(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1) async throws {try await base.acceptLifecycleResult(intent:intent,receipt:receipt)}
+    func createDeletionSaga(_ saga:DeletionSagaV4) async throws {try await base.createDeletionSaga(saga)}
+    func updateDeletionSaga(_ saga:DeletionSagaV4,expectedRevision:Int64) async throws {try await base.updateDeletionSaga(saga,expectedRevision:expectedRevision)}
+    func acceptDeletion(requestID:String,receipt:VerifiedAuthorityReceiptV1,expectedRevision:Int64) async throws->DeletionSagaV4 {try await base.acceptDeletion(requestID:requestID,receipt:receipt,expectedRevision:expectedRevision)}
+    func eraseLocalBusiness(requestID:String,expectedRevision:Int64) async throws->DeletionSagaV4 {try await base.eraseLocalBusiness(requestID:requestID,expectedRevision:expectedRevision)}
+    func setAnalyticsEnabled(_ enabled:Bool) async throws {try await base.setAnalyticsEnabled(enabled)}
+    func enqueueAnalytics(_ event:AnalyticsEventV4) async throws {try await base.enqueueAnalytics(event)}
+    func acknowledgeAnalytics(requestID:String) async throws {try await base.acknowledgeAnalytics(requestID:requestID)}
+}
 actor FixtureAppleSignIn:AppleSignInDriver {
     let fixture:NodeAuthorityFixture,subject:String
     var lastToken:String?
@@ -208,6 +232,23 @@ final class AuthenticationRecoveryTests:XCTestCase,@unchecked Sendable {
         do {_=try await vault.credential();XCTFail()}catch{}
         let binding=try await h.repo.accountBindingV4();XCTAssertEqual(binding?.suspended,true)
         try await ledger.close()
+    }
+
+    func testOldTerminalRecoveryCannotSuspendFreshAuthenticationCommittedDuringItsAwait() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()};let original=try await harness(f)
+        _=try await original.service.signIn(requestID:"terminal-A",challengeRequestID:"terminal-A-challenge")
+        let old=try await original.vault.credential();try await original.repo.close();_=try f.command(["op":"clock","now":old.expiresAt+1])
+        let h=try await harness(f,root:original.root,signer:original.signer,now:Date(timeIntervalSince1970:Double(old.expiresAt+1))),gate=GatedTerminalCoordinator(h.session),service=AccountService(client:h.client,repository:h.repo,coordinator:gate,deviceID:"new-client",cloudSpaceID:"fixture-cloud",apple:h.apple)
+        try await service.admitCurrentIdentity(accountID:try await h.repo.accountBindingV4()?.accountID)
+        let pending=Task {try await service.recover(authRequestID:"terminal-A")}
+        let deadline=Date().addingTimeInterval(3)
+        while !(await gate.entered),Date()<deadline {try await Task.sleep(for:.milliseconds(10))}
+        let entered=await gate.entered;XCTAssertTrue(entered)
+        let fresh=try await h.service.signIn(requestID:"fresh-B",challengeRequestID:"fresh-B-challenge"),credential=try await h.vault.credential()
+        await gate.release();_=try await pending.value
+        let binding=try await h.repo.accountBindingV4(),current=try? await h.vault.credential(),generation=try await h.repo.identityGenerationV4()
+        XCTAssertEqual(binding,fresh.binding);XCTAssertTrue(current==credential,"the current credential must remain");XCTAssertEqual(generation,0)
+        try await h.repo.close();let after=try await harness(f,root:h.root,signer:h.signer,now:Date(timeIntervalSince1970:Double(old.expiresAt+1))),persisted=try await after.repo.accountBindingV4();XCTAssertEqual(persisted,fresh.binding)
     }
 
 }

@@ -78,6 +78,7 @@ extension SQLiteSessionRepository:LifecycleStateRepository {
     public func lifecycleReceiptV4(requestID:String) async throws->Data? {return try await store.lifecycleReceiptV4(requestID:requestID)}
     public func acceptLifecycleResultV4(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1) async throws {try await store.acceptLifecycleResultV4(intent:intent,receipt:receipt)}
     public func latestMigrationV4() async throws->AuthorityMigrationV1? {return try await store.latestMigrationV4()}
+    public func deletionSagasV4() async throws->[DeletionSagaV4] {try await store.deletionSagasV4()}
     public func deletionSagaV4(requestID:String) async throws->DeletionSagaV4? {return try await store.deletionSagaV4(requestID:requestID)}
     public func createDeletionSagaV4(_ saga:DeletionSagaV4) async throws {try await store.createDeletionSagaV4(saga)}
     public func updateDeletionSagaV4(_ saga:DeletionSagaV4,expectedRevision:Int64) async throws {try await store.updateDeletionSagaV4(saga,expectedRevision:expectedRevision)}

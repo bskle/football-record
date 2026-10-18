@@ -15,6 +15,7 @@ public final class URLSessionAuthorityRelay: AuthorityHTTPRelay, @unchecked Send
         let c=URLSessionConfiguration.ephemeral;c.timeoutIntervalForRequest=10;c.urlCache=nil;c.httpCookieStorage=nil
         session=URLSession(configuration:c,delegate:NoRedirect(),delegateQueue:nil)
     }
+    public func shutdown(){session.invalidateAndCancel()}
     public func send(_ request:AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
         guard request.path.hasPrefix("/v1/"),!request.path.contains("?"),!request.path.contains("#"),request.body.count <= 16384 else { throw AuthorityError.invalidWire }
         var r=URLRequest(url:baseURL.appendingPathComponent(String(request.path.dropFirst())))
