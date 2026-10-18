@@ -30,7 +30,7 @@ export function makeReceipt(config,ctx,request,operation,result,lock={},extra={}
 
 // Parse before normal JSON decoding so duplicate keys cannot disappear in JSON.parse.
 export function parseStrictJSON(source){
-  let i=0;const ws=()=>{while(/\s/.test(source[i]??'')&&i<source.length)i++;};
+  let i=0;const ws=()=>{while(/[ \t\r\n]/.test(source[i]??'')&&i<source.length)i++;};
   function string(){const start=i++;for(;i<source.length;i++){if(source[i]==='\\'){i++;continue;}if(source[i]==='"'){i++;return JSON.parse(source.slice(start,i));}}throw Error('invalid JSON');}
   function value(){ws();const c=source[i];if(c==='"')return string();if(c==='{'){i++;ws();const o=Object.create(null),keys=new Set();if(source[i]==='}'){i++;return {};}while(true){ws();if(source[i]!=='"')throw Error('invalid JSON');const key=string();if(keys.has(key))throw Error('duplicate key');keys.add(key);ws();if(source[i++]!==':')throw Error('invalid JSON');o[key]=value();ws();const end=source[i++];if(end==='}')return Object.fromEntries(Object.entries(o));if(end!==',')throw Error('invalid JSON');}}
     if(c==='['){i++;const a=[];ws();if(source[i]===']'){i++;return a;}while(true){a.push(value());ws();const e=source[i++];if(e===']')return a;if(e!==',')throw Error('invalid JSON');}}
