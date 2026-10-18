@@ -1,6 +1,8 @@
 # NATIVE-023 验证
 
-执行中。原始基线 `8d6ec935efa060ab462b2913ab8460734871ff40`。
+# NATIVE-023 验证记录
+
+以下保留各 checkpoint 当时事实；最终冻结结果见末节，不把历史轮次相加。原始基线 `8d6ec935efa060ab462b2913ab8460734871ff40`。
 
 树外证据目录：`/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-023`。六项 Git 输入已保存；红绿、工具与最终输入 manifest 随实际执行补充。未经执行、双审、合并的项目不记通过。
 
@@ -99,3 +101,37 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - 激活COMMIT丢响应→knownRevoked→显式当前admission/fresh新epoch登录→原activation request对账新增红1→绿；对账不再暂停已验证当前epoch，仍保原request/receipt。
 - `authAttemptsV4/authResolutionV4`、`controlQueueV4`、`latestMigrationV4`、`deletionSagasV4`供025重开发现原ID，`localDataProgress`聚合内部Store/transport为一个本地结果。LocalTransportDeletionRequest只传scope+原saga requestID/digest，026可稳定派生每ownedfile子ID，不含capability/凭据。
 - checkpoint完整Core252/0（44/144/47/17）与AccountKit39/0（Auth10/Cloud7/Control3/HTTP10/Lifecycle4/Migration5）。日志 `023-5-controls-core-checkpoint.log` / `023-5-controls-account-checkpoint.log`。接033永久filefence组合与最终SDK/全回归仍后续，不预填review/merge通过。
+
+## 最终收尾红绿与接口边界
+
+- 已普通 no-ff 合入033 actual dev `225851d9c00feda5e1d4579293c881bdf89bb090`（本树 `07bc6aff9b4b8dc4afb30befdac745efbf651441`）和 GIT006纯六文档 target `71251f9afbb299e97344ff082c1d83bf17a110df`；最终运行 source `094c690775809eb9ce40d82d19a139ff5d9ea4d3`，产品代码暂冻结供两非作者审阅。
+- 033实际组合红→绿：非空CloudLedger原bytes完成单文件purge，永久fence后退出重开，从原deletion saga ID继续重试失败cloud/health可完成；已确认accountChanged只表示原scope已停写，不解围栏，未知错误仍失败。单选6项Lifecycle与defaultUnavailable非空保留反例一并进最终全包；正例driver明确仅拥有一个测试文件，不声称026已聚合全catalog/staging。证据 `023-5-erasure-reopen-red.log` / `green.log`。
+- Store清除业务副本额外红1→绿StoreLifecycle7/0：normal-intent/migration-checkpoint proof包含完整业务bytes，也随本地业务清理；原saga/capability及最小恢复控制保留。证据 `023-5-erasure-witness-red.log` / `green.log`。
+- migrationReady增加原pendingCaptureOperations门闩；actual Node已abnormal释放但原finish gateway仍挂起，准备迁移在HTTP前红2断言→绿1/0，不能仅看业务incomplete越过采集收尾。证据 `023-5-migration-capture-red.log` / `green.log`。
+- S23-lifecycle-3b最后入口：同service旧A terminal响应挂起，identityChanged后显式新admission、B已持久但待回包，旧A不能晚借新generation暂停B。actual HTTP红4→绿Auth11/0；terminal只使用recover入口捕获generation，Store同事务currentAuth CAS保留；先前B已成功提交的竞争测试仍通过。证据 `023-5-auth-generation-callback-red.log` / `green.log`。
+- `AuthorityHTTPRequest.opaqueRelay(...)` 原样公开method/path/body/Authorization/PoP供026；只边界验证，不改nonce/路径/签名字节。实际原Watch签名经phone relay到Node红→绿1/0。删除vault无条件replace，只保单调fence/条件写；024须把原子性落实真实Keychain。证据 `023-5-relay-boundary-red.log` / `green.log`。
+
+## 094输入层完整验证（保留失败，非最终）
+
+命令：`PATH=/Users/liam/.local/bin:$PATH NSUnbufferedIO=YES NATIVE_NODE_BINARY=/Users/liam/.local/bin/node NATIVE_BUILD_ROOT=/private/tmp/football-m4-023-build bash scripts/native/verify.sh`。
+
+运行source `094c690775809eb9ce40d82d19a139ff5d9ea4d3`，Xcode27.0(27A266a)、Swift6.4、Node22.23.1。全部202个tracked backend/native/verify.sh输入的Git blob及SHA256已记 `023-final-run-inputs.json`。此后因审阅发现删除scope与登记客户端缺口已扩产品输入，不能把此轮当final；最终SHA/clean另记manifest；没有改写既有提交。
+
+| 层次 | 本轮实际结果 | 原日志 |
+| --- | --- | --- |
+| Node实际HTTP/SQLite后台 | 128/0 | authority-node-test.log |
+| Core包四模块 | 253/0 =44 Core +145 Store +47 Session +17 Sync | swift-test.log |
+| CloudSync | 80/0 | cloud-test.log |
+| AccountKit实际HTTP/同Session | 42/0 =11 Auth +7 Cloud +3 Control +10 HTTP +6 Lifecycle +5 Migration | account-test.log |
+
+首轮verify在Presentation39项中一项6断言失败后停止：既有SyncStatusTests第87行外部sqlite3 connection执行ALTER TABLE返回SQLITE_BUSY(5)，未真正注入故障，后续5项连锁失败；独立focused重跑同样失败。原日志完整保留 `023-final-verify.log`、`023-final-presentation-read-fault-recheck.log`。该模块非023所有权，已交root独立安排修复，未擅自修改或标全verify通过。原12项最低SDK产品（Store/Session/Sync/Cloud/Account/Presentation×iOS17/watch10 Simulator）与两App无签名generic Simulator已全部实际构建通过；剩余四项为脚本停后独立执行且各日志成功。全部仅094旧source层，后续修复需最终重跑。
+
+源/最终两位非作者审阅、actual merge/sync/archive待root；真实账号/SDK/配对设备门槛仍未验，不把编译称E2E。
+
+## 删除完整scope与Watch登记追加切片
+
+- Scope P1实际wrongSpace及`zoné`/`zone\u{301}`原byte不同scope红22断言→绿Lifecycle7/0，原A未完成saga重开，B无driver/围栏/清理/进度，原A仍可继续。原scope随capability保护，缺失/未知scope不推断。Store missing-scope finished红3→绿Lifecycle8/0，含beforeCommit/afterReceipt/afterCommit重开；HTTP intent/canonical与schema4不变。日志 `023-5-deletion-scope-red.log` / `green.log`、`023-5-deletion-scope-store-red.log` / `green.log`；scope red断言曾展开一次性development capability，已定点redact且改bool断言，非真实凭据。
+- Watch登记缺API红后实现独立typed Phone/Watch services和附加repository/coordinator，同原facade/schema4控制行。Watch本机proof，Phone只PoP授权，原登记receipt/claims重查后原canonical body取回同session，Phone不装Watch credential。actual NodeHTTP7/0：登记→同Watch Session实际start、COMMITlost/reopen原ID单session、未提交/query丢响应unknown拒新ID、错Watchkey/错误credential key不安装且原ID可恢复、双端identity晚响应与延迟vault写拒绝。
+- 新Core2/0涵盖Phone及Watch联合receipt/binding三个故障各close/reopen，原receipt bytes幂等，升级epoch推进持久generation并暂停旧binding，旧receipt即借新generation也不能重激活；稳定Watch key错误拒绝。完整原payload/receipt bytes保持；ControlIntent仍不塞transient登记字段。日志 `023-5-watch-registration-red.log`、`green-attempt1.log`（编译短路修正）、`green.log`、`store-green.log`。
+- 额外actual HTTP：登记COMMITlost后原session已过期，验原公开receipt才关闭unknown，不装过期credential，只显式新ID/challenge续登记，红2→绿；此前已确认过期正例独立日志保留，不误称红。`023-5-watch-registration-expiry-red.log` / `expiry-prior-confirmed-positive.log`。
+- 上述追加切片最终整包及最低SDK尚待执行，094旧层不复用成新输入PASS。035属于独立Presentation test owner；023不越界修改。

@@ -20,6 +20,16 @@ recover 使用原 authID/device/key/publicKey、新 nonce/time 与覆盖完整 b
 
 `DeviceCredentialVault` 仅提供读取、单调 `advanceIdentityFence(to:)`、原子 `replace(_:expectedIdentityGeneration:)`。相同代次 advance 保留该代次已安装的新 credential；更高代次清旧 credential；更低代次拒绝。024 必须把检查与真实 Keychain 写入串成同一原子边界，不能检查后 await 再无条件写；代次也须随 Keychain 控制记录保留。已有 DB 缺原私钥时不得静默生成新 key。业务 SQLite 不存 credential token、Apple JWT/code 或私钥。
 
+## Watch 登记与原请求恢复
+
+Phone 的 `PhoneWatchRegistrationService.admitCurrentIdentity(accountID:)` 显式接纳当前有效 phone binding/vault 后，`registrationContext()` 提供当前 account/cloudSpace/epoch。Watch 的 `WatchRegistrationService.admitCurrentIdentity(context:)` 同时核本机稳定 installation ID、公钥、固定 cloudSpace 与持久身份代次；已有DB缺原key不能换新key。升级epoch显式暂停旧binding、推进持久generation/vault fence；旧attempt保留，不重绑。
+
+Watch 调用 `register(requestID:challengeRequestID:)`，由自己的 DeviceProofSigner 对后台原challenge字符串UTF8 hash及完整原登记payload签名。`WatchRegistrationAuthorizing` 由 Phone 服务实现（026替换为真实WC typed转发）；Phone只用当前active-phone PoP授权原Watch body，不改其签名、公钥、路径或业务ID，永不把Watch credential写进Phone vault。Watch验自己的原request digest、固定keyset receipt、登记公钥、account/epoch/session claims与credential keyID，再在原Store/Session事务保存receipt和watch binding，最后原子conditional vault写。cloudSpace来自当次Phone已核绑定与Watch固定配置，不能从响应自报替换。
+
+双方 `watchRegistrationAttemptV4(requestID:)` / `pendingWatchRegistrationAttemptsV4()` / `watchRegistrationReceiptV4(requestID:)` 持久发现原ID和原bytes；业务DB只存public possession proof/原digest/receipt，不存credential token、challenge原secret或私钥。`recover(requestID:)` 先用Phone查询原ID；GET只回公开receipt/sessionClaims，随后必须用原canonical登记body+freshPhonePoP取回同一个原Watch credential。404、未提交、query/COMMIT丢响应均保原attempt，不自动换ID或challenge。已验原receipt且其原session明确过期，只记录原已提交结果、抛staleAttestation且不安装旧credential；调用方可显式新ID/challenge续登记。没有把Watch原ID传入phone-only auth-recover。
+
+Phone与Watch回包都固定请求入口generation；身份变化、错误key/epoch或延迟vault写不能重新激活旧身份。真实软件纵向已包含登记后同一个Watch Session实际HTTP开赛；SDK024只实现设备key/fenced Keychain，026只接具体WC transport与真实设备，不另造登记语义。
+
 ## 比赛与控制队列
 
 首次物理 start 须当前原 acquire + nonce fresh-held；terminal/mismatch/旧 epoch 不能开始。已成功开赛的原设备允许离线恢复同 match/recorder；网络未知本身不终结比赛。已持久或本轮学到 terminal/release 后，普通命令、recover/resume、replacement 和 callback 均重读持久门闩，只收尾原 externalToken。
@@ -44,7 +54,7 @@ recover 使用原 authID/device/key/publicKey、新 nonce/time 与覆盖完整 b
 
 丢失迁移保留后台原 requestedAt/eligibleAt，七天到期仍需新鲜 Apple 证明。`requestLostRecovery` 只针对原 acquire 的 match/lock/recorder/epoch，`terminateLost` 仅异常释放原锁；force 需另一次 fresh proof，不授旧 Workout 接管权。
 
-`deletionSagasV4()` 重开发现原 deletion ID/capability/choices/revision；`resumeDeletion` 按原 ID 恢复后台、云、本地和单独确认的健康分项。backendDeleted 验签后才可擦 Store。`localDataProgress` 把 Store 与 transport 两个内部结果聚成一个“本地数据”结果；二者完成或明确保留前整体 finished=false。默认 `LocalTransportDeletionDriver` Unavailable，真实非空副本不能自称已删。`LocalTransportDeletionRequest` 传原 saga requestID/digest 和原 scope，026 为每 owned file 稳定派生子 ID，聚合所有 ledger catalog、024 asset staging 与 Store；保护 saga/capability/028 最小选择控制及其他账号空间。033 只证明单文件逻辑清理，永久围栏不解除；已确认 accountChanged 围栏不阻止重开重试剩余 cloud/health。Store 清除完整 normal/checkpoint proof副本，同时保留最小恢复控制。这里不声称物理介质/备份擦除。
+`deletionSagasV4()` 重开发现原 deletion ID/capability/choices/revision/originalScope；完整原 CoreCloudScopeV1 在首次Store事务固定，重开、原request与transport request都按三ID原UTF8+epoch核对，retained binding允许suspended但须同account/cloudSpace/epoch。旧缺scope记录保留但不推断、不执行也不显示finished；`resumeDeletion` 按原 ID 恢复后台、云、本地和单独确认的健康分项。backendDeleted 验签后才可擦 Store。`localDataProgress` 把 Store 与 transport 两个内部结果聚成一个“本地数据”结果；二者完成或明确保留前整体 finished=false。默认 `LocalTransportDeletionDriver` Unavailable，真实非空副本不能自称已删。`LocalTransportDeletionRequest` 传原 saga requestID/digest 和原 scope，026 为每 owned file 稳定派生子 ID，聚合所有 ledger catalog、024 asset staging 与 Store；保护 saga/capability/028 最小选择控制及其他账号空间。033 只证明单文件逻辑清理，永久围栏不解除；已确认 accountChanged 围栏不阻止重开重试剩余 cloud/health。Store 清除完整 normal/checkpoint proof副本，同时保留最小恢复控制。这里不声称物理介质/备份擦除。
 
 `setAnalyticsEnabled` 默认 false；`enqueueAnalytics` 只接受有限 `AnalyticsEventV4` 指标、bounded count 与固定 app/OS/qualification 字段，稳定 ID 去重；关闭/身份变化/删除清未上传统计，不影响业务云 facts。`flushAnalytics` 用原 typed body 实际 HTTP，回包后再读开关和当前绑定。
 
@@ -59,7 +69,7 @@ recover 使用原 authID/device/key/publicKey、新 nonce/time 与覆盖完整 b
 | 所有者 | 具体边界 |
 | --- | --- |
 | 024 | 实现 AppleSignInDriver、DeviceProofSigner、fenced DeviceCredentialVault；CloudIdentityProvider SDK取得当次 cloudSpaceID/稳定 zone，由当前双身份核验动作显式 admission；CloudDriver 实际 private zone/token/conditional save/asset staging回读，经现有 bridge SDK入口提交 proof。 |
-| 025 | 同一 facade/Session 装配。查询 accountBindingV4（account/epoch/role/suspended）、identityGenerationV4、authAttemptsV4/pendingAuthAttemptsV4/authResolutionV4（旧knownNotFound仍unknown）、controlQueueV4、latestMigrationV4、deletionSagasV4、analyticsEnabledV4、authorityStateV4、matchingCloudSaveV4、cloudCursorV4/history/deletions。普通 snapshotV2 保留本机原事实；旧epoch历史不作可录制候选。 |
+| 025 | 同一 facade/Session 装配。查询 accountBindingV4（account/epoch/role/suspended）、identityGenerationV4、authAttemptsV4/pendingAuthAttemptsV4/authResolutionV4（旧knownNotFound仍unknown）、watchRegistrationAttemptV4/pendingWatchRegistrationAttemptsV4/watchRegistrationReceiptV4、controlQueueV4、latestMigrationV4、deletionSagasV4、analyticsEnabledV4、authorityStateV4、matchingCloudSaveV4、cloudCursorV4/history/deletions。普通 snapshotV2 保留本机原事实；旧epoch历史不作可录制候选。 |
 | 026 | 真账号/签名/SDK/设备验收，WC原HTTP控制relay与独立peer transport，所有ownedledger/staging删除聚合，当前身份变化停止旧actors，保留云恢复时显式新namespace；不得自动unfence旧文件。 |
 
 `URLSessionAuthorityRelay.shutdown()` 取消网络；`SQLiteSessionRepository.close()` / `SQLiteCloudLedger.close()` 在调用方停止自己的任务后关闭文件。Session 不拥有独立后台轮询服务；UI取消订阅/调用方任务后再关闭资源。真实Apple、iCloud、Keychain、CloudKit、HealthKit、物理Workout/WC与签名安装仍未验，最低SDK编译不能替代这些门槛。
