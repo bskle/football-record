@@ -1,6 +1,6 @@
 # NATIVE-028：独立 HealthKitDeletion SDK 候选
 
-状态：首次候选 `6d87b95b8a9bc25b387d104d52e4e64e52799ff0` 经 root + m2 审阅 BLOCK（Q28-1：真实采集 metadata/token 含斜杠）。当前按唯一作者授权修复；旧26项/四SDK和旧manifest保持其原输入层次。设备敏感候选，不合 dev、不推送、不归档。执行冻结 M4 子计划 §13 / 合同 §7.2。
+状态：首次候选 `6d87b95b8a9bc25b387d104d52e4e64e52799ff0` 经 root + m2 审阅 BLOCK（Q28-1：真实采集 metadata/token 含斜杠）。Q28-1修复已完成单轮29项/四fresh SDK验证，待本轮root + m2 exact审阅；旧26项/四SDK和旧manifest保持其原输入层次。设备敏感候选，不合 dev、不推送、不归档。执行冻结 M4 子计划 §13 / 合同 §7.2。
 
 - 作者：`/root/m4_sdk_preflight`；审阅：root + m2，两位非作者 exact SHA 审阅尚待进行。
 - 完整 base / 登记目标：`204ea7a8c2b0d6f514fc6d4653aec9b6379a2a15`。
@@ -14,7 +14,7 @@
 - [x] 显式范围、canonical domain digest、独立 Health 确认；独立文件 SQLite 控制台账、独占 owner、业务擦除后重开、COMMIT 故障、未来版本/损坏保留。首轮8项 ledger host 测试通过，原红绿见验证卡。
 - [x] 回调 driver / 服务：先持久 attempt、未确认零调用、timeout/late/duplicate、重开原 scope、0条和权限分项。
 - [x] 当前 App source 与逐目标 UUID/三 metadata 精确 predicate；SDK默认关闭，host只受控 driver。
-- [x] 最终单轮26项 host（14 Ledger + 10 Service + 2 Driver）及四个最低 SDK target 编译通过；原始日志无 warning。
+- [x] 首次候选单轮26项 host及四最低SDK通过，随后审阅BLOCK；本轮修复单轮29项（3 CaptureInterop + 14 Ledger + 10 Service + 2 Driver）与四fresh最低SDK通过，无warning。
 - [ ] root + m2 source/final 双审；026真实门槛。作者交接时保持clean，完整HEAD与manifest在树外，不把提交自身SHA写进自身。
 
 ## 真实门槛
@@ -29,6 +29,8 @@
 
 当前只修本地metadata与真实采集互通：matchID/recordingDeviceID/segmentToken按原始非空、无NUL、最多4096 UTF-8 bytes校验，不沿HTTP ASCII grammar；不trim、删斜杠、转义或规范化。纯受控tuple matcher用原始UTF-8字节比较，UUID/三metadata/当前App source闭合保持；SDK仍按原值构造NSPredicate，未执行真实删除。
 
-测试target单独依赖本树已验证Core/MatchSession，真实SessionRequest.start和CaptureCoordinator recover→restart产生token后经过target/canonical/submit/confirm/reopen/predicate回归。产品target不新增Core依赖，不读取023未审接口，不改008/018。新增3项互通测试已runtime红→绿；完整host与四fresh SDK将在普通合入已验证target `36daa5526aac447cedab8c0b636c2db80b09cfa6` 后运行，不把旧26累计为新一轮。
+测试target单独依赖本树已验证Core/MatchSession，真实SessionRequest.start和CaptureCoordinator recover→restart产生token后经过target/canonical/submit/confirm/reopen/predicate回归。产品target不新增Core依赖，不读取023未审接口，不改008/018。新增3项互通测试已runtime红→绿；另有Unicode不同UTF-8原字节误匹配的runtime红→绿。
+
+修复clean checkpoint为 `76002b2fc24d223506b04a356a6a26c5ba0d55fb`。随后普通合入已验证target `36daa5526aac447cedab8c0b636c2db80b09cfa6`，source merge为 `a94280190bb18c910f8cf50038888fafdef3074a`；target的native相对原base零差异。该source上完整单轮29项和四fresh最低SDK全部exit0、无warning，不把旧26累计为新一轮。13份模块输入在同步前后及命令后SHA256全等；34份tests-only Core输入与base204已提交文件一致。最终提交仅更新两张028卡，final HEAD与clean证据见新manifest。
 
 新证据独立目录为原证据根下 `Q28-1/`。旧source、旧input/evidence manifest、26项/四SDK日志和原BLOCK不覆写。

@@ -59,4 +59,16 @@ Xcode27.0（27A266a）/ Apple Swift6.4，原版本输出在initial-tools/initial
 - `Q28-1/q281-raw-tuple-fidelity-red.log`：放宽opaque metadata后，真实token与字节上界已绿，Unicode不同原字节被Swift String相等错误合并的1项tuple断言红。
 - `Q28-1/q281-interop-green.log`：3/3、0 failures、exit0；真实派生token、斜杠/空格/Unicode/组合形式、canonical原值、控制ledger确认重开、逐目标匹配与0/NUL/4096字节边界通过。tests-only Core/MatchSession，产品target不依赖Core。
 
-完整单轮29项与四fresh最低SDK、普通同步merge SHA、产品及测试依赖输入hash将在实际完成后登记；本节不预先勾通过。未执行HealthStore/query/delete/权限请求；SDKNSPredicate只按原值传参并编译，不称真实SDK匹配或删除已验。旧26与新29不累加。
+修复clean checkpoint：`76002b2fc24d223506b04a356a6a26c5ba0d55fb`；普通merge source：`a94280190bb18c910f8cf50038888fafdef3074a`，父提交为checkpoint与exact target `36daa5526aac447cedab8c0b636c2db80b09cfa6`。target的native相对base204零差异，未消费031；`sync-proof.json`保存父提交与输入全等。
+
+| 本轮同source验证 | 命令 / Q28-1日志 | 实际结果 |
+|---|---|---|
+| 完整host | `swift test --package-path native/Modules/HealthKitDeletion --scratch-path /private/tmp/football-m4-028-q281-host`；`q281-final-host.log` | 单轮29/29：3 CaptureInterop + 14 Ledger + 10 Service + 2 Driver；0 failures、exit0 |
+| iOS17 simulator | `xcrun swift build --package-path native/Modules/HealthKitDeletion --target HealthKitDeletion --triple arm64-apple-ios17.0-simulator --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" --scratch-path /private/tmp/football-m4-028-q281-ios-sim`；`q281-final-ios-sim.log` | fresh scratch，exit0 |
+| iOS17 device SDK | 同package/target，`--triple arm64-apple-ios17.0 --sdk "$(xcrun --sdk iphoneos --show-sdk-path)" --scratch-path /private/tmp/football-m4-028-q281-ios-device`；`q281-final-ios-device.log` | fresh scratch，exit0 |
+| watchOS10 simulator | 同package/target，`--triple arm64-apple-watchos10.0-simulator --sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" --scratch-path /private/tmp/football-m4-028-q281-watch-sim`；`q281-final-watch-sim.log` | fresh scratch，exit0 |
+| watchOS10 device SDK | 同package/target，`--triple arm64-apple-watchos10.0 --sdk "$(xcrun --sdk watchos --show-sdk-path)" --scratch-path /private/tmp/football-m4-028-q281-watch-device`；`q281-final-watch-device.log` | fresh scratch，exit0 |
+
+五份本轮最终日志均无warning，实际工具版本另存本轮initial-tools/initial-swift。13份模块输入同步前/后/命令后全等；tests-only依赖的34份Core Package/Sources文件SHA256与原base204已提交源一致，`reviewed-test-dependency-inputs.json`逐项记录。`package-description.json`证明产品target不依赖Core，测试target使用MatchCore/MatchSession。SwiftPM describe产生的两文件自建缓存已移至树外保留，路径与hash另记；不作为产品输入。最终文档提交只更新两张028卡，final HEAD/clean/15个任务文件及source输入绑定于本轮 `input-manifest.json`，全部本轮证据hash列于 `evidence-manifest.json`。
+
+新证据位于上述根的独立 `Q28-1/`，旧两个manifest hash由 `retained-previous-manifest-hashes.json`复核保留。新一轮root + m2 source/final审阅尚待进行。未执行HealthStore/query/delete/权限请求；SDKNSPredicate只按原值传参并编译，不称真实SDK匹配或删除已验。旧26与新29不累加。
