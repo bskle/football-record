@@ -53,7 +53,7 @@ private final class KeychainOwners: @unchecked Sendable {
     func owner(identity: String, directory: URL) throws -> KeychainOwner {
         try lock.withLock {
             if let owner=owners[identity]?.value {
-                guard owner.directory == directory else { throw DeviceKeychainError.ownerConflict }
+                guard owner.directory.path.utf8.elementsEqual(directory.path.utf8) else { throw DeviceKeychainError.ownerConflict }
                 return owner
             }
             let owner=try KeychainOwner(directory: directory, identity: identity)

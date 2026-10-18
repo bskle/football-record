@@ -75,3 +75,15 @@ xcrun swift build --package-path native/Modules/CloudSync --target CloudSync --t
 本任务使用文件 SQLite 与受控 driver，覆盖原 bytes、失败重开、双连接 parent CAS、receipt 优先重放、token 过期、tombstone、quota、完整保存约束及账号切换 TOCTOU。确切 SHA、单轮数量和原日志见 022 验证卡及树外 manifest。
 
 024/026 尚须真实 CloudKit private custom zone、CKServerChangeToken archive、CKAsset 上传/回读与回调内复制 staging 文件、真实 quota / accountChanged 及设备/账号验证。022 两个最低 SDK target 编译不能替代这些门槛。该模块未修改工程、App Bootstrap、共享 Core、verify.sh 或既有 canonical 协议。
+
+## 024 owned staging candidate
+
+CloudOwnedStaging(rootURL:controlURL:) owns non-health canonical asset files. Its separate SQLite control file retains admitted scope, monotonic identityGeneration, permanent stable-zone fences and original request/scope receipts; it binds the original root path digest. Call admit only after explicit current cloud and business identity agreement. Callback copying, cancellation, identity fencing and erasure use one shared synchronous gate, with no SDK await inside SQL.
+
+All handles for the same root share an owner. The control DB, its WAL, controlURL.path + ".owner" and rootURL.path + ".owner" are retained control files outside the asset root. The 025/026 catalog must preserve their live inodes and parent directories. Another control DB cannot bypass the same root lease, and a control DB cannot reopen against a different root. close invalidates all old operations; reopening needs explicit admission and a fresh operation.
+
+A valid callback copies bounded bytes and verifies size/SHA256 before returning, then fsyncs its owned file and directory. It never retains a system URL for later Task reading or removes the SDK source. Invalidated callbacks do not read the source or create files. Paths use stableZoneKey and hashes of original UTF8 record/part IDs; every existing directory component rejects symlinks. Manifest metadata is checked against exact canonical bytes, including Unicode byte distinctions.
+
+The public erase request contains original requestID, requestDigest and full scope. Erasure commits its permanent stable-zone fence first, removes files for all epochs of that zone, then commits its minimal receipt. Failures between these steps reopen for the original-scope retry. This receipt proves only this owned root component. The 026 aggregate translates the existing typed LocalTransportDeletionRequest, derives stable child IDs for every owned ledger/staging component, and protects Store saga/capability/028 selection and other accounts. There is no unfence API; retained-cloud recovery uses an explicit new namespace after stopping old actors.
+
+CloudAssetCodec keeps the original maximum 8MiB canonical payload in at most64 asset parts, default256KiB per part. The manifest also travels as an asset in the SDK adapter, keeping large bytes out of ordinary CKRecord fields. Complete readback requires every reference, size/hash, original manifest metadata, conditional tag and original byte. Host tests use controlled files/SQLite only; real CloudKit behavior remains for026.
