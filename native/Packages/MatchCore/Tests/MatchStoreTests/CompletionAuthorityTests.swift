@@ -82,4 +82,21 @@ final class CompletionAuthorityTests:XCTestCase,@unchecked Sendable {
         do {try await c.store.completeNormallyV4(release:release,cloud:proof,expectedGeneration:s.business.generation,now:h.t.addingTimeInterval(60));XCTFail()}catch{}
         let after=try await c.store.snapshotV2(matchID:"match");XCTAssertEqual(try after.business.replay(now:h.t.addingTimeInterval(60)).state,.endedPendingSync)
     }
+    func testBothProofsRejectCanonicallyEquivalentUnicodeManifestScopeBytes() async throws {
+        let c=try await context(),scope=try CloudScopeV1(accountID:c.scope.accountID,cloudSpaceID:c.scope.cloudSpaceID,zoneID:"zoné",activationEpoch:1),other=try CloudScopeV1(accountID:c.scope.accountID,cloudSpaceID:c.scope.cloudSpaceID,zoneID:"zone\u{301}",activationEpoch:1)
+        let facts=try await input(Context(store:c.store,key:c.key,trust:c.trust,scope:scope,descriptor:c.descriptor))
+        _=try VerifiedCloudSaveV1.verifyReadback(facts,policy:.development(databaseNamespace:"completion-test"))
+        func changed(_ i:CloudSaveInputV1)throws->CloudSaveInputV1 {
+            var object=try JSONSerialization.jsonObject(with:i.manifestBytes) as! [String:Any],value=object["scope"] as! [String:Any];value["zoneID"]=other.zoneID;object["scope"]=value
+            return CloudSaveInputV1(record:i.record,checkpointID:i.checkpointID,confirmationID:i.confirmationID,factDigest:i.factDigest,captureDigest:i.captureDigest,terminalEventID:i.terminalEventID,manifestBytes:try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.withoutEscapingSlashes]),manifestChangeTag:i.manifestChangeTag,recordChangeTag:i.recordChangeTag,conditional:i.conditional,parts:i.parts)
+        }
+        XCTAssertThrowsError(try VerifiedCloudSaveV1.verifyReadback(changed(facts),policy:.development(databaseNamespace:"completion-test")))
+        let checkpoint=try CloudCheckpointV1(matchID:CloudCheckpointV1.accountAnchorPrefix+scope.stableZoneKey,checkpointID:"00112233-4455-6677-8899-aabbccddeeff",recordIDs:[]),record=try CloudRecordV1(scope:scope,payload:.checkpoint(checkpoint)),digest=try CaptureRevision.digest([]),manifestID=AuthorityWire.hash(Data((scope.stableZoneKey+"\0"+record.recordID+"\0checkpoint.v1").utf8)),part=CloudAssetReferenceV1(partID:"part",index:0,byteCount:record.canonicalBytes.count,digest:AuthorityWire.hash(record.canonicalBytes))
+        let manifest=CloudSaveManifestV1(version:1,scope:scope,recordID:record.recordID,recordDigest:record.digest,recordType:"CheckpointV1",matchID:checkpoint.matchID,factDigest:record.digest,captureDigest:digest,checkpointID:manifestID,terminalEventID:nil,byteCount:record.canonicalBytes.count,parts:[part])
+        let account=CloudSaveInputV1(record:record,checkpointID:manifestID,confirmationID:"confirmation",factDigest:record.digest,captureDigest:digest,terminalEventID:"",manifestBytes:try CloudCanonicalV1.encode(manifest),manifestChangeTag:"manifest",recordChangeTag:"record",conditional:true,parts:[CloudSavedAssetV1(partID:part.partID,index:0,byteCount:part.byteCount,digest:part.digest,changeTag:"part",bytes:record.canonicalBytes,conditional:true)])
+        _=try VerifiedAccountCheckpointV4.verifyReadback(account,policy:.development(databaseNamespace:"completion-test"))
+        XCTAssertThrowsError(try VerifiedAccountCheckpointV4.verifyReadback(changed(account),policy:.development(databaseNamespace:"completion-test")))
+        XCTAssertNotEqual(scope,other);XCTAssertEqual(Set([scope,other]).count,2)
+    }
+
 }

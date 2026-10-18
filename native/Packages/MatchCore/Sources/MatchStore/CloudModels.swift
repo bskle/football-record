@@ -21,6 +21,8 @@ public struct CloudScopeV1:Codable,Sendable,Equatable,Hashable {
     }
     private enum CodingKeys:String,CodingKey {case accountID,cloudSpaceID,zoneID,activationEpoch}
     public init(from decoder:any Decoder)throws {let c=try decoder.container(keyedBy:CodingKeys.self);try self.init(accountID:c.decode(String.self,forKey:.accountID),cloudSpaceID:c.decode(String.self,forKey:.cloudSpaceID),zoneID:c.decode(String.self,forKey:.zoneID),activationEpoch:c.decode(Int64.self,forKey:.activationEpoch))}
+    public static func ==(lhs:Self,rhs:Self)->Bool {lhs.activationEpoch==rhs.activationEpoch && lhs.accountID.utf8.elementsEqual(rhs.accountID.utf8) && lhs.cloudSpaceID.utf8.elementsEqual(rhs.cloudSpaceID.utf8) && lhs.zoneID.utf8.elementsEqual(rhs.zoneID.utf8)}
+    public func hash(into hasher:inout Hasher) {hasher.combine(Data(accountID.utf8));hasher.combine(Data(cloudSpaceID.utf8));hasher.combine(Data(zoneID.utf8));hasher.combine(activationEpoch)}
     public var stableZoneKey:String {AuthorityWire.hash(Data((accountID+"\0"+cloudSpaceID+"\0"+zoneID).utf8))}
     public var key:String {get throws {try CloudCanonicalV1.digest(self,domain:"scope")}}
 }

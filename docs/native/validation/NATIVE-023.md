@@ -80,3 +80,5 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - S23-lifecycle-3：actual HTTP signIn/recover先server commit、响应挂起，identityChanged完成后旧callback红4断言→绿。schema4控制行保存identity generation，auth save/accept事务CAS；AccountService必须显式admitCurrentIdentity，旧实例/自动reload不能给自己刷新代次。受控当前双身份显式admission、原ID对账与完整fresh Apple正向仍通过。
 - vault增加单调advanceIdentityFence与原子conditional replace；SQL accept后挂起vault写、完成身份fence、再放旧写会被拒。024必须把该原子性延伸到真实Keychain写入，不能在检查后await无条件写。默认生产SDK仍Unavailable。
 - 选测Auth9 + Migration4 + Lifecycle4单轮17/0；StoreLifecycle6/0，含两个文件连接与旧记录重开。证据 `023-5-auth-gates-red.log`、`023-5-auth-identity-fence-red.log`、`023-5-auth-identity-fence-green.log`、`023-5-auth-store-gates-green.log`。whole回归/peer仍后续。
+
+- S23-cloud-scope-1：合法Unicode zone两个proof正例及仅manifest改为规范等价但UTF8不同zone实际红1项/4断言→绿1/0。CloudScopeV1既有Equatable/Hashable现精确三个ID原UTF8与epoch，canonical/wire/hash domain/key/legacy不改；CloudSync相同边界由独立033负责，未越权。日志 `023-3-cloud-scope-red.log` / `green.log`。
