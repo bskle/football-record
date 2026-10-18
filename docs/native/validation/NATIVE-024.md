@@ -1,6 +1,6 @@
 # NATIVE-024 验证记录
 
-实现中，2026-10-19上海。证据树外 `native-validation/NATIVE-024/`；开工六Git输入、工具版本与100份已审依赖输入hash已保存。依赖为实际merge `e0997c6b09791e423d224dd04cbf26da32f2a3c2`，与已审023候选 `f7f7a3bceb3000fd6d655d4724089601870eeb4d` 的native/backend/scripts树一致。
+源码冻结后完成本机验证，2026-10-19上海；整项 root + m2 双审待核。证据树外 `native-validation/NATIVE-024/`；开工六Git输入、工具版本与100份已审依赖输入hash已保存。依赖为实际merge `e0997c6b09791e423d224dd04cbf26da32f2a3c2`，与已审023候选 `f7f7a3bceb3000fd6d655d4724089601870eeb4d` 的native/backend/scripts树一致。
 
 slice1：`024-1-vault-runtime-red.log` 实际7项/4 failures；`024-1-vault-green.log` 同7项/0。只使用受控文件Keychain driver，真实Security执行未调用。初次依赖构建的Core LifecycleInboundCoordinator.swift:23/33两个unused repository warning属于既有已审源，不越界修。后续新增竞争/duplicate验证与完整最终数量待实际命令登记，不累加旧层次。
 
@@ -17,3 +17,26 @@ Slice3 raw evidence: 024-3-assets-staging-runtime-red.log ran11 tests with missi
 Slice4: 024-4-cloud-driver-runtime-red.log ran7/7 failures against unavailable behavior, then controlled-first7/0. The actual SDK branch compiled on macOS in 024-4-sdk-compile-first.log; its one accountStatus callback-in-async warning was removed by the async API. 024-4-cloud-sdk-host-green.log ran22/0; added real SQLite conflict retention, cloud-only fencing/local preservation and cancellation tests ran25/0 in 024-4-driver-boundaries-green.log. Account adapter zone derivation cross-check ran18/0 in 024-4-account-zone-regression.log. These are separate incremental rounds, not a sum.
 
 Pre-copy manifest budget runtime red ran1 test/2 assertion failures in 024-4-manifest-budget-runtime-red.log; bounded total/reference checks then ran26/0 in 024-4-manifest-budget-green.log. Real SDK callbacks pass the manifest's expected part reference into synchronous copying; host tests prove pure budget and controlled copy behavior, not real CloudKit callback semantics. Preliminary AccountKit watchOS10 simulator and CloudSync iOS17 simulator builds passed before this last budget delta; final fresh eight builds must use the frozen source and supersede these preliminary inputs.
+
+## 最终同输入验证
+
+源码 `06ce54634dbf96c6c29fcaa8339dad05079ddb93`，目标已验证dev `fcf530ada01a7cbf87bbfde598f611d8a35705b2`。证据目录 `native-validation/NATIVE-024/final-06ce546/`。完整 AccountKit 本轮72项/0，完整 CloudSync 本轮106项/0，分别 fresh scratch；共178项只表示这两个相关包本轮的并集，不含旧591或其他模块/设备测试。
+
+| 产品 | 最低 triple | 实际 exit |
+| --- | --- | --- |
+| AccountKit | arm64-apple-ios17.0-simulator | 0 |
+| AccountKit | arm64-apple-ios17.0 | 0 |
+| AccountKit | arm64-apple-watchos10.0-simulator | 0 |
+| AccountKit | arm64-apple-watchos10.0 | 0 |
+| CloudSync | arm64-apple-ios17.0-simulator | 0 |
+| CloudSync | arm64-apple-ios17.0 | 0 |
+| CloudSync | arm64-apple-watchos10.0-simulator | 0 |
+| CloudSync | arm64-apple-watchos10.0 | 0 |
+
+每项命令为 `swift build --package-path native/Modules/<product> --target <product> --triple <triple> --sdk <xcrun对应SDK绝对路径> --scratch-path <独立新建树外路径>`。八日志及两份results JSON保存完整实际参数与exit，没有用旧scratch/旧日志替代。工具为本机Xcode27.0/Swift6.4，最低部署版本未升级；只编译产品target，不执行设备SDK。
+
+Git输入、207项相关产品/测试/后台fixture/脚本文件、23项实际SDK header/interface均按原bytes固定；post-runtime检查207项零差异。023实际合并/GIT007只影响治理文档，未消费作者WIP，Core/backend/Apps/project/Package/scripts保持原依赖。最后收尾仅两张024卡，产品输入无需重跑。最终完整SHA与证据manifest由树外manifest记录，避免文档自引用。
+
+诊断：Core LifecycleInboundCoordinator.swift23/33既有unused repository warning保留；Node22 experimental SQLite warning保留。完整AccountKit运行还输出系统CoreData/contactsd NSXPC4097连接诊断，72项仍0失败；源码/测试未调用Contacts API，不据该系统日志认定真实账号或权限能力已验。新增adapter无编译warning，slice4早期accountStatus warning已经换async接口并被最终八构建覆盖。53a7db6 body字面量换行保留历史，不amend/rebase。
+
+宿主只用受控Authorization/Keychain/CloudKit transport与受控文件SQLite；公共factory默认false。没有实际AS授权、Security item读写、CKContainer/CKUser请求、CloudKit query/save/delete、账号配置或设备行为。真实iCloud环境选择来自签名工程配置，enum不是服务器切换开关。未构建App、未签名安装、未把单staging receipt或SDK候选bool升级为全本地/账号/cloud/health完成。真实SDK行为和组合验收仍归026；候选独立保留待双审。
