@@ -20,3 +20,46 @@ func expectIssue(_ issue: HealthDeletionIssue, _ operation: () async throws -> V
 func confirmation(_ r: WorkoutDeletionRequestV1, id: UUID = UUID()) throws -> WorkoutDeletionConfirmationV1 {
  try WorkoutDeletionConfirmationV1(confirmationID:id,requestID:r.requestID,selectionDigest:r.selectionDigest(),confirmedAt:deletionTime,explicitHealthDeletion:true)
 }
+
+final class ControlledDeletionDriver: HealthDeletionDriver, @unchecked Sendable {
+ let lock=NSLock()
+ private var stored: [HealthDeletionDriverAttempt]=[]
+ private var callbacks: [@Sendable (HealthDeletionDriverOutcome) -> Void]=[]
+ let onCall: (@Sendable (HealthDeletionDriverAttempt) -> Void)?
+ init(onCall: (@Sendable (HealthDeletionDriverAttempt) -> Void)? = nil) { self.onCall=onCall }
+ func delete(_ attempt: HealthDeletionDriverAttempt,completion: @escaping @Sendable (HealthDeletionDriverOutcome) -> Void) {
+  lock.withLock { stored.append(attempt);callbacks.append(completion) };onCall?(attempt)
+ }
+ var calls: [HealthDeletionDriverAttempt] { lock.withLock { stored } }
+ func answer(_ outcome: HealthDeletionDriverOutcome,index: Int = 0) {
+  let callback=lock.withLock { callbacks.indices.contains(index) ? callbacks[index]:nil };callback?(outcome)
+ }
+ func waitForCalls(_ count: Int) async throws {
+  for _ in 0..<300 { if calls.count >= count { return };try await Task.sleep(for:.milliseconds(1)) }
+  throw HealthDeletionIssue.unavailable
+ }
+}
+final class DeletionFaultSwitch: @unchecked Sendable {
+ private let lock=NSLock()
+ private var operation: DeletionWrite?
+ private var point: DeletionFault?
+ func arm(_ operation: DeletionWrite,_ point: DeletionFault) { lock.withLock { self.operation=operation;self.point=point } }
+ func take(_ operation: DeletionWrite) -> DeletionFault? { lock.withLock {
+  guard self.operation == operation else { return nil };let value=point;self.operation=nil;point=nil;return value
+ } }
+}
+func confirmedLedger(_ paths: (control: URL,business: URL),_ r: WorkoutDeletionRequestV1) async throws -> SQLiteHealthDeletionLedger {
+ let ledger=try SQLiteHealthDeletionLedger(url:paths.control,businessDataDirectory:paths.business)
+ _=try await ledger.submit(r);_=try await ledger.confirm(confirmation(r),now:deletionTime);return ledger
+}
+func eventually(_ condition: () async throws -> Bool) async throws {
+ for _ in 0..<300 { if try await condition() { return };try await Task.sleep(for:.milliseconds(1)) }
+ XCTFail("Expected durable callback outcome")
+}
+
+import SQLite3
+func editControlDB(_ url: URL,_ sql: String) throws {
+ var db: OpaquePointer?;guard sqlite3_open(url.path,&db) == SQLITE_OK else { throw HealthDeletionIssue.storageUnavailable }
+ defer { sqlite3_close(db) }
+ guard sqlite3_exec(db,sql,nil,nil,nil) == SQLITE_OK else { throw HealthDeletionIssue.storageUnavailable }
+}

@@ -140,7 +140,7 @@ public actor SQLiteHealthDeletionLedger: HealthDeletionLedger {
         if row[3].isNull { confirmation=nil } else {
             guard let bytes=row[3].data else { throw HealthDeletionIssue.invalidRequest }
             let value=try JSONDecoder().decode(WorkoutDeletionConfirmationV1.self,from:bytes);try value.validate()
-            guard value.requestID == id,value.selectionDigest == digest,value.confirmedAt >= request.createdAt else { throw HealthDeletionIssue.invalidRequest }
+            guard value.requestID == id,value.selectionDigest == digest,value.confirmedAt >= request.createdAt,try Self.encoded(value) == bytes else { throw HealthDeletionIssue.invalidRequest }
             confirmation=value
         }
         let attempt: UUID?
@@ -156,7 +156,9 @@ public actor SQLiteHealthDeletionLedger: HealthDeletionLedger {
             guard let bytes=row[8].data else { throw HealthDeletionIssue.invalidRequest }
             let value=try JSONDecoder().decode(WorkoutDeletionReceiptV1.self,from:bytes)
             guard value.requestID == id,value.selectionDigest == digest,value.attemptID == attempt,
-                  DeletionValidation.time(value.completedAt),value.deletedObjectCount >= 0,value.deletedObjectCount <= request.targets.count else { throw HealthDeletionIssue.invalidRequest }
+                  DeletionValidation.time(value.completedAt),value.completedAt >= request.createdAt,
+                  value.completedAt >= (confirmation?.confirmedAt ?? Int64.max),try Self.encoded(value) == bytes,
+                  value.deletedObjectCount >= 0,value.deletedObjectCount <= request.targets.count else { throw HealthDeletionIssue.invalidRequest }
             receipt=value
         }
         if phase == .awaitingConfirmation {
@@ -168,6 +170,8 @@ public actor SQLiteHealthDeletionLedger: HealthDeletionLedger {
             if phase == .succeededLocally { guard receipt != nil,issue == nil else { throw HealthDeletionIssue.invalidRequest } }
             else { guard receipt == nil else { throw HealthDeletionIssue.invalidRequest } }
             if phase == .failed { guard issue != nil else { throw HealthDeletionIssue.invalidRequest } }
+            if phase == .executing { guard issue == nil else { throw HealthDeletionIssue.invalidRequest } }
+            if phase == .awaitingOutcome { guard issue == .outcomeUnknown else { throw HealthDeletionIssue.invalidRequest } }
             if phase == .interrupted { guard issue == .outcomeUnknown else { throw HealthDeletionIssue.invalidRequest } }
         }
         return HealthDeletionEntry(request:request,selectionDigest:digest,confirmation:confirmation,phase:phase,attemptID:attempt,attemptCount:Int(count),issue:issue,receipt:receipt)
@@ -203,7 +207,45 @@ public actor SQLiteHealthDeletionLedger: HealthDeletionLedger {
             return try entry(confirmation.requestID)
         }
     }
-    public func beginAttempt(_ requestID: UUID,attemptID: UUID) throws -> HealthDeletionEntry { throw HealthDeletionIssue.unavailable }
-    public func markAwaitingOutcome(_ requestID: UUID,digest: String,attemptID: UUID) throws {}
-    public func finish(_ requestID: UUID,digest: String,attemptID: UUID,outcome: HealthDeletionDriverOutcome,now: Int64) throws {}
+    public func beginAttempt(_ requestID: UUID,attemptID: UUID) throws -> HealthDeletionEntry {
+        try write(.beginAttempt) {
+            let prior=try entry(requestID)
+            guard prior.confirmation != nil else { throw HealthDeletionIssue.unconfirmed }
+            guard [.pending,.failed,.interrupted].contains(prior.phase) else { throw HealthDeletionIssue.outcomeUnknown }
+            guard prior.attemptID != attemptID,prior.attemptCount < Int.max else { throw HealthDeletionIssue.identityConflict }
+            try sql.execute("UPDATE health_deletion_requests SET phase='executing',attempt_id=?,attempt_count=?,issue=NULL WHERE request_id=?",[.text(attemptID.uuidString.lowercased()),.number(Int64(prior.attemptCount+1)),.text(requestID.uuidString.lowercased())])
+            return try entry(requestID)
+        }
+    }
+    private func matching(_ requestID: UUID,_ digest: String,_ attemptID: UUID) throws -> HealthDeletionEntry {
+        let prior=try entry(requestID)
+        guard prior.selectionDigest == digest,prior.attemptID == attemptID else { throw HealthDeletionIssue.identityConflict };return prior
+    }
+    public func markAwaitingOutcome(_ requestID: UUID,digest: String,attemptID: UUID) throws {
+        try write(.awaitingOutcome) {
+            let prior=try matching(requestID,digest,attemptID)
+            if prior.phase == .succeededLocally || prior.phase == .failed { return }
+            guard prior.phase == .executing || prior.phase == .awaitingOutcome else { throw HealthDeletionIssue.outcomeUnknown }
+            try sql.execute("UPDATE health_deletion_requests SET phase='awaitingOutcome',issue='outcomeUnknown' WHERE request_id=?",[.text(requestID.uuidString.lowercased())])
+        }
+    }
+    public func finish(_ requestID: UUID,digest: String,attemptID: UUID,outcome: HealthDeletionDriverOutcome,now: Int64) throws {
+        guard DeletionValidation.time(now) else { throw HealthDeletionIssue.invalidResponse }
+        try write(.finish) {
+            let prior=try matching(requestID,digest,attemptID)
+            // A duplicate callback can only observe the first terminal result of this attempt.
+            if prior.phase == .succeededLocally || prior.phase == .failed { return }
+            guard prior.phase == .executing || prior.phase == .awaitingOutcome else { throw HealthDeletionIssue.outcomeUnknown }
+            guard now >= prior.request.createdAt,let confirmedAt=prior.confirmation?.confirmedAt,now >= confirmedAt else { throw HealthDeletionIssue.invalidResponse }
+            switch outcome {
+            case .success(let count) where count >= 0 && count <= prior.request.targets.count:
+                let receipt=WorkoutDeletionReceiptV1(requestID:requestID,selectionDigest:digest,attemptID:attemptID,completedAt:now,deletedObjectCount:count)
+                try sql.execute("UPDATE health_deletion_requests SET phase='succeededLocally',issue=NULL,receipt=? WHERE request_id=?",[.data(try Self.encoded(receipt)),.text(requestID.uuidString.lowercased())])
+            default:
+                let issue: HealthDeletionIssue
+                if case .failure(let value)=outcome { issue=value } else { issue = .invalidResponse }
+                try sql.execute("UPDATE health_deletion_requests SET phase='failed',issue=? WHERE request_id=?",[.text(issue.rawValue),.text(requestID.uuidString.lowercased())])
+            }
+        }
+    }
 }
