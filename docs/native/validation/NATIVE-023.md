@@ -143,3 +143,24 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - WatchRegistrationTests完整focused11/0：十类篡改/unsigned status不能关pending，原proof可重开恢复；closed COMMIT丢响应后按原ID取同proof；原requests行移除仅永久fence留存时401仍unknown且不能新ID绕过；Phone/Watch身份变化后旧closed回调不能借新代次，当前显式重新核验/admit原ID闭合仍可用。原注册到期、旧key/epoch/vault、登记→原Session实际start正例保留。
 - Core focused3/0：原registered与closed结果同事务first-result互斥，closed beforeCommit/afterReceipt/afterCommit close/reopen全有全无，幂等原bytes，合法控制签名的迟到registered也不能覆盖closed或安装binding。Verified receipt无public init/JSONdecode旁路，Store使用自身pinned trust重验。
 - 红/绿日志 `023-36-watch-ttl-red.log` / `023-36-watch-ttl-green-attempt1.log` / `023-36-watch-focused-green.log` / `023-36-watch-store-green.log`。最终整包、最低SDK、两App将在新冻结source运行；27d的570/0+12SDK+2App仍保留为独立旧层，不提前标whole通过或审阅通过。
+
+## 最终冻结输入与作者完整结果
+
+最终运行source `5ee7bd33721a9015e23dfe23fd0e31c15fafd211`，target为已审actual dev `17f2e39adcdbc633682992d5e5e2f348dbc940e6`。命令仍为 `PATH=/Users/liam/.local/bin:$PATH NSUnbufferedIO=YES NATIVE_NODE_BINARY=/Users/liam/.local/bin/node NATIVE_BUILD_ROOT=/private/tmp/football-m4-023-build bash scripts/native/verify.sh`，实际exit0。Xcode27.0(27A266a)/Swift6.4/Node22.23.1；`023-final-tools.json`保存工具现场。后续仅本卡/任务卡文档提交，全部223个backend/native/verify.sh产品输入Git blob与SHA256和运行source一致。
+
+| 最终source同轮层次 | 实际结果 |
+| --- | --- |
+| Node真实HTTP/TLS/文件SQLite | 161/0 |
+| Core包 | 257/0 =44 Core +149 Store +47 Session +17 Sync |
+| CloudSync | 80/0 |
+| AccountKit | 54/0，含实际NodeHTTP/原Session/闭合恢复 |
+| Presentation | 39/0，含035协调真实SQLite写竞争注入与恢复 |
+| 宿主合计 | 591/0，只计本轮上述各层一次 |
+| 最低Simulator SDK产品 | 12/12：Store/Session/Sync/Cloud/Account/Presentation各arm64 iOS17.0与watchOS10.0 |
+| 无签名generic Simulator App | iOS与Watch共2/2 |
+
+组合日志 `023-final-036-verify.log`，19份原分项日志复制到 `run-5ee7bd3/`。223输入清单 `023-final-run-inputs.json`；最终final SHA、六项Git输入、所有作者改动blob/SHA、证据SHA与仅两卡delta证明记 `023-final-manifest.json` / `023-final-evidence-sha256.txt`。运行source到final无产品变化，不以文档提交伪称另跑整轮。
+
+`S23-watch-ttl-1`已由036+本客户端切片的软件红绿关闭：只有pinned signed原closed proof允许显式新ID/challenge，404/401/timeout和仅fence无row仍unknown，原registered优先不重建会话。无未关闭的本机技术阻塞；root+m2整source/final审阅、actual merge/sync和正式024/025所有权交接仍待，不由作者预填通过。
+
+094原Presentation失败、27d原570/0+12SDK+2App及所有早期选测保留各自完整source层次。真实Apple、iCloud、Keychain、CloudKit、HealthKit、Workout/WC、设备签名/安装与生产部署未验；生产Bootstrap仍Unavailable，不把本机软件/最低SDK编译当真实E2E。

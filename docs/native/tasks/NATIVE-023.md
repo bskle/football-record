@@ -1,44 +1,39 @@
 # NATIVE-023：schema4、原 Session 与 HTTP 纵向
 
-状态：036客户端封闭恢复已完成focused红绿，源码切片即将冻结并执行最终完整验证；两位非作者 exact 审阅、actual merge、同步与清理均待主代理，不预填通过。
+状态：本机软件实现及作者最终完整验证完成，作者冻结交两位非作者 exact 审阅。未预填审阅、actual merge、同步、SDK所有权移交或清理通过。
 
 - 作者：m4_session；唯一 worktree `/Users/liam/.codex/worktrees/m4-session-authority/20260830_足球记录`。
 - 分支：`feat/m4-session-authority`；attachment `01a14fd7-5113-7dd2-8c29-c64d7f18b94a`。
-- 原始 base_ref / target：dev；完整 base / 开工 target / 初始 HEAD：`8d6ec935efa060ab462b2913ab8460734871ff40`；初始 clean。
-- 最后已验证合并目标：dev `17f2e39adcdbc633682992d5e5e2f348dbc940e6`；已普通 no-ff 合入已审 027、029～033 与 GIT005/006。前轮运行 source：`094c690775809eb9ce40d82d19a139ff5d9ea4d3`；最终两卡提交的完整 SHA 与相同产品输入证明放树外 manifest，避免自引用 SHA。
-- 依赖：021 final `a55dab4d10bf2b10011c81a49a30128cd9f835ad`；022 final `b648b730fbb9929453c32a43b12bc77bd2d67faf`，均已双审合入实际 base。后续已审接口来源与每次合并保留 Git 历史和验证卡。
-- 所有权：`native/Packages/MatchCore/**`、`native/Modules/AccountKit/**`、必要 `scripts/native/verify.sh`、本卡与 `docs/native/validation/NATIVE-023.md`。未写他人模块、工程配置或生产 Bootstrap。
+- 原始 base_ref/target：dev；完整 base / 开工 target / 初始 HEAD：`8d6ec935efa060ab462b2913ab8460734871ff40`，初始 clean。
+- 最新已验证合并目标：dev `17f2e39adcdbc633682992d5e5e2f348dbc940e6`。已普通 no-ff 合入已审027、029～036与GIT005/006；不消费未审代码。
+- 作者最终运行 source：`5ee7bd33721a9015e23dfe23fd0e31c15fafd211`。最终仅两卡文档提交，完整final SHA、clean及223个相同产品输入的blob/SHA证明置树外manifest，避免提交自引用SHA。
+- 所有权：`native/Packages/MatchCore/**`、`native/Modules/AccountKit/**`、必要`scripts/native/verify.sh`、本卡及验证卡；未写他人模块、工程配置或生产Bootstrap。依赖来源及实际红绿保留验证卡和Git历史。
 
-## 交付范围
+## 软件交付
 
-| 切片 | 实际软件行为 |
+| 切片 | 实际行为 |
 | --- | --- |
-| 023.1 | schema0～3 additive 到4；故障 rollback/reopen、partial4/future5；原 canonical、receipt、packet、ACK bytes 保持。 |
-| 023.2 | Node 固定 bytes 经 CryptoKit；真实 HTTP acquire/query/fresh-held 到原 Session；COMMIT 丢响应同意图恢复；已知终态不续采，已有合法比赛离线恢复仍可用。 |
-| 023.3 | 一个 facade 的完整 facts/tombstone/token/generation CAS 原子导入；历史只读；当前完整云 proof + 永久 normal release 才完成；异常终结先本地事务后原 compare-release。 |
-| 023.4 | 独立 production grant/envelope verifier 与路由/inbox/ACK；signed roles/activePhoneID、公钥、epoch、域/签名强制核验；原 v2 bytes 和 M3 development guards 保持。 |
-| 023.5 | 真实 HTTP auth/recovery、032 knownAbandoned、持久控制 backoff、两轮正常迁移/七天丢失窄授权、删除 saga/统计；身份 generation/SQL CAS/vault 晚写门闩；033 非空永久 purge 后重开重试。 |
+| 023.1 | schema0～3 additive到4；SQL故障rollback/reopen、partial4/future5；原canonical/receipt/packet/ACK bytes保持。 |
+| 023.2 | Node固定bytes经CryptoKit；真实HTTP acquire/query/fresh-held到原Session；COMMIT丢响应同意图恢复；已知终态不续采，合法已有比赛允许离线恢复。 |
+| 023.3 | 一个facade完整facts/tombstone/token/generation CAS原子导入；历史只读；当前完整云proof+永久normal release才完成；异常终结先本地事务再原compare-release。 |
+| 023.4 | 独立production grant/envelope及持久route/inbox/ACK；signed roles/activePhoneID、公钥、epoch、域与签名强制；原v2 bytes和M3 development guards保持。 |
+| 023.5 | 实际HTTP auth/recovery/032 knownAbandoned、持久control backoff、两轮正常迁移/七天丢失窄授权、删除saga/统计；identity generation/SQL CAS/vault晚写门闩；033非空purge永久fence重开重试。 |
+| 登记闭环 | Watch持钥、Phone仅授权中继、原attempt/receipt持久、Watch-only vault；显式submit/recover；036 pinned signed closed proof后才结束unknown，late成功不覆closed。 |
 
-不扩大 SessionRepository 必需方法；新增附加协议仍由原 SQLiteSessionRepository / Store 与 Session 队列实现。网络或 SDK await 不在 SQL / 同场队列内。normal 仅原 recorder PoP；phone 使用公开 opaque HTTP relay 工厂原样转发，不能重编码签名请求。
+SessionRepository原required方法未扩大，附加能力由同SQLiteSessionRepository/Store和原Session队列实现。网络/SDK await不在SQL或同场队列内。normal仅原recorder PoP，phone opaque HTTP relay不重编码签名请求。删除originalScope首次同事务固定，wrongSpace/原UTF8不同zone不碰driver或进度；未知旧scope不推断、不显示finished。
 
-## 当前验证与交接
+## 最终作者验证
 
-094旧输入层单轮宿主实际通过：Node128/0、Core253/0（Core44 / Store145 / Session47 / Sync17）、CloudSync80/0、AccountKit42/0（Auth11 / Cloud7 / Control3 / HTTP10 / Lifecycle6 / Migration5）。该轮Presentation39项一项6断言注入失败；12最低SDK及两无签名simApp实际通过，均仅旧层；历史 checkpoint 不与本轮相加。
+本轮同一source完整脚本实际exit0，591项/0：Node161、Core257（44 Core /149 Store /47 Session /17 Sync）、CloudSync80、AccountKit54、Presentation39。12项最低iOS17/watch10 Simulator产品（Store/Session/Sync/Cloud/Account/Presentation各双端）及2个无签名generic Simulator App通过；最低系统未升级。094失败及27d的570/0+12SDK+2App均保留独立旧输入层，不与本轮相加。
 
-024/025/026 的实际 public API、初始化、持久查询、恢复 ID、retry/shutdown 与隔离约束见 [AccountKit README](../../../native/Modules/AccountKit/README.md)。025 通过 `deletionSagasV4()` 重开发现原 ID；`localDataProgress` 聚合一个本地数据结果。默认 transport eraser unavailable，026 仍需聚合所有 owned ledger/staging；单文件033 receipt不能替代全本地删除。云历史 API 不授旧 Workout/原机录制恢复权。
+036 focused Watch11/0、Core登记3/0；真实TTL未送达重开红1项4fail已闭环。十类篡改、closed COMMITlost、只有fence无原row401、双端身份变化、闭合fault/reopen和late成功反例均在最终全套。`S23-watch-ttl-1`本机软件缺口已关闭，不替代真实SDK/账号验收。
 
-真实 Apple / iCloud / Keychain / CloudKit / HealthKit / Workout / WatchConnectivity、签名安装、生产配置与服务部署仍待024/026。生产 provider/trust/bootstrap保持 unavailable；最低 iOS17 / watchOS10 不升级，编译不算真实E2E。008/010/016/018及queued树不动。
+## 024 / 025 / 026交接
 
-树外证据：`/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-023`。红绿原日志、六项 Git 输入、工具、运行202个产品输入及所有改动/证据 SHA256 manifest 交主代理 exact 审阅；源码/最终审阅结果不由作者声明。
+实际公开API、初始化、持久查询、稳定ID、retry/shutdown见[AccountKit README](../../../native/Modules/AccountKit/README.md)。024接AppleSignInDriver、DeviceProofSigner、fenced DeviceCredentialVault及CloudDriver；已有DB缺原key不得换新key，检查与Keychain写必须原子。025使用同facade/Session，查询account/role/suspension、auth原pending/resolution、Watch原attempt/receipt、control queue、latestMigration、deletionSagas、analytics与proof/history状态；不得另造仅内存恢复ID。
 
-## 最后审阅修复与登记边界
+026接真实WC typed登记action及原HTTP normal relay、production peer transport、全ownedledger/staging删除聚合。`deletionSagasV4()`含原originalScope/ID/capability，`localDataProgress`聚合一个本地数据结果；默认transport eraser unavailable，单033文件receipt不证明全本地删除。云历史不授旧Workout/原机录制恢复权。SDK/App所有权在root正式交接后转移，作者此处先停写。
 
-删除scope P1已提交 `ce0d9212373beacc43dd90d6569ad907e9ef3185`：originalScope在原saga控制行同事务固定，wrongSpace/raw Unicode zone重开不碰任何driver/bytes/fence/progress，原scope继续；Lifecycle7/0与StoreLifecycle8/0，缺scope旧记录不能假finished。未改HTTP删除intent或schema版本。
+真实Apple/iCloud/Keychain/CloudKit/HealthKit/Workout/WC、签名安装、生产配置和服务部署仍待024/026；生产provider/trust/bootstrap保持unavailable，编译不称E2E。008/010/016/018及queued树不动。
 
-Watch客户端登记归023唯一Core/Account作者补齐：Phone仅授权/中继、Watch持钥与独立vault，原attempt/receipt持久，404/网络unknown不换ID，明确已提交过期只显式fresh；late identity/key/epoch/vault callback拒绝。实际NodeHTTP七项/0，含登记后原Watch Session开赛、COMMIT/query丢响应重开同session、Phone vault不覆盖、DB无Watch token；Core两项/0覆盖Phone/Watch receipt+binding六故障重开与旧epoch拒绝。024/026仅具体SDK/WC driver，public入口见README。该软件登记此前仅有backend harness，本卡现明确纳入023。
-
-上述新增输入与094旧层分开，最终完整host/最低SDK/两App待最新已审034/035普通合入后一次执行；未把旧层或选测计作最终整包通过。
-
-## 036可信封闭恢复接入
-
-已普通合入036 actual dev `17f2e39adcdbc633682992d5e5e2f348dbc940e6`，本树merge `d2d12d3c7f193c206cd5ebf7e54fd3f7ba59995d`。Watch超TTL未送达重开真实红1项4fail→绿；独立submit/recover action保留到Phone。knownAbandoned必须固定keyset严格验原receipt，Store不可变首次结果CAS，迟到registered拒绝；未签名status/404/401/网络unknown仍pending。Watch完整focused11/0，含十类篡改、无Phone attempt、closed COMMITlost、双端identity重新admit及fence无row401；Core登记focused3/0含闭合三个SQL fault/reopen/迟到成功反例。最终whole/SDK/App下轮单独记录，不以27d的570项旧层代替。
+树外证据：`/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-023`；`023-final-manifest.json`、`023-final-evidence-sha256.txt`、六项final Git输入、原红绿与分层日志供root+m2 exact双审。审阅/merge结果由root另记。
