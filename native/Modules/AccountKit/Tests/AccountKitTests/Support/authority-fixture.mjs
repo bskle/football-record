@@ -10,6 +10,7 @@ for await (const line of createInterface({input:process.stdin})) {
  try { const r=JSON.parse(line);
  if(r.op==='close'){emit({ok:true});await Promise.race([f.close(),new Promise(resolve=>setTimeout(resolve,200))]);process.stdin.destroy();process.exit(0);}
  if(r.op==='fault'){f.f.faults.dropResponseAfterOperation=r.value;emit({ok:true});}
+ else if(r.op==='databaseFault'){f.f.faults.beforeCommit=r.value===true;emit({ok:true});}
  else if(r.op==='restart'){await f.restart();emit({baseURL:f.baseURL});}
  else if(r.op==='clock'){f.f.clock.set(r.now);emit({now:f.f.clock.now()});}
  else if(r.op==='watch'){

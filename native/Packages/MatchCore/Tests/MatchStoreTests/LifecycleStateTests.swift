@@ -1,6 +1,7 @@
 import Foundation
 import XCTest
 import CryptoKit
+import MatchCore
 @testable import MatchStore
 final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
     let h=TransactionTests()
@@ -43,4 +44,10 @@ final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
             try await r.acceptAuthenticationV4(attempt:attempt,binding:c.binding,receipt:signed);try await r.close()
         }
     }
+    func testSuspendedAccountCannotCommitNewBusinessEvenThroughOriginalStoreAPI() async throws {
+        let c=try context(),s=try store(c);try await s.bindAccountV4(c.binding);try await s.suspendAccountV4()
+        let start=StartIntent(id:"new-intent",matchID:"new-match",recordingDeviceID:"phone",requestedAt:h.t)
+        do {_=try await s.commit(StoreCommit(commandID:"new",expectedGeneration:0,descriptor:MatchDescriptor(startIntent:start,starter:true),events:[],packets:[]));XCTFail()}catch{}
+    }
+
 }

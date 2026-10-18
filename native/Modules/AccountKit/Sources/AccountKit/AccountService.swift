@@ -13,7 +13,7 @@ public struct AccountAuthentication:Sendable {
     public let receipt:VerifiedAuthorityReceiptV1
     public let reauthenticationID:String?
 }
-public enum AuthenticationRecovery:Sendable {case authenticated(AccountAuthentication),knownRevoked,knownExpired}
+public enum AuthenticationRecovery:Sendable {case authenticated(AccountAuthentication),knownRevoked,knownExpired,knownNotFound,unresolved}
 public actor AccountService {
     let client:AuthorityClient
     let repository:any AccountLifecycleRepository & AuthorityRepository
@@ -37,6 +37,7 @@ public actor AccountService {
         if try await repository.authAttemptV4(requestID:requestID) != nil {
             guard case .authenticated(let result)=try await recover(authRequestID:requestID) else {throw AuthorityError.identityChanged};return result
         }
+        guard try await repository.pendingAuthAttemptsV4().allSatisfy({$0.requestID==requestID}) else {throw AuthorityError.conflict}
         let request=ChallengeRequest(requestID:challengeRequestID,deviceID:deviceID,devicePublicKey:client.signer.publicKey)
         let challenge=try AuthorityWire.decode(Challenge.self,await client.unsigned(path:"/v1/auth/challenges",body:AuthorityWire.encode(request)))
         let now=try seconds()
@@ -58,13 +59,24 @@ public actor AccountService {
         let request=RecoverRequest(requestID:UUID().uuidString,authRequestID:authRequestID,deviceID:deviceID,keyID:attempt.keyID,nonce:UUID().uuidString,issuedAt:try seconds())
         let unsigned=try object(request),signature=try await client.signer.sign(AuthorityWire.signedInput("football-record.device.auth-recover.v1",body:bytes(unsigned)))
         var full=unsigned;full["deviceProof"]=AuthorityWire.base64URL(signature)
-        let raw=try await client.unsigned(path:"/v1/auth/recover",body:bytes(full))
+        let raw:Data
+        do {raw=try await client.unsigned(path:"/v1/auth/recover",body:bytes(full))}
+        catch let failure as AuthorityHTTPFailure {
+            if failure.code=="notFound" {try await coordinator.resolveAuthAttempt(requestID:authRequestID,resolution:.knownNotFound);return .knownNotFound}
+            if failure.code=="unauthorized" || failure.retryable {return .unresolved}
+            throw failure
+        } catch is URLError {return .unresolved}
         if let object=try JSONSerialization.jsonObject(with:raw) as? [String:Any],Set(object.keys)==["status"] {
-            if object["status"] as? String=="knownRevoked" {try await client.vault.replace(nil);return .knownRevoked}
-            if object["status"] as? String=="knownExpired" {try await client.vault.replace(nil);return .knownExpired}
+            if object["status"] as? String=="knownRevoked" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownRevoked);return .knownRevoked}
+            if object["status"] as? String=="knownExpired" {try await terminalCredential(authRequestID:authRequestID,resolution:.knownExpired);return .knownExpired}
             throw AuthorityError.invalidWire
         }
         return .authenticated(try await accept(raw,attempt:attempt))
+    }
+    func terminalCredential(authRequestID:String,resolution:AuthResolutionV4) async throws {
+        try await coordinator.resolveAuthAttempt(requestID:authRequestID,resolution:resolution)
+        if let lifecycle=coordinator as? any LifecycleInboundCoordinator {try await lifecycle.suspendAccount();try await lifecycle.setAnalyticsEnabled(false)}
+        try await client.vault.replace(nil)
     }
     func accept(_ raw:Data,attempt:AuthAttemptV4) async throws->AccountAuthentication {
         guard raw.count<=65536,let value=try JSONSerialization.jsonObject(with:raw) as? [String:Any],try bytes(value)==raw,

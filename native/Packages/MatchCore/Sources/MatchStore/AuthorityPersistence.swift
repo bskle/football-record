@@ -54,10 +54,10 @@ extension MatchStore {
         if fault == .afterCommit {throw StoreError.responseLost};return result
     }
     func prepareControlLockedV4(_ intent:ControlIntentV1)throws->ControlIntentReceiptV4 {
-        let b=try activeBindingV4()
         if let prior=try controlV4(intent.requestID) { guard prior==intent else { throw AuthorityError.conflict };return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest) }
+        let b=try activeBindingV4()
         if let epoch=intent.fields.activationEpoch { guard epoch==b.activationEpoch else { throw AuthorityError.identityChanged } }
-        if intent.operation == .acquire { guard b.role != .waiting else { throw AuthorityError.identityChanged } }
+        if intent.operation == .acquire { guard try !migrationBlocksBusinessV4(),b.role != .waiting else { throw AuthorityError.identityChanged } }
         let raw=try Canonical.data(intent)
         try db.execute("INSERT INTO control_intents_v4 VALUES (?,?,?,?)",[.text(intent.requestID),.text(intent.matchID),.blob(raw),.text(Canonical.hash(raw))]);try fail(.beforeCommit)
         return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest)

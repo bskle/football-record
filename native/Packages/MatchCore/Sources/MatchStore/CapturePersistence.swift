@@ -37,6 +37,7 @@ extension MatchStore {
             return try verifiedCommandV2(commandID: request.commandID, row: row).receipt
         }
         guard try db.rows("SELECT command_id FROM commands WHERE command_id=?", [.text(request.commandID)]).isEmpty else { throw StoreError.commandConflict }
+        try validateAccountBusinessWriteV4()
         try validateV2Coverage(request)
         let existing = try descriptorAndGeneration(matchID)
         guard (existing?.1 ?? 0) == request.expectedGeneration else { throw StoreError.staleGeneration }

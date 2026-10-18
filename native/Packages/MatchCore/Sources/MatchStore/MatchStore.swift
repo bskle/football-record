@@ -145,6 +145,7 @@ public actor MatchStore {
                           packet.body.events == request.events else { throw StoreError.invalidPacket }
                 }
                 guard request.events.isEmpty || !request.packets.isEmpty else { throw StoreError.invalidRequest }
+                try validateAccountBusinessWriteV4()
                 let existing = try descriptorAndGeneration(request.descriptor.matchID)
                 guard (existing?.1 ?? 0) == request.expectedGeneration else { throw StoreError.staleGeneration }
                 // Originating writer must persist its stable intent before asking the network for a

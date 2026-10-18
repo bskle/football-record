@@ -10,6 +10,7 @@ extension MatchStore {
         guard let trust=authorityTrust else {throw AuthorityError.unavailable}
         return try VerifiedAuthorityReceiptV1.verify(value.raw,expected:AuthorityExpectedIntent(value.intent,accountID:value.accountID,epoch:value.epoch),trust:trust)
     }
+    public func lifecycleControlIntentV4(requestID:String)throws->ControlIntentV1? {try controlV4(requestID)}
     public func lifecycleReceiptV4(requestID:String)throws->Data? {
         guard let value=try readLifecycleV4(StoredLifecycleControlV4.self,"lifecycle-result:"+requestID) else {return nil}
         return try verifyLifecycleV4(value).raw
@@ -38,7 +39,7 @@ extension MatchStore {
                 for id in [m.oldPhoneID,m.checkpointID,m.contentCommitment] {try AuthorityWire.identifier(id,empty:true)}
                 if let prior=try latestMigrationV4() {guard prior.migrationID==m.migrationID,prior.newPhoneID==m.newPhoneID,prior.oldActivationEpoch==m.oldActivationEpoch,prior.requestedAt==m.requestedAt,prior.eligibleAt==m.eligibleAt,prior.state != "activated" || m.state=="activated" else {throw AuthorityError.conflict}}
                 let expected:AuthorityResult=switch intent.operation {case .prepareMigration:.waitingMigration;case .checkpointMigration:.checkpointAccepted;case .requestLostMigration:.waitingPeriod;default:.activated}
-                guard r.result==expected,(intent.operation != .prepareMigration || m.oldPhoneID==b.deviceID),(intent.operation != .activateMigration && intent.operation != .forceMigration) || (m.newPhoneID==b.deviceID && epoch>m.oldActivationEpoch) else {throw AuthorityError.intentMismatch}
+                guard r.result==expected,(intent.operation != .prepareMigration || m.oldPhoneID==b.deviceID || (m.newPhoneID==b.deviceID && b.role == .waiting)),(intent.operation != .activateMigration && intent.operation != .forceMigration) || (m.newPhoneID==b.deviceID && epoch>m.oldActivationEpoch) else {throw AuthorityError.intentMismatch}
                 if intent.fields.checkpointID != nil {guard m.checkpointID==intent.fields.checkpointID,m.contentCommitment==intent.fields.contentCommitment else {throw AuthorityError.intentMismatch}}
                 try writeV4(StoredLifecycleControlV4(intent:intent,accountID:b.accountID,epoch:epoch,raw:receipt.raw),table:"lifecycle_steps_v4",id:"migration-latest")
                 if r.result == .checkpointAccepted || r.result == .activated {try writeV4(AccountBindingV4(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,deviceID:b.deviceID,activationEpoch:b.activationEpoch,role:b.role,environment:b.environment,suspended:true),table:"account_binding_v4",id:"current")}

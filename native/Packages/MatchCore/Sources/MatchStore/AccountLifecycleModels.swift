@@ -10,8 +10,11 @@ public struct AuthAttemptV4:Codable,Sendable,Equatable {
     private enum CodingKeys:String,CodingKey {case requestID,deviceID,publicKey,keyID,cloudSpaceID,challengeID,requestDigest,environment}
     public init(from decoder:any Decoder)throws {let c=try decoder.container(keyedBy:CodingKeys.self);try self.init(requestID:c.decode(String.self,forKey:.requestID),deviceID:c.decode(String.self,forKey:.deviceID),publicKey:c.decode(String.self,forKey:.publicKey),cloudSpaceID:c.decode(String.self,forKey:.cloudSpaceID),challengeID:c.decode(String.self,forKey:.challengeID),requestDigest:c.decode(String.self,forKey:.requestDigest),environment:c.decode(AuthorityEnvironment.self,forKey:.environment));guard keyID == (try c.decode(String.self,forKey:.keyID)) else {throw AuthorityError.invalidWire}}
 }
+public enum AuthResolutionV4:String,Codable,Sendable {case knownRevoked,knownExpired,knownNotFound}
 public protocol AccountLifecycleRepository:Sendable {
     func syncRepositoryIdentity() async->SyncRepositoryIdentity
+    func pendingAuthAttemptsV4() async throws->[AuthAttemptV4]
+    func resolveAuthAttemptV4(requestID:String,resolution:AuthResolutionV4) async throws
     func authAttemptV4(requestID:String) async throws->AuthAttemptV4?
     func saveAuthAttemptV4(_ attempt:AuthAttemptV4) async throws
     func acceptAuthenticationV4(attempt:AuthAttemptV4,binding:AccountBindingV4,receipt:VerifiedAuthorityReceiptV1) async throws
@@ -59,6 +62,7 @@ public struct AnalyticsEventV4:Codable,Sendable,Equatable {
 }
 public protocol LifecycleStateRepository:Sendable {
     func syncRepositoryIdentity() async->SyncRepositoryIdentity
+    func lifecycleControlIntentV4(requestID:String) async throws->ControlIntentV1?
     func lifecycleReceiptV4(requestID:String) async throws->Data?
     func acceptLifecycleResultV4(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1) async throws
     func latestMigrationV4() async throws->AuthorityMigrationV1?

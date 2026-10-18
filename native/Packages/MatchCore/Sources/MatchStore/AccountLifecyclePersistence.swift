@@ -1,5 +1,11 @@
 import Foundation
 extension MatchStore {
+    public func pendingAuthAttemptsV4()throws->[AuthAttemptV4] {
+        try db.rows("SELECT a.payload,a.checksum FROM lifecycle_steps_v4 a WHERE a.id LIKE 'auth-attempt:%' AND NOT EXISTS(SELECT 1 FROM lifecycle_steps_v4 r WHERE r.id='auth-receipt:'||substr(a.id,14) OR r.id='auth-resolved:'||substr(a.id,14)) ORDER BY a.rowid").map {try checkedV4(AuthAttemptV4.self,row:$0,table:"lifecycle_steps_v4",key:"auth-pending")}
+    }
+    public func resolveAuthAttemptV4(requestID:String,resolution:AuthResolutionV4)throws {
+        try db.transaction {guard try authAttemptV4(requestID:requestID) != nil else {throw AuthorityError.intentMismatch};try writeV4(resolution,table:"lifecycle_steps_v4",id:"auth-resolved:"+requestID);try fail(.beforeCommit)}
+    }
     public func authAttemptV4(requestID:String)throws->AuthAttemptV4? {
         guard let row=try db.rows("SELECT payload,checksum FROM lifecycle_steps_v4 WHERE id=?",[.text("auth-attempt:"+requestID)]).first else {return nil}
         return try checkedV4(AuthAttemptV4.self,row:row,table:"lifecycle_steps_v4",key:requestID)

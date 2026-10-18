@@ -7,9 +7,12 @@ import MatchSession
 actor FixtureAppleSignIn:AppleSignInDriver {
     let fixture:NodeAuthorityFixture,subject:String
     var lastToken:String?
+    var failBeforeCommit=false
+    func failNextAuthCommit(){failBeforeCommit=true}
     init(_ fixture:NodeAuthorityFixture,subject:String="new-auth-subject"){self.fixture=fixture;self.subject=subject}
     func authorize(nonceSHA256:String) async throws->AppleAuthorization {
         let response=try fixture.command(["op":"apple","nonce":nonceSHA256,"subject":subject]);let token=try XCTUnwrap(response["identityToken"] as? String);lastToken=token
+        if failBeforeCommit {failBeforeCommit=false;_=try fixture.command(["op":"databaseFault","value":true])}
         return AppleAuthorization(identityToken:token,authorizationCode:"client-transient-code-never-durable")
     }
 }
@@ -51,4 +54,15 @@ final class AuthenticationRecoveryTests:XCTestCase,@unchecked Sendable {
         let wrong=try await harness(f,root:h.root)
         do {_=try await wrong.service.recover(authRequestID:"lost-auth");XCTFail()}catch{}
     }
+    func testUnknownUncommittedAuthDoesNotSilentlyCreateNewRequestOrConsumeAnotherChallenge() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()};let h=try await harness(f)
+        await h.apple.failNextAuthCommit()
+        do {_=try await h.service.signIn(requestID:"uncommitted-auth",challengeRequestID:"uncommitted-challenge");XCTFail()}catch{}
+        _=try f.command(["op":"databaseFault","value":false])
+        do {_=try await h.service.recover(authRequestID:"uncommitted-auth")}catch{}
+        do {_=try await h.service.signIn(requestID:"must-not-switch",challengeRequestID:"must-not-consume");XCTFail("unknown original result requires reconciliation before a new auth ID")}catch{}
+        let rows=try XCTUnwrap(f.command(["op":"inspect","sql":"SELECT auth_request_id FROM auth_records WHERE auth_request_id='must-not-switch'"])["rows"] as? [[String:Any]])
+        XCTAssertTrue(rows.isEmpty)
+    }
+
 }
