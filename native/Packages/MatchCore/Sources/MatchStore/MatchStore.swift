@@ -5,11 +5,17 @@ import MatchCore
 public actor MatchStore {
     let db: SQLite
     let fault: StoreFault?
+    let cloudSavePolicy: CloudSaveProofPolicy
+    let authorityTrust: AuthorityTrustConfiguration?
     let syncEnvironment: PeerEnvironment
-    public init(url: URL, syncEnvironment: PeerEnvironment = .production) throws {
+    public init(url: URL, syncEnvironment: PeerEnvironment = .production, authorityTrust: AuthorityTrustConfiguration? = nil, cloudSavePolicy: CloudSaveProofPolicy = .unavailable) throws {
+        self.cloudSavePolicy = cloudSavePolicy
+        self.authorityTrust = authorityTrust
         try syncEnvironment.validate(); db = try SQLite(url: url, fault: nil); fault = nil; self.syncEnvironment = syncEnvironment
     }
-    init(url: URL, fault: StoreFault, syncEnvironment: PeerEnvironment = .production) throws {
+    init(url: URL, fault: StoreFault, syncEnvironment: PeerEnvironment = .production, authorityTrust: AuthorityTrustConfiguration? = nil, cloudSavePolicy: CloudSaveProofPolicy = .unavailable) throws {
+        self.cloudSavePolicy = cloudSavePolicy
+        self.authorityTrust = authorityTrust
         try syncEnvironment.validate(); db = try SQLite(url: url, fault: fault); self.fault = fault; self.syncEnvironment = syncEnvironment
     }
     public func close() throws { try db.close() }
@@ -24,6 +30,7 @@ public actor MatchStore {
     public func saveCompletionEvidence(_ evidence: TrustedCompletionEvidence, expectedGeneration: Int64, now: Date) throws {
         try preservingDiagnostics(matchID: evidence.matchID) {
             try db.transaction {
+                guard try currentBindingV4() == nil else { throw StoreError.trustUnavailable }
                 let snapshot = try loadSnapshot(matchID: evidence.matchID)
                 guard snapshot.generation == expectedGeneration else { throw StoreError.staleGeneration }
                 guard try loadCaptureRevisions(descriptor: snapshot.descriptor).isEmpty else { throw StoreError.staleCaptureEvidence }
@@ -138,6 +145,7 @@ public actor MatchStore {
                           packet.body.events == request.events else { throw StoreError.invalidPacket }
                 }
                 guard request.events.isEmpty || !request.packets.isEmpty else { throw StoreError.invalidRequest }
+                try validateAccountBusinessWriteV4()
                 let existing = try descriptorAndGeneration(request.descriptor.matchID)
                 guard (existing?.1 ?? 0) == request.expectedGeneration else { throw StoreError.staleGeneration }
                 // Originating writer must persist its stable intent before asking the network for a
@@ -188,7 +196,7 @@ public actor MatchStore {
             try decode(TrustedCompletionEvidence.self, $0[0], table: "completion", key: matchID)
         }
         return StoreSnapshot(descriptor: descriptor, generation: generation, events: events,
-            diagnostics: try diagnostics(matchID: matchID), completionEvidence: try filteredCompletionEvidence(descriptor: descriptor, legacy: evidence))
+            diagnostics: try diagnostics(matchID: matchID), completionEvidence: try filteredCompletionEvidence(descriptor: descriptor, events: events, legacy: evidence))
     }
 
     public func diagnostics(matchID: String) throws -> [StoreDiagnostic] {

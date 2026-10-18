@@ -19,6 +19,7 @@ public actor MatchSession {
   var captureWakeups = Set<String>()
   var recoveryRequested = Set<String>()
   var recoveredTokens = Set<String>()
+  var authorityTerminalMatches = Set<String>()
   struct Subscriber {
     let continuation: AsyncStream<SessionSnapshot>.Continuation
     var generation: Int64 = -1
@@ -39,8 +40,9 @@ public actor MatchSession {
     self.workout = workout
     self.environment = environment
   }
-  func validateEnvironment() async throws {
+  func validateEnvironment(allowSuspendedRead:Bool=false) async throws {
     let namespace = await store.databaseNamespace()
+    if !allowSuspendedRead, let authority = store as? any AuthorityRepository, let binding = try await authority.accountBindingV4(), binding.suspended { throw AuthorityError.identityChanged }
     guard SQLiteSessionRepository.isCanonicalNamespace(namespace) else {
       throw SessionError.developmentIsolationRequired
     }
@@ -92,7 +94,7 @@ public actor MatchSession {
     else { throw SessionError.blockedDiagnostics }
   }
   func terminal(_ s: StoreSnapshotV2) -> Bool {
-    s.business.events.contains { $0.type == .matchEnded || $0.type == .matchTerminated }
+    authorityTerminalMatches.contains(s.business.descriptor.matchID) || s.business.events.contains { $0.type == .matchEnded || $0.type == .matchTerminated }
   }
   func captureAction(_ action: SessionAction, snapshot: StoreSnapshotV2) -> CaptureAction? {
     // No physical instance exists while its start is still pending. Its first dispatch
@@ -200,6 +202,7 @@ public actor MatchSession {
       return SessionReceipt(receipt: receipt, snapshot: snapshot)
     }
     let s = try await store.snapshotV2(matchID: request.matchID)
+    try await updateAuthorityFence(s)
     try requireWritable(s, device: device)
     guard s.business.generation == request.expectedGeneration else {
       throw StoreError.staleGeneration
@@ -260,9 +263,10 @@ public actor MatchSession {
     guard let intent = request.startIntent, intent.recordingDeviceID == device,
       case .start(let starter) = request.action
     else { throw SessionError.wrongRecordingDevice }
+    let managed = try await authorityManaged()
     await acquire(request.matchID)
     do {
-      if let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
+      if !managed, let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
         try validateSaved(saved.request, for: request, device: device)
         let receipt = try await store.commitV2(saved.request)
         let snapshot = try await snapshot(matchID: request.matchID)
@@ -278,8 +282,10 @@ public actor MatchSession {
         guard !other.business.diagnostics.contains(where: { $0.severity == .blocking }) else {
           throw SessionError.blockedDiagnostics
         }
+        try await updateAuthorityFence(other)
+        let released = try await authorityReleased(match)
         if match != request.matchID
-          && (!terminal(other) || other.business.descriptor.backendLockState != .releasedConfirmed)
+          && (!terminal(other) || (other.business.descriptor.backendLockState != .releasedConfirmed && !released))
         {
           throw SessionError.multipleCandidates
         }
@@ -308,6 +314,12 @@ public actor MatchSession {
     }
     await acquire(request.matchID)
     defer { release(request.matchID) }
+    try await requireAuthorityStart(intent)
+    if managed {
+      let fresh = try await store.snapshotV2(matchID: request.matchID)
+      if terminal(fresh) { throw SessionError.terminalMatch }
+      if case .development = environment, permit != DevelopmentStartFixture.permit(for: intent) { throw SessionError.developmentIsolationRequired }
+    }
     if let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
       try validateSaved(saved.request, for: request, device: device)
       let receipt = try await store.commitV2(saved.request)

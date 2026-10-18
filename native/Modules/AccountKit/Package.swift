@@ -1,0 +1,3 @@
+// swift-tools-version: 6.0
+import PackageDescription
+let package=Package(name:"AccountKit",platforms:[.iOS(.v17),.watchOS(.v10),.macOS(.v14)],products:[.library(name:"AccountKit",targets:["AccountKit"])],dependencies:[.package(path:"../../Packages/MatchCore"),.package(path:"../CloudSync")],targets:[.target(name:"AccountKit",dependencies:[.product(name:"MatchCore",package:"MatchCore"),.product(name:"MatchStore",package:"MatchCore"),.product(name:"MatchSession",package:"MatchCore"),.product(name:"CloudSync",package:"CloudSync")]),.testTarget(name:"AccountKitTests",dependencies:["AccountKit"],resources:[.copy("Support")])])

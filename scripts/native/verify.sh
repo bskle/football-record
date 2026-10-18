@@ -9,8 +9,18 @@ package="$repo_root/native/Packages/MatchCore"
 mkdir -p "$log_dir"
 
 printf 'Native verification logs: %s\n' "$log_dir"
+node_binary="${NATIVE_NODE_BINARY:-node}"
+if [[ "$node_binary" == */* ]]; then export PATH="$(dirname -- "$node_binary"):$PATH"; fi
+"$node_binary" --test "$repo_root"/backend/test/*.test.mjs \
+    2>&1 | tee "$log_dir/authority-node-test.log"
 swift test --package-path "$package" --scratch-path "$build_root/SwiftPM" \
     2>&1 | tee "$log_dir/swift-test.log"
+cloud="$repo_root/native/Modules/CloudSync"
+account="$repo_root/native/Modules/AccountKit"
+swift test --package-path "$cloud" --scratch-path "$build_root/CloudHost" \
+    2>&1 | tee "$log_dir/cloud-test.log"
+swift test --package-path "$account" --scratch-path "$build_root/AccountHost" \
+    2>&1 | tee "$log_dir/account-test.log"
 # Compile service products explicitly for minimum SDKs and run shared presentation regressions.
 xcrun swift build --package-path "$package" --target MatchStore \
     --triple arm64-apple-ios17.0-simulator --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
@@ -36,6 +46,22 @@ xcrun swift build --package-path "$package" --target MatchSync \
     --triple arm64-apple-watchos10.0-simulator --sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" \
     --scratch-path "$build_root/MatchSync-Watch" \
     2>&1 | tee "$log_dir/sync-watch-build.log"
+xcrun swift build --package-path "$cloud" --target CloudSync \
+    --triple arm64-apple-ios17.0-simulator --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+    --scratch-path "$build_root/Cloud-iOS" \
+    2>&1 | tee "$log_dir/cloud-ios-build.log"
+xcrun swift build --package-path "$cloud" --target CloudSync \
+    --triple arm64-apple-watchos10.0-simulator --sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" \
+    --scratch-path "$build_root/Cloud-Watch" \
+    2>&1 | tee "$log_dir/cloud-watch-build.log"
+xcrun swift build --package-path "$account" --target AccountKit \
+    --triple arm64-apple-ios17.0-simulator --sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" \
+    --scratch-path "$build_root/Account-iOS" \
+    2>&1 | tee "$log_dir/account-ios-build.log"
+xcrun swift build --package-path "$account" --target AccountKit \
+    --triple arm64-apple-watchos10.0-simulator --sdk "$(xcrun --sdk watchsimulator --show-sdk-path)" \
+    --scratch-path "$build_root/Account-Watch" \
+    2>&1 | tee "$log_dir/account-watch-build.log"
 presentation="$repo_root/native/Modules/MatchPresentation"
 swift test --package-path "$presentation" --scratch-path "$build_root/PresentationHost" \
     2>&1 | tee "$log_dir/presentation-test.log"
