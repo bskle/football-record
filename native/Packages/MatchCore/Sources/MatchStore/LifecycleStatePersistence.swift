@@ -72,9 +72,16 @@ extension MatchStore {
     }
     public func deletionSagasV4()throws->[DeletionSagaV4] {try db.rows("SELECT payload,checksum FROM lifecycle_steps_v4 WHERE id LIKE 'deletion:%' ORDER BY rowid").map {try checkedV4(DeletionSagaV4.self,row:$0,table:"lifecycle_steps_v4",key:"deletion")}}
     public func deletionSagaV4(requestID:String)throws->DeletionSagaV4? {try readLifecycleV4(DeletionSagaV4.self,"deletion:"+requestID)}
+    func validateDeletionScopeLockedV4(_ saga:DeletionSagaV4)throws {
+        guard let original=saga.originalScope,let b=try currentBindingV4(),
+              Array(saga.accountID.utf8)==Array(original.accountID.utf8),saga.activationEpoch==original.activationEpoch,
+              Array(b.accountID.utf8)==Array(original.accountID.utf8),Array(b.cloudSpaceID.utf8)==Array(original.cloudSpaceID.utf8),b.activationEpoch==original.activationEpoch else {throw AuthorityError.identityChanged}
+        _=try CloudScopeV1(accountID:original.accountID,cloudSpaceID:original.cloudSpaceID,zoneID:original.zoneID,activationEpoch:original.activationEpoch)
+    }
     public func createDeletionSagaV4(_ saga:DeletionSagaV4)throws {
         try db.transaction {
-            if let prior=try deletionSagaV4(requestID:saga.intent.requestID) {guard prior.intent==saga.intent,prior.accountID==saga.accountID,prior.recoveryCapability==saga.recoveryCapability,prior.cloudChoice==saga.cloudChoice,prior.localChoice==saga.localChoice,prior.healthChoice==saga.healthChoice else {throw AuthorityError.conflict};return}
+            try validateDeletionScopeLockedV4(saga)
+            if let prior=try deletionSagaV4(requestID:saga.intent.requestID) {guard prior.originalScope==saga.originalScope,prior.intent==saga.intent,prior.accountID==saga.accountID,prior.recoveryCapability==saga.recoveryCapability,prior.cloudChoice==saga.cloudChoice,prior.localChoice==saga.localChoice,prior.healthChoice==saga.healthChoice else {throw AuthorityError.conflict};return}
             let b=try activeBindingV4();guard b.role == .phone,b.accountID==saga.accountID,b.activationEpoch==saga.activationEpoch,saga.revision==0,!saga.backendDeleted,try !migrationBlocksBusinessV4() else {throw AuthorityError.identityChanged}
             for id in try matchIDs() {let state=try authorityStateV4(matchID:id,now:Date());guard ![.held,.terminationPending].contains(state.status) else {throw AuthorityError.terminalLock}}
             _=try prepareControlLockedV4(saga.intent)
@@ -82,7 +89,8 @@ extension MatchStore {
         };if fault == .afterCommit {throw StoreError.responseLost}
     }
     func writeDeletionV4(_ saga:DeletionSagaV4,expectedRevision:Int64)throws {
-        guard let prior=try deletionSagaV4(requestID:saga.intent.requestID),prior.revision==expectedRevision,expectedRevision>=0,expectedRevision<Int64.max,saga.revision==expectedRevision+1,
+        try validateDeletionScopeLockedV4(saga)
+        guard let prior=try deletionSagaV4(requestID:saga.intent.requestID),prior.originalScope==saga.originalScope,prior.revision==expectedRevision,expectedRevision>=0,expectedRevision<Int64.max,saga.revision==expectedRevision+1,
               prior.intent==saga.intent,prior.accountID==saga.accountID,prior.activationEpoch==saga.activationEpoch,prior.recoveryCapability==saga.recoveryCapability,
               prior.cloudChoice==saga.cloudChoice,prior.localChoice==saga.localChoice,prior.healthChoice==saga.healthChoice,prior.healthConfirmed==saga.healthConfirmed,
               !prior.backendDeleted || saga.backendDeleted,prior.backendReceipt==nil || prior.backendReceipt==saga.backendReceipt else {throw StoreError.staleGeneration}
@@ -97,6 +105,7 @@ extension MatchStore {
     public func acceptDeletionV4(requestID:String,receipt:VerifiedAuthorityReceiptV1,expectedRevision:Int64)throws->DeletionSagaV4 {
         let result=try db.transaction {
             guard var saga=try deletionSagaV4(requestID:requestID),let trust=authorityTrust,saga.revision==expectedRevision,expectedRevision<Int64.max else {throw StoreError.staleGeneration}
+            try validateDeletionScopeLockedV4(saga)
             let verified=try VerifiedAuthorityReceiptV1.verify(receipt.raw,expected:AuthorityExpectedIntent(saga.intent,accountID:saga.accountID,epoch:saga.activationEpoch),trust:trust)
             guard verified.body.result == .deleted,verified.body.deletion?.backend=="backendDeleted",verified.body.deletion?.apple=="revoked" else {throw AuthorityError.intentMismatch}
             if saga.backendDeleted {guard saga.backendReceipt==receipt.raw else {throw AuthorityError.conflict};return saga}
@@ -111,6 +120,7 @@ extension MatchStore {
     public func eraseLocalBusinessV4(requestID:String,expectedRevision:Int64)throws->DeletionSagaV4 {
         let result=try db.transaction {
             guard var saga=try deletionSagaV4(requestID:requestID),saga.revision==expectedRevision,saga.backendDeleted,saga.backendReceipt != nil,saga.localChoice == .delete,expectedRevision<Int64.max else {throw AuthorityError.intentMismatch}
+            try validateDeletionScopeLockedV4(saga)
             for id in try matchIDs() {if let descriptor=try descriptorAndGeneration(id)?.0 {guard try loadOperations(matchID:id,descriptor:descriptor).allSatisfy({$0.state != .pending && $0.state != .needsReconciliation}) else {throw AuthorityError.unavailable}}}
             let tables=["matches","events","commands","outbox","inbound","diagnostics","completion","capture_identities","capture_revisions","capture_operations","capture_operation_history","business_outbox","commands_v2","completion_confirmations","completion_v2","sync_delivery_v3","sync_fragments_v3","sync_context_v3","sync_registry_v3","sync_routes_v3","sync_sequences_v3","sync_inbox_v3","sync_acknowledgements_v3","sync_ack_controls_v3","sync_receive_progress_v3","cloud_applied_batches_v4","cloud_checkpoints_v4","cloud_records_v4","cloud_history_v4","cloud_cursors_v4","cloud_deletions_v4","peer_contexts_v4","peer_inbox_v4","peer_grants_v4"]
             for table in tables {try db.execute("DELETE FROM "+table)}

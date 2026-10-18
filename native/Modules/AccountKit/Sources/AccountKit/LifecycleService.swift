@@ -8,7 +8,7 @@ public protocol CloudAccountDeletionDriver:Sendable {func deletePrivateZone(scop
 public struct LocalTransportDeletionRequest:Sendable {
     public let scope:CloudScope
     public let requestID,requestDigest:String
-    public init(scope:CloudScope,saga:DeletionSagaV4)throws {guard saga.backendDeleted,saga.localChoice == .delete,saga.accountID==scope.accountID,saga.activationEpoch==scope.activationEpoch else {throw AuthorityError.intentMismatch};self.scope=scope;requestID=saga.intent.requestID;requestDigest=saga.intent.digest}
+    public init(scope:CloudScope,saga:DeletionSagaV4)throws {guard saga.backendDeleted,saga.localChoice == .delete,saga.accountID==scope.accountID,saga.activationEpoch==scope.activationEpoch,saga.originalScope == (try CloudSessionBridge.coreScope(scope)) else {throw AuthorityError.intentMismatch};self.scope=scope;requestID=saga.intent.requestID;requestDigest=saga.intent.digest}
 }
 public protocol LocalTransportDeletionDriver:Sendable {func purgeBusinessCopies(_ request:LocalTransportDeletionRequest) async throws}
 public struct UnavailableLocalTransportDeletionDriver:LocalTransportDeletionDriver {public init(){};public func purgeBusinessCopies(_ request:LocalTransportDeletionRequest) async throws {throw AuthorityError.unavailable}}
@@ -40,13 +40,19 @@ public actor LifecycleService {
         if let e=error as? AuthorityHTTPFailure {switch e.code {case "reauthenticationRequired":return .reauthenticationRequired;case "waitingPeriod":return .waitingPeriod;case "activationMismatch","cloudIdentityMismatch":return .accountChanged;case "migrationBlocked","activeMatchExists":return .blocked;case "unavailable":return .unavailable;default:return .unknown}}
         if error is URLError || (error as? AuthorityError) == .unavailable {return .unavailable};return .unknown
     }
+    func validateDeletionScope(_ saga:DeletionSagaV4) async throws {
+        let configured=try CloudSessionBridge.coreScope(scope)
+        guard let original=saga.originalScope,original==configured,saga.activationEpoch==original.activationEpoch,
+              let b=try await repository.accountBindingV4(),b.environment==client.trust.environment,
+              Array(b.accountID.utf8)==Array(original.accountID.utf8),Array(b.cloudSpaceID.utf8)==Array(original.cloudSpaceID.utf8),b.activationEpoch==original.activationEpoch else {throw AuthorityError.identityChanged}
+    }
     public func requestDeletion(requestID:String,reauthenticationID:String,cloud:ClientDeletionChoiceV4,local:ClientDeletionChoiceV4,health:ClientDeletionChoiceV4,healthConfirmed:Bool) async throws->DeletionSagaV4 {
         try await facade()
-        if let prior=try await repository.deletionSagaV4(requestID:requestID) {guard prior.accountID==scope.accountID,prior.cloudChoice==cloud,prior.localChoice==local,prior.healthChoice==health,prior.healthConfirmed==healthConfirmed else {throw AuthorityError.conflict};return prior}
+        if let prior=try await repository.deletionSagaV4(requestID:requestID) {try await validateDeletionScope(prior);guard prior.accountID==scope.accountID,prior.cloudChoice==cloud,prior.localChoice==local,prior.healthChoice==health,prior.healthConfirmed==healthConfirmed else {throw AuthorityError.conflict};return prior}
         let b=try await binding();guard b.role == .phone else {throw AuthorityError.identityChanged}
         var random=SystemRandomNumberGenerator();let cap=AuthorityWire.base64URL(Data((0..<32).map {_ in UInt8.random(in:0...255,using:&random)}))
         var f=AuthorityFields();f.reauthenticationID=reauthenticationID;f.recoveryCapabilityDigest=AuthorityWire.hash(Data(cap.utf8))
-        let saga=try DeletionSagaV4(intent:ControlIntentV1(requestID:requestID,operation:.deleteAccount,fields:f),accountID:b.accountID,activationEpoch:b.activationEpoch,recoveryCapability:cap,cloudChoice:cloud,localChoice:local,healthChoice:health,healthConfirmed:healthConfirmed)
+        let saga=try DeletionSagaV4(intent:ControlIntentV1(requestID:requestID,operation:.deleteAccount,fields:f),accountID:b.accountID,activationEpoch:b.activationEpoch,recoveryCapability:cap,cloudChoice:cloud,localChoice:local,healthChoice:health,healthConfirmed:healthConfirmed,originalScope:CloudSessionBridge.coreScope(scope))
         try await coordinator.createDeletionSaga(saga)
         try await coordinator.setAnalyticsEnabled(false)
         try await fenceTransport()
@@ -80,6 +86,7 @@ public actor LifecycleService {
     }
     public func resumeDeletion(requestID:String) async throws->DeletionSagaV4 {
         try await facade();guard var saga=try await repository.deletionSagaV4(requestID:requestID),saga.accountID==scope.accountID else {throw AuthorityError.intentMismatch}
+        try await validateDeletionScope(saga)
         if !saga.backendDeleted {
             do {
                 try await ControlQueueSupport.begin(saga.intent,coordinator:coordinator,at:client.now())

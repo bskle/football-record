@@ -14,7 +14,7 @@ final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
         let raw=try JSONSerialization.data(withJSONObject:["body":body,"signature":AuthorityWire.base64URL(signature)],options:[.sortedKeys,.withoutEscapingSlashes])
         return try VerifiedAuthorityReceiptV1.verify(raw,expected:AuthorityExpectedIntent(requestID:requestID,digest:digest,operation:operation,accountID:c.binding.accountID,epoch:1),trust:c.trust)
     }
-    func saga(_ c:Context)throws->DeletionSagaV4 {let cap=AuthorityWire.base64URL(Data(repeating:41,count:32));var fields=AuthorityFields();fields.reauthenticationID="fresh-reauth";fields.recoveryCapabilityDigest=AuthorityWire.hash(Data(cap.utf8));return try DeletionSagaV4(intent:ControlIntentV1(requestID:"delete",operation:.deleteAccount,fields:fields),accountID:c.binding.accountID,activationEpoch:1,recoveryCapability:cap,cloudChoice:.delete,localChoice:.delete,healthChoice:.delete,healthConfirmed:true)}
+    func saga(_ c:Context)throws->DeletionSagaV4 {let cap=AuthorityWire.base64URL(Data(repeating:41,count:32));var fields=AuthorityFields();fields.reauthenticationID="fresh-reauth";fields.recoveryCapabilityDigest=AuthorityWire.hash(Data(cap.utf8));return try DeletionSagaV4(intent:ControlIntentV1(requestID:"delete",operation:.deleteAccount,fields:fields),accountID:c.binding.accountID,activationEpoch:1,recoveryCapability:cap,cloudChoice:.delete,localChoice:.delete,healthChoice:.delete,healthConfirmed:true,originalScope:CloudScopeV1(accountID:c.binding.accountID,cloudSpaceID:c.binding.cloudSpaceID,zoneID:"matches",activationEpoch:1))}
     func testAnalyticsDefaultsOffDiscardsOnlyOptionalQueueAndPersistsAcrossReopen() async throws {
         let c=try context(),s=try store(c);try await s.bindAccountV4(c.binding)
         let event=try AnalyticsEventV4(requestID:"metric",metric:.activeDay,appVersion:"1.0",osFamily:"iOS",osMajor:17,qualification:"free")
@@ -78,6 +78,27 @@ final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
         try db.execute("INSERT INTO lifecycle_steps_v4 VALUES (?,?,?)",[.text("normal-intent:business-witness"),.blob(raw),.text(Canonical.hash(raw))]);try db.close()
         let reopened=try store(c);_=try await reopened.eraseLocalBusinessV4(requestID:"delete",expectedRevision:backend.revision);try await reopened.close()
         let inspect=try SQLite(url:c.url,fault:nil);XCTAssertEqual(try inspect.scalar("SELECT count(*) FROM lifecycle_steps_v4 WHERE id LIKE 'normal-intent:%'").number,0);XCTAssertEqual(try inspect.scalar("SELECT count(*) FROM lifecycle_steps_v4 WHERE id='deletion:delete'").number,1);try inspect.close()
+    }
+
+    func testDeletionOriginalScopeIsAtomicImmutableAndMissingLegacyScopeCannotClaimFinished() async throws {
+        for fault in [StoreFault.beforeCommit,.afterReceipt,.afterCommit] {
+            let c=try context(),seed=try store(c),original=try saga(c);try await seed.bindAccountV4(c.binding);try await seed.close()
+            let failing=try store(c,fault:fault)
+            do {try await failing.createDeletionSagaV4(original);XCTFail()}catch{};try await failing.close()
+            let reopened=try store(c),saved=try await reopened.deletionSagaV4(requestID:"delete")
+            XCTAssertEqual(saved != nil,fault == .afterCommit)
+            try await reopened.createDeletionSagaV4(original)
+            var object=try XCTUnwrap(JSONSerialization.jsonObject(with:Canonical.data(original)) as? [String:Any]);object["originalScope"]=nil
+            var missing=try JSONDecoder().decode(DeletionSagaV4.self,from:JSONSerialization.data(withJSONObject:object))
+            missing.backendDeleted=true;missing.cloudProgress = .completed;missing.localProgress = .completed;missing.localTransportProgress = .completed;missing.healthProgress = .completed
+            XCTAssertFalse(missing.finished,"an unknown original erasure scope is not a completed deletion")
+            do {try await reopened.createDeletionSagaV4(missing);XCTFail()}catch{}
+            object["originalScope"]=["accountID":c.binding.accountID,"cloudSpaceID":c.binding.cloudSpaceID,"zoneID":"other-zone","activationEpoch":1]
+            let moved=try JSONDecoder().decode(DeletionSagaV4.self,from:JSONSerialization.data(withJSONObject:object))
+            do {try await reopened.createDeletionSagaV4(moved);XCTFail()}catch{}
+            let retained=try await reopened.deletionSagaV4(requestID:"delete");XCTAssertTrue(retained==original)
+            try await reopened.close()
+        }
     }
 
 }

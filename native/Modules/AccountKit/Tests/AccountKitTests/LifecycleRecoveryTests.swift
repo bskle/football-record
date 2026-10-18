@@ -128,4 +128,33 @@ final class LifecycleRecoveryTests:XCTestCase,@unchecked Sendable {
         await gateway.releaseFinish();try? await waitForCapture(h.repo,matchID:start.matchID);try await ledger.close()
     }
 
+    func testDeletionReopenRejectsOtherSpaceOrRawZoneBeforeAnyDriverAndOriginalScopeCanContinue() async throws {
+        for otherSpace in [false,true] {
+            let f=try NodeAuthorityFixture();defer {f.close()};_=try f.command(["op":"revoker"])
+            let h=try await HTTPAuthorityIntegrationTests().harness(f,gateway:TrackingGateway()),start=try await h.session.prepareStart(starter:true)
+            _=try await h.session.execute(start);try await waitForCapture(h.repo,matchID:start.matchID)
+            _=try await AuthorityControlService(client:h.client,repository:h.repo,coordinator:h.session).abnormal(matchID:start.matchID,requestID:"scope-abnormal");try await waitForCapture(h.repo,matchID:start.matchID)
+            let auth=AccountService(client:h.client,repository:h.repo,coordinator:h.session,deviceID:f.metadata.credential.deviceID,cloudSpaceID:"fixture-cloud",apple:FixtureAppleSignIn(f,subject:"fixture-subject-never-stored"));try await auth.admitCurrentIdentity(accountID:f.metadata.credential.accountID)
+            let fresh=try await auth.signIn(requestID:"scope-fresh",challengeRequestID:"scope-fresh-challenge"),reauth=try XCTUnwrap(fresh.reauthenticationID)
+            let original=try CloudScope(accountID:fresh.binding.accountID,cloudSpaceID:"fixture-cloud",zoneID:"zoné",activationEpoch:fresh.binding.activationEpoch),wrong=try CloudScope(accountID:original.accountID,cloudSpaceID:otherSpace ? "other-cloud":original.cloudSpaceID,zoneID:otherSpace ? original.zoneID:"zone\u{301}",activationEpoch:original.activationEpoch)
+            let ledger=try SQLiteCloudLedger(url:h.root.appendingPathComponent("scope-ledger.sqlite")),bridge=CloudSessionBridge(repository:h.repo,client:h.client);try await bridge.attach(h.session)
+            let upload=try await bridge.prepareUpload(matchID:start.matchID,scope:original),other=try CloudUpload(scope:wrong,record:CloudRecord(scope:wrong,payload:upload.record.payload));try await ledger.enqueue(upload);try await ledger.enqueue(other)
+            let service=LifecycleService(client:h.client,repository:h.repo,coordinator:h.session,scope:original,ledger:ledger)
+            _=try await service.requestDeletion(requestID:"scope-delete",reauthenticationID:reauth,cloud:.delete,local:.delete,health:.delete,healthConfirmed:true)
+            let pending=try await service.resumeDeletion(requestID:"scope-delete");XCTAssertTrue(pending.backendDeleted);XCTAssertFalse(pending.finished)
+            try await h.repo.close()
+            let repo=try SQLiteSessionRepository(rootDirectory:h.root,databaseNamespace:"http-session",authorityTrust:h.client.trust,cloudSavePolicy:.development(databaseNamespace:"http-session")),session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:f.metadata.credential.deviceID),clock:FixedClock(date:h.date),ids:UUIDSessionIDFactory(),permits:UnavailableStartPermitProvider(),workout:UnavailableWorkoutGateway(),environment:.development(databaseNamespace:"http-session")),driver=ControlledAccountDeletion(emptyLedger:ledger),eraser=SingleOwnedLedgerEraser(ledger)
+            let wrongService=LifecycleService(client:h.client,repository:repo,coordinator:session,scope:wrong,ledger:ledger,cloudDeletion:driver,healthDeletion:driver,localTransportDeletion:eraser)
+            do {_=try await wrongService.requestDeletion(requestID:"scope-delete",reauthenticationID:reauth,cloud:.delete,local:.delete,health:.delete,healthConfirmed:true);XCTFail("prior request cannot move scope")}catch{}
+            do {_=try LocalTransportDeletionRequest(scope:wrong,saga:pending);XCTFail("transport request must bind original full scope")}catch{}
+            do {_=try await wrongService.resumeDeletion(requestID:"scope-delete");XCTFail("wrong full scope must stop before any driver")}catch{}
+            let cloudCalls=await driver.cloudCalls,healthCalls=await driver.healthCalls,eraseIDs=await eraser.requestIDs;XCTAssertEqual(cloudCalls,0);XCTAssertEqual(healthCalls,0);XCTAssertTrue(eraseIDs.isEmpty)
+            let untouched=try await repo.deletionSagaV4(requestID:"scope-delete"),originalBytes=try await ledger.uploads(scope:original),otherBytes=try await ledger.uploads(scope:wrong),wrongState=try await ledger.scopeState(scope:wrong)
+            XCTAssertTrue(untouched==pending,"scope mismatch must leave the original saga unchanged");XCTAssertEqual(originalBytes.first?.originalBytes,try upload.canonicalBytes());XCTAssertEqual(otherBytes.first?.originalBytes,try other.canonicalBytes());XCTAssertNil(wrongState.issue)
+            let correct=LifecycleService(client:h.client,repository:repo,coordinator:session,scope:original,ledger:ledger,cloudDeletion:driver,healthDeletion:driver,localTransportDeletion:eraser),finished=try await correct.resumeDeletion(requestID:"scope-delete");XCTAssertTrue(finished.finished)
+            let protected=try await ledger.uploads(scope:wrong);XCTAssertEqual(protected.first?.originalBytes,try other.canonicalBytes())
+            try await repo.close();try await ledger.close()
+        }
+    }
+
 }

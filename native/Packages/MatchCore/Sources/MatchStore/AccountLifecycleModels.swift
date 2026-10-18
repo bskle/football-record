@@ -33,6 +33,8 @@ public struct DeletionSagaV4:Codable,Sendable,Equatable {
     public let accountID:String
     public let activationEpoch:Int64
     public let recoveryCapability:String
+    /// Nil only for unknown/older control rows; never infer an erasure scope from current configuration.
+    public let originalScope:CloudScopeV1?
     public let cloudChoice,localChoice,healthChoice:ClientDeletionChoiceV4
     public let healthConfirmed:Bool
     public var backendDeleted:Bool
@@ -45,10 +47,12 @@ public struct DeletionSagaV4:Codable,Sendable,Equatable {
         let values=[localProgress,localTransportProgress]
         if values.contains(.failed) {return .failed};if values.contains(.running) {return .running};if values.contains(.pending) {return .pending};return values.contains(.retained) ? .retained:.completed
     }
-    public var finished:Bool {backendDeleted && [cloudProgress,localProgress,localTransportProgress,healthProgress].allSatisfy {$0 == .completed || $0 == .retained}}
-    public init(intent:ControlIntentV1,accountID:String,activationEpoch:Int64,recoveryCapability:String,cloudChoice:ClientDeletionChoiceV4,localChoice:ClientDeletionChoiceV4,healthChoice:ClientDeletionChoiceV4,healthConfirmed:Bool)throws {
+    public var finished:Bool {originalScope != nil && backendDeleted && [cloudProgress,localProgress,localTransportProgress,healthProgress].allSatisfy {$0 == .completed || $0 == .retained}}
+    public init(intent:ControlIntentV1,accountID:String,activationEpoch:Int64,recoveryCapability:String,cloudChoice:ClientDeletionChoiceV4,localChoice:ClientDeletionChoiceV4,healthChoice:ClientDeletionChoiceV4,healthConfirmed:Bool,originalScope:CloudScopeV1?=nil)throws {
         try AuthorityWire.identifier(accountID);_=try AuthorityWire.decodeBase64URL(recoveryCapability,count:32)
         guard activationEpoch>0,intent.operation == .deleteAccount,intent.fields.recoveryCapabilityDigest==AuthorityWire.hash(Data(recoveryCapability.utf8)),healthChoice != .delete || healthConfirmed else {throw AuthorityError.invalidWire}
+        if let originalScope {guard Array(originalScope.accountID.utf8)==Array(accountID.utf8),originalScope.activationEpoch==activationEpoch else {throw AuthorityError.intentMismatch}}
+        self.originalScope=originalScope
         self.intent=intent;self.accountID=accountID;self.activationEpoch=activationEpoch;self.recoveryCapability=recoveryCapability;self.cloudChoice=cloudChoice;self.localChoice=localChoice;self.healthChoice=healthChoice;self.healthConfirmed=healthConfirmed
         backendDeleted=false;cloudProgress=cloudChoice == .keep ? .retained:.pending;localProgress=localChoice == .keep ? .retained:.pending;localTransportProgress=localChoice == .keep ? .retained:.pending;healthProgress=healthChoice == .keep ? .retained:.pending;revision=0
     }
