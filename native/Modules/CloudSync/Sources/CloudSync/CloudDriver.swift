@@ -2,6 +2,7 @@ import Foundation
 
 public protocol CloudDriver: Sendable {
  func fetch(scope: CloudScope, cursor: CloudCursor) async throws -> CloudFetchBatch
+ func save(_ upload: CloudUpload) async throws -> CloudSaveResult
 }
 /// 023 supplies a same-facade bridge. This module never writes MatchStore directly.
 public protocol CloudCommitSink: Sendable {
@@ -14,4 +15,8 @@ public struct UnavailableCloudCommitSink: CloudCommitSink {
  public func importBatch(_ batch: CloudFetchBatch) async throws -> CloudImportAcknowledgement { throw CloudError(.awaitingBusinessImport) }
  public func appliedCursor(scope: CloudScope) async throws -> CloudCursor { throw CloudError(.awaitingBusinessImport) }
  public func resetCursor(scope: CloudScope, expectedGeneration: Int64) async throws -> CloudCursor { throw CloudError(.awaitingBusinessImport) }
+}
+
+extension CloudDriver {
+ public func save(_ upload: CloudUpload) async throws -> CloudSaveResult { throw CloudError(.networkUnavailable) }
 }

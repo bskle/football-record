@@ -247,3 +247,123 @@ public struct CloudSyncOutcome: Sendable, Equatable {
     public let issue: CloudIssue?
     public init(importedBatchIDs: [String] = [], issue: CloudIssue? = nil) { self.importedBatchIDs = importedBatchIDs; self.issue = issue }
 }
+
+
+public enum CloudSaveCondition: String, Codable, Sendable { case ifServerRecordUnchanged, unconditional }
+public struct CloudAssetReference: Codable, Sendable, Equatable {
+    public let partID: String
+    public let index, byteCount: Int
+    public let digest: String
+    public init(partID: String, index: Int, byteCount: Int, digest: String) throws {
+        try CloudCodec.id(partID)
+        guard (0..<64).contains(index), (1...CloudCodec.maximumBytes).contains(byteCount), Self.validDigest(digest) else { throw CloudError(.invalidPayload) }
+        self.partID = partID; self.index = index; self.byteCount = byteCount; self.digest = digest
+    }
+    static func validDigest(_ digest: String) -> Bool { digest.count == 64 && digest.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }
+}
+public struct CloudSaveManifest: Codable, Sendable, Equatable {
+    public let version: Int
+    public let scope: CloudScope
+    public let recordID, recordDigest, recordType, matchID, factDigest, captureDigest, checkpointID: String
+    public let terminalEventID: String?
+    public let byteCount: Int
+    public let parts: [CloudAssetReference]
+    public init(upload: CloudUpload, parts: [CloudAssetReference]) throws {
+        guard !parts.isEmpty, parts.count <= 64, Set(parts.map(\.partID)).count == parts.count else { throw CloudError(.invalidPayload) }
+        for (i, part) in parts.enumerated() {
+            _ = try CloudAssetReference(partID: part.partID, index: part.index, byteCount: part.byteCount, digest: part.digest)
+            guard part.index == i else { throw CloudError(.invalidPayload) }
+        }
+        guard parts.reduce(0, { $0 + $1.byteCount }) == upload.record.canonicalBytes.count else { throw CloudError(.invalidPayload) }
+        let payload = try upload.record.payload
+        self.version = 1; self.scope = upload.scope; self.recordID = upload.record.recordID; self.recordDigest = upload.record.digest
+        self.recordType = payload.recordType; self.matchID = payload.matchID; self.checkpointID = upload.checkpointID
+        self.byteCount = upload.record.canonicalBytes.count; self.parts = parts
+        if case .matchFacts(let facts) = payload {
+            self.factDigest = try facts.factDigest; self.captureDigest = try facts.captureDigest
+            let descriptor = MatchDescriptor(startIntent: facts.startIntent, starter: facts.starter, startPermit: DevelopmentStartFixture.permit(for: facts.startIntent))
+            let horizon = ([facts.startIntent.requestedAt] + facts.events.map(\.occurredAt)).max() ?? facts.startIntent.requestedAt
+            let replay = MatchReplay.replay(descriptor: descriptor, events: facts.events, now: horizon)
+            self.terminalEventID = replay.state == .endedPendingSync ? replay.effectiveEvents.first(where: { $0.type == .matchEnded })?.eventID : nil
+        } else {
+            self.factDigest = upload.record.digest; self.captureDigest = try CaptureRevision.digest([]); self.terminalEventID = nil
+        }
+    }
+}
+extension CloudUpload {
+    public var checkpointID: String { CloudCodec.hash(Data((scope.stableZoneKey + "\0" + record.recordID + "\0checkpoint.v1").utf8)) }
+}
+public struct CloudSavedPart: Codable, Sendable, Equatable {
+    public let reference: CloudAssetReference
+    public let changeTag: String
+    public let condition: CloudSaveCondition
+    public let readBackBytes: Data
+    public init(reference: CloudAssetReference, changeTag: String, condition: CloudSaveCondition, readBackBytes: Data) {
+        self.reference = reference; self.changeTag = changeTag; self.condition = condition; self.readBackBytes = readBackBytes
+    }
+}
+/// An assertion by the controlled driver, subsequently checked against every original byte.
+/// This transport DTO is not a trusted production CloudKit proof.
+public struct CloudSaveReadback: Codable, Sendable, Equatable {
+    public let scope: CloudScope
+    public let recordID, manifestRecordID, manifestChangeTag, confirmationID: String
+    public let manifestBytes: Data
+    public let manifestCondition: CloudSaveCondition
+    public let parts: [CloudSavedPart]
+    public let recordChangeTag: String
+    public let recordCondition: CloudSaveCondition
+    public init(scope: CloudScope, recordID: String, manifestRecordID: String, manifestBytes: Data, manifestChangeTag: String, manifestCondition: CloudSaveCondition, parts: [CloudSavedPart], confirmationID: String, recordChangeTag: String, recordCondition: CloudSaveCondition) {
+        self.scope = scope; self.recordID = recordID; self.manifestRecordID = manifestRecordID; self.manifestBytes = manifestBytes
+        self.manifestChangeTag = manifestChangeTag; self.manifestCondition = manifestCondition; self.parts = parts; self.confirmationID = confirmationID
+        self.recordChangeTag = recordChangeTag; self.recordCondition = recordCondition
+    }
+}
+public enum CloudSaveResult: Sendable {
+    case complete(CloudSaveReadback)
+    case partial([CloudSavedPart])
+    case conflict(recordID: String, remote: CloudRecord, changeTag: String)
+}
+/// Explicit development evidence only. No production VerifiedCloudSave factory exists in 022.
+public struct DevelopmentCloudSaveEvidence: Codable, Sendable, Equatable {
+    public let boundary: String
+    public let scope: CloudScope
+    public let uploadID, recordID, recordDigest, matchID, factDigest, captureDigest, checkpointID, confirmationID: String
+    public let terminalEventID: String?
+    public let manifestBytes: Data
+    public let manifestChangeTag: String
+    public let recordChangeTag: String
+    public let parts: [CloudAssetReference]
+    public let partChangeTags: [String]
+    init(upload: CloudUpload, readback: CloudSaveReadback, manifest: CloudSaveManifest) {
+        boundary = "controlledDevelopmentTransport"; scope = upload.scope; uploadID = upload.id
+        recordID = upload.record.recordID; recordDigest = upload.record.digest; matchID = manifest.matchID; factDigest = manifest.factDigest
+        captureDigest = manifest.captureDigest; checkpointID = manifest.checkpointID; confirmationID = readback.confirmationID
+        terminalEventID = manifest.terminalEventID; manifestBytes = readback.manifestBytes; manifestChangeTag = readback.manifestChangeTag
+        recordChangeTag = readback.recordChangeTag
+        parts = manifest.parts; partChangeTags = readback.parts.map(\.changeTag)
+    }
+    public func matches(_ upload: CloudUpload) -> Bool {
+        guard boundary == "controlledDevelopmentTransport", scope == upload.scope, uploadID == upload.id, recordID == upload.record.recordID,
+              recordDigest == upload.record.digest, checkpointID == upload.checkpointID,
+              let manifest = try? CloudSaveManifest(upload: upload, parts: parts) else { return false }
+        return manifest.matchID == matchID && manifest.factDigest == factDigest && manifest.captureDigest == captureDigest && manifest.terminalEventID == terminalEventID
+    }
+}
+public struct CloudConflict: Codable, Sendable, Equatable {
+    public let scope: CloudScope
+    public let uploadID, recordID, localDigest, remoteDigest, remoteChangeTag: String
+    public let expectedChangeTag: String?
+    public let localBytes, remoteBytes: Data
+    init(upload: CloudUpload, remote: CloudRecord, changeTag: String) throws {
+        guard upload.scope.stableZoneKey == remote.scope.stableZoneKey else { throw CloudError(.accountChanged) }
+        try CloudCodec.id(changeTag)
+        scope = upload.scope; uploadID = upload.id; recordID = upload.record.recordID; localDigest = upload.record.digest
+        remoteDigest = remote.digest; remoteChangeTag = changeTag; expectedChangeTag = upload.expectedChangeTag
+        localBytes = upload.record.canonicalBytes; remoteBytes = remote.canonicalBytes
+    }
+}
+public struct CloudScopeState: Sendable, Equatable {
+    public let issue: CloudIssue?
+    public let attemptCount: Int
+    public let nextAttemptAt: Date?
+}

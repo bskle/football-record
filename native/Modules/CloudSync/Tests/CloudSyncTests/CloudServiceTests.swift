@@ -112,6 +112,17 @@ final class CloudServiceTests: XCTestCase, @unchecked Sendable {
   await expectCloudError(.identityConflict) { _ = try await sink.importBatch(cloudBatch(next:Data([123]))) }
   let cursor = try await sink.appliedCursor(scope:cloudScope()); XCTAssertEqual(cursor.appliedToken,batch.nextToken); try await sink.close()
  }
+ func testBlockedUnverifiedBatchCannotBeSkippedByNextWake() async throws {
+  let ledger = try SQLiteCloudLedger(url:tempCloudURL()),batch = try cloudBatch(),scope = try cloudScope()
+  try await ledger.stage(batch)
+  try await ledger.failBatch(scope:scope,id:batch.batchID,issue:.invalidPayload,at:cloudTime,nextAttemptAt:nil)
+  let sink = try FixtureCloudSink(url:tempCloudURL()),driver = ControlledCloudDriver(batches:[try cloudBatch(id:"later")])
+  let result = try await CloudSyncService(scope:scope,ledger:ledger,driver:driver,sink:sink).synchronize()
+  XCTAssertEqual(result.issue,.invalidPayload)
+  let fetches = await driver.fetchRequests(),cursor = try await sink.appliedCursor(scope:scope)
+  XCTAssertTrue(fetches.isEmpty); XCTAssertNil(cursor.appliedToken)
+  try await ledger.close(); try await sink.close()
+ }
  func testTwoFileConnectionsHaveOneParentTokenCASWinner() async throws {
   let url = try tempCloudURL(),a = try FixtureCloudSink(url:url),b = try FixtureCloudSink(url:url)
   let first = try cloudBatch(id:"a",next:Data([1]),records:[]),second = try cloudBatch(id:"b",next:Data([2]),records:[])

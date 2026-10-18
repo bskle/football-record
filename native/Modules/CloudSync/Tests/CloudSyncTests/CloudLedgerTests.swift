@@ -100,4 +100,19 @@ final class CloudLedgerTests: XCTestCase, @unchecked Sendable {
   try await ledger.close()
  }
 
+ func testIncompatibleVersionOneSchemaFailedOpenPreservesFileAndVersion() throws {
+  for missingTable in [false,true] {
+   let url = try tempCloudURL(),sql = try CloudSQL(url:url)
+   if !missingTable { try sql.execute("CREATE TABLE cloud_uploads(id TEXT PRIMARY KEY,scope TEXT NOT NULL,digest TEXT NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL,issue TEXT,retry_ms INTEGER,attempted_ms INTEGER) STRICT") }
+   try sql.execute("PRAGMA user_version=1"); try sql.close()
+   let original = try Data(contentsOf:url)
+   XCTAssertThrowsError(try SQLiteCloudLedger(url:url))
+   XCTAssertEqual(try Data(contentsOf:url),original)
+   let inspect = try CloudSQL(url:url)
+   XCTAssertEqual(try inspect.rows("PRAGMA user_version").first?.first?.number,1)
+   XCTAssertTrue(try inspect.rows("SELECT name FROM sqlite_master WHERE name IN ('cloud_batches','cloud_scope_state')").isEmpty)
+   try inspect.close()
+  }
+ }
+
 }

@@ -86,6 +86,9 @@ actor ControlledCloudDriver: CloudDriver {
  var batches: [CloudFetchBatch]
  var requests: [CloudCursor] = []
  var fetchIssue: CloudIssue?
+ var saveIssue: CloudIssue?
+ var saveResponse: CloudSaveResult?
+ var saveCount = 0
  init(batches: [CloudFetchBatch] = [],fetchIssue: CloudIssue? = nil) { self.batches = batches; self.fetchIssue = fetchIssue }
  func fetch(scope: CloudScope,cursor: CloudCursor) throws -> CloudFetchBatch {
   requests.append(cursor)
@@ -94,7 +97,43 @@ actor ControlledCloudDriver: CloudDriver {
   return batches.removeFirst()
  }
  func fetchRequests() -> [CloudCursor] { requests }
+ func configureSave(issue: CloudIssue? = nil, response: CloudSaveResult? = nil) { saveIssue = issue; saveResponse = response }
+ func savedAttempts() -> Int { saveCount }
+ func save(_ upload: CloudUpload) throws -> CloudSaveResult {
+  saveCount += 1
+  if let saveIssue { throw CloudError(saveIssue) }
+  return try saveResponse ?? .complete(completeCloudSave(upload))
+ }
 }
 func cloudBatch(id: String = "batch",parent: Data? = nil,next: Data? = Data([0,255,7]),generation: Int64 = 0,records: [CloudRecord]? = nil,scope: CloudScope? = nil) throws -> CloudFetchBatch {
  try CloudFetchBatch(scope: scope ?? cloudScope(), batchID: id, records: records ?? [cloudRecord(match: "one"),cloudRecord(match: "two")], expectedAppliedToken: parent,nextToken: next,fetchGeneration: generation,moreComing: false)
+}
+
+func completeCloudSave(_ upload:CloudUpload, condition:CloudSaveCondition = .ifServerRecordUnchanged, readBack:Data? = nil) throws -> CloudSaveReadback {
+ let bytes = upload.record.canonicalBytes
+ let reference = try CloudAssetReference(partID:upload.record.recordID+"-part",index:0,byteCount:bytes.count,digest:CloudCodec.hash(bytes))
+ let manifest = try CloudSaveManifest(upload:upload,parts:[reference])
+ return CloudSaveReadback(scope:upload.scope,recordID:upload.record.recordID,manifestRecordID:upload.checkpointID,manifestBytes:try CloudCodec.encode(manifest),manifestChangeTag:"manifest-tag",manifestCondition:condition,parts:[CloudSavedPart(reference:reference,changeTag:"part-tag",condition:condition,readBackBytes:readBack ?? bytes)],confirmationID:"confirmation-"+upload.id,recordChangeTag:"record-tag",recordCondition:condition)
+}
+
+enum PauseProgressPoint: Sendable { case stage, acknowledge, confirm }
+/// Deterministically inserts the account change after service checks, before the actual SQL progress write.
+struct PausingCloudLedger: CloudLedger {
+ let base:SQLiteCloudLedger
+ let point:PauseProgressPoint
+ func pause(_ scope:CloudScope) async throws { try await base.recordScopeIssue(scope:scope,issue:.accountChanged,at:cloudTime,nextAttemptAt:nil) }
+ func enqueue(_ upload:CloudUpload) async throws { try await base.enqueue(upload) }
+ func uploads(scope:CloudScope) async throws -> [CloudUploadEntry] { try await base.uploads(scope:scope) }
+ func failUpload(id:String,issue:CloudIssue,at:Date,nextAttemptAt:Date?) async throws { try await base.failUpload(id:id,issue:issue,at:at,nextAttemptAt:nextAttemptAt) }
+ func stage(_ batch:CloudFetchBatch) async throws { if point == .stage { try await pause(batch.scope) }; try await base.stage(batch) }
+ func batches(scope:CloudScope) async throws -> [CloudBatchEntry] { try await base.batches(scope:scope) }
+ func acknowledge(_ acknowledgement:CloudImportAcknowledgement) async throws { if point == .acknowledge { try await pause(acknowledgement.scope) }; try await base.acknowledge(acknowledgement) }
+ func failBatch(scope:CloudScope,id:String,issue:CloudIssue,at:Date,nextAttemptAt:Date?) async throws { try await base.failBatch(scope:scope,id:id,issue:issue,at:at,nextAttemptAt:nextAttemptAt) }
+ func scopeState(scope:CloudScope) async throws -> CloudScopeState { try await base.scopeState(scope:scope) }
+ func recordScopeIssue(scope:CloudScope,issue:CloudIssue,at:Date,nextAttemptAt:Date?) async throws { try await base.recordScopeIssue(scope:scope,issue:issue,at:at,nextAttemptAt:nextAttemptAt) }
+ func clearScopeIssue(scope:CloudScope) async throws { try await base.clearScopeIssue(scope:scope) }
+ func retainConflict(_ conflict:CloudConflict) async throws { try await base.retainConflict(conflict) }
+ func conflicts(scope:CloudScope) async throws -> [CloudConflict] { try await base.conflicts(scope:scope) }
+ func confirmUpload(_ evidence:DevelopmentCloudSaveEvidence) async throws { if point == .confirm { try await pause(evidence.scope) }; try await base.confirmUpload(evidence) }
+ func saveEvidence(scope:CloudScope) async throws -> [DevelopmentCloudSaveEvidence] { try await base.saveEvidence(scope:scope) }
 }
