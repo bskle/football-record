@@ -1,0 +1,36 @@
+{
+  "notice": "development public interoperability vector; private key discarded",
+  "domain": "football-record.authority.receipt.v1",
+  "keyID": "fixture-ed25519-v1",
+  "intent": {
+    "version": 1,
+    "requestID": "fixture-acquire-v1",
+    "matchID": "fixture-match-v1",
+    "recordingDeviceID": "fixture-watch-v1",
+    "activationEpoch": 42
+  },
+  "canonicalIntent": "{\"activationEpoch\":42,\"matchID\":\"fixture-match-v1\",\"recordingDeviceID\":\"fixture-watch-v1\",\"requestID\":\"fixture-acquire-v1\",\"version\":1}",
+  "canonicalBody": "{\"accountID\":\"fixture-account-v1\",\"activationEpoch\":42,\"environment\":\"development\",\"issuedAt\":1800000000,\"keyID\":\"fixture-ed25519-v1\",\"lockID\":\"fixture-lock-v1\",\"matchID\":\"fixture-match-v1\",\"operation\":\"acquire\",\"receiptID\":\"fixture-receipt-v1\",\"recordingDeviceID\":\"fixture-watch-v1\",\"requestDigest\":\"1c68138536b768b81f36da9651f3998488d7ee3b91aa8b7c0a11197397c7c0f3\",\"requestID\":\"fixture-acquire-v1\",\"result\":\"held\",\"version\":1}",
+  "canonicalBodyUTF8Base64": "eyJhY2NvdW50SUQiOiJmaXh0dXJlLWFjY291bnQtdjEiLCJhY3RpdmF0aW9uRXBvY2giOjQyLCJlbnZpcm9ubWVudCI6ImRldmVsb3BtZW50IiwiaXNzdWVkQXQiOjE4MDAwMDAwMDAsImtleUlEIjoiZml4dHVyZS1lZDI1NTE5LXYxIiwibG9ja0lEIjoiZml4dHVyZS1sb2NrLXYxIiwibWF0Y2hJRCI6ImZpeHR1cmUtbWF0Y2gtdjEiLCJvcGVyYXRpb24iOiJhY3F1aXJlIiwicmVjZWlwdElEIjoiZml4dHVyZS1yZWNlaXB0LXYxIiwicmVjb3JkaW5nRGV2aWNlSUQiOiJmaXh0dXJlLXdhdGNoLXYxIiwicmVxdWVzdERpZ2VzdCI6IjFjNjgxMzg1MzZiNzY4YjgxZjM2ZGE5NjUxZjM5OTg0ODhkN2VlM2I5MWFhOGI3YzBhMTExOTczOTdjN2MwZjMiLCJyZXF1ZXN0SUQiOiJmaXh0dXJlLWFjcXVpcmUtdjEiLCJyZXN1bHQiOiJoZWxkIiwidmVyc2lvbiI6MX0=",
+  "signingBytesUTF8Base64": "Zm9vdGJhbGwtcmVjb3JkLmF1dGhvcml0eS5yZWNlaXB0LnYxCnsiYWNjb3VudElEIjoiZml4dHVyZS1hY2NvdW50LXYxIiwiYWN0aXZhdGlvbkVwb2NoIjo0MiwiZW52aXJvbm1lbnQiOiJkZXZlbG9wbWVudCIsImlzc3VlZEF0IjoxODAwMDAwMDAwLCJrZXlJRCI6ImZpeHR1cmUtZWQyNTUxOS12MSIsImxvY2tJRCI6ImZpeHR1cmUtbG9jay12MSIsIm1hdGNoSUQiOiJmaXh0dXJlLW1hdGNoLXYxIiwib3BlcmF0aW9uIjoiYWNxdWlyZSIsInJlY2VpcHRJRCI6ImZpeHR1cmUtcmVjZWlwdC12MSIsInJlY29yZGluZ0RldmljZUlEIjoiZml4dHVyZS13YXRjaC12MSIsInJlcXVlc3REaWdlc3QiOiIxYzY4MTM4NTM2Yjc2OGI4MWYzNmRhOTY1MWYzOTk4NDg4ZDdlZTNiOTFhYThiN2MwYTExMTk3Mzk3YzdjMGYzIiwicmVxdWVzdElEIjoiZml4dHVyZS1hY3F1aXJlLXYxIiwicmVzdWx0IjoiaGVsZCIsInZlcnNpb24iOjF9",
+  "publicKey": "qDeRx2OOYaCssvyIkUC9HO_dR99d4gpc8Sf2t55227Y",
+  "receipt": {
+    "body": {
+      "accountID": "fixture-account-v1",
+      "activationEpoch": 42,
+      "environment": "development",
+      "issuedAt": 1800000000,
+      "keyID": "fixture-ed25519-v1",
+      "lockID": "fixture-lock-v1",
+      "matchID": "fixture-match-v1",
+      "operation": "acquire",
+      "receiptID": "fixture-receipt-v1",
+      "recordingDeviceID": "fixture-watch-v1",
+      "requestDigest": "1c68138536b768b81f36da9651f3998488d7ee3b91aa8b7c0a11197397c7c0f3",
+      "requestID": "fixture-acquire-v1",
+      "result": "held",
+      "version": 1
+    },
+    "signature": "R2W-Bnp_SXiMyGts0bjY_JOP9a56qaqZlhnTB2FPXl5doFuV62MIG754Sk_0EOnrYP1antXoF7i4L7ZGInJcAg"
+  }
+}

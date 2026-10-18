@@ -21,4 +21,4 @@
 
 工程冻结细节：同设备同key的新challenge + 完整Apple验证成功签发一次性reauthenticationID，持久绑定account/device/key及issuedAt/expiry/consumed；不改变激活。lost使用的证明须在eligibleAt后新签发，初始JWT不能复用。
 
-进度：021.1红→绿完成（4/4；真实两worker）；021.2待红；021.3待红；021.4待红。提交/审阅/merge/清理仅动作后登记。
+进度：021.1红→绿完成（4/4；真实两worker）；021.2红→绿完成（auth20 + locks5，单轮25/25）；021.3待红；021.4待红。提交/审阅/merge/清理仅动作后登记。

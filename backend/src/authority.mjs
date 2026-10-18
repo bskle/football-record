@@ -2,6 +2,8 @@ import {randomUUID} from 'node:crypto';
 import {authorityConfig} from './config.mjs';
 import {openDatabase,transaction,fail} from './database.mjs';
 import {canonicalJSON,makeReceipt,sha256,signedBody} from './receipt.mjs';
+const states=new WeakMap();
+export const authorityState=authority=>states.get(authority);
 export function createAuthority(options) {
   const config=authorityConfig(options),db=openDatabase(config);
   function validate(ctx,{active=true}={}){
@@ -53,5 +55,6 @@ export function createAuthority(options) {
     return signedBody(config.receiptPrivateKey,{...r,accountID:ctx.accountID,receiptID:receipt.receiptID,environment:config.environment,keyID:config.receiptKeyID,requestDigest:sha256(canonicalJSON(r)),status:held?'held':matches&&terminal?'terminal':'mismatch',observedAt:config.clock.now(),expiresAt:config.clock.now()+60},'football-record.authority.live-lock.v1');
   });}
   function requestBytes(ctx,id){return transaction(db,config,()=>{validate(ctx,{active:false});const row=db.prepare('SELECT result FROM requests WHERE account_id=? AND request_id=?').get(ctx.accountID,id);if(!row)fail('notFound',404);return Buffer.from(row.result);});}
-  return {acquire,terminate,liveStatus,requestBytes,close:()=>db.close()};
+  const api={acquire,terminate,liveStatus,requestBytes,close:()=>db.close()};
+  states.set(api,{db,config,validate,stored,persist,write});return api;
 }

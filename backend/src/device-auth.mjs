@@ -1,0 +1,74 @@
+import {createHmac,randomBytes,randomUUID,sign,verify,timingSafeEqual} from 'node:crypto';
+import {authorityState} from './authority.mjs';
+import {canonicalJSON,sha256,edPublicKey,decodeBase64URL,makeReceipt} from './receipt.mjs';
+import {transaction,fail,nextEpoch} from './database.mjs';
+const input=(domain,body)=>Buffer.from(domain+'\n'+canonicalJSON(body));
+export function makePoP(privateKey,fields){return {keyID:fields.keyID,nonce:fields.nonce,issuedAt:fields.issuedAt,signature:sign(null,input('football-record.device.pop.v1',fields),privateKey).toString('base64url')};}
+export function signRecover(privateKey,request){const r={...request};delete r.deviceProof;return sign(null,input('football-record.device.auth-recover.v1',r),privateKey).toString('base64url');}
+function signatureOK(key,domain,body,signature){try{return verify(null,input(domain,body),edPublicKey(key),decodeBase64URL(signature,64));}catch{return false;}}
+export function createDeviceAuth({authority,appleVerifier}){
+ const state=authorityState(authority);if(!state)throw Error('authority required');const {db,config,validate,stored,persist}=state;
+ if(appleVerifier.environment!==config.environment)throw Error('authority and verifier environment mismatch');
+ function tokenFor(s){const claims={sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};return createHmac('sha256',config.tokenDerivationKey).update('football-record.session.v1\n'+canonicalJSON(claims)).digest('base64url');}
+ function credential(s){return {token:tokenFor(s),sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};}
+ function session(ctx){const s={session_id:randomUUID(),account_id:ctx.accountID,device_id:ctx.deviceID,key_id:ctx.keyID,activation_epoch:ctx.activationEpoch,expires_at:config.clock.now()+2592000};db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(s.session_id,s.account_id,s.device_id,s.key_id,s.activation_epoch,s.expires_at,sha256(tokenFor(s)));return s;}
+ function consumeNonce(sessionID,nonce){if(db.prepare('SELECT 1 FROM nonces WHERE session_id=? AND nonce=?').get(sessionID,nonce))fail('unauthorized',401);db.prepare('INSERT INTO nonces VALUES(?,?)').run(sessionID,nonce);}
+ function challenge(r){return transaction(db,config,()=>{try{edPublicKey(r.devicePublicKey);}catch{fail('invalidPayload',422);}const secret=randomBytes(32).toString('base64url'),id=randomUUID(),expiresAt=config.clock.now()+300;db.prepare('INSERT INTO challenges VALUES(?,?,?,?,?,0)').run(id,sha256(secret),r.deviceID,sha256(r.devicePublicKey),expiresAt);return {version:1,requestID:r.requestID,challengeID:id,challenge:secret,expiresAt};});}
+ function checkChallenge(r,publicKey,deviceID){const c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(r.challengeID);if(!c||c.consumed||c.expires_at<config.clock.now()||c.device_id!==deviceID||c.key_fingerprint!==sha256(publicKey))fail('unauthorized',401);const proof={...r,challengeSHA256:c.challenge_hash};delete proof.deviceProof;if(!signatureOK(publicKey,'football-record.device.challenge.v1',proof,r.deviceProof))fail('unauthorized',401);return c;}
+ function output(record,s){return {...JSON.parse(Buffer.from(record)),credential:credential(s),context:{accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch}};}
+ async function authenticate(r){
+   const c=checkChallenge(r,r.devicePublicKey,r.deviceID);
+   const verified=await appleVerifier.verify(r.identityToken,c.challenge_hash);
+   return transaction(db,config,()=>{
+    checkChallenge(r,r.devicePublicKey,r.deviceID);
+    const accountID=createHmac('sha256',config.accountHMACKey).update(verified.issuer+'\n'+verified.subject).digest('hex');
+    let a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(accountID);
+    const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.deviceID);
+    if(prior&&(prior.account_id!==accountID||prior.public_key!==r.devicePublicKey))fail('unauthorized',401);
+    if(a&&a.cloud_space_id!==r.cloudSpaceID)fail('cloudIdentityMismatch',403);
+    if(!a){const epoch=nextEpoch(db);db.prepare('INSERT INTO accounts(account_id,cloud_space_id,active_phone_id,activation_epoch) VALUES(?,?,?,?)').run(accountID,r.cloudSpaceID,r.deviceID,epoch);a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(accountID);}
+    const role=a.active_phone_id===r.deviceID?'phone':'waiting',keyID=sha256(r.devicePublicKey);
+    if(!prior)db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(r.deviceID,accountID,keyID,r.devicePublicKey,role,a.activation_epoch);
+    const ctx={accountID,deviceID:r.deviceID,keyID,activationEpoch:a.activation_epoch};
+    const first=stored(ctx,r,'authApple');if(first)fail('unauthorized',401);
+    db.prepare('UPDATE challenges SET consumed=1 WHERE challenge_id=?').run(r.challengeID);
+    const s=session(ctx),result={receipt:makeReceipt(config,ctx,r,'authApple',role==='phone'?'registered':'waitingMigration'),sessionClaims:{sessionID:s.session_id,expiresAt:s.expires_at}};
+    if(prior){const id=randomUUID();db.prepare('INSERT INTO reauthentications VALUES(?,?,?,?,?,?,0)').run(id,accountID,r.deviceID,keyID,verified.issuedAt,verified.issuedAt+300);result.reauthenticationID=id;}
+    const bytes=Buffer.from(canonicalJSON(result));persist(ctx,r,'authApple',result);db.prepare('INSERT INTO auth_records VALUES(?,?,?,?,?,?,?)').run(r.requestID,r.deviceID,accountID,sha256(canonicalJSON(r)),r.devicePublicKey,s.session_id,bytes);
+    return output(bytes,s);
+   });
+ }
+ function recover(r){return transaction(db,config,()=>{
+   const row=db.prepare('SELECT * FROM auth_records WHERE auth_request_id=? AND device_id=?').get(r.authRequestID,r.deviceID);
+   const body={...r};delete body.deviceProof;
+   if(!row||sha256(row.public_key)!==r.keyID||!Number.isSafeInteger(r.issuedAt)||Math.abs(config.clock.now()-r.issuedAt)>60||!signatureOK(row.public_key,'football-record.device.auth-recover.v1',body,r.deviceProof))fail('unauthorized',401);
+   const s=db.prepare('SELECT * FROM sessions WHERE session_id=?').get(row.session_id);if(!s)return {status:'knownRevoked'};
+   consumeNonce(s.session_id,r.nonce);
+   const a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(s.account_id);
+   if(s.revoked||!a||a.activation_epoch!==s.activation_epoch)return {status:'knownRevoked'};
+   if(s.expires_at<config.clock.now())return {status:'knownExpired'};
+   return output(row.public_result,s);
+ });}
+ function authenticateRequest({authorization,proof,method,path,requestID,bodyBytes}){
+   if(typeof authorization!=='string'||!authorization.startsWith('Bearer ')||!proof||Object.keys(proof).sort().join(',')!=='issuedAt,keyID,nonce,signature'||typeof proof.nonce!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(proof.nonce)||!Number.isSafeInteger(proof.issuedAt)||Math.abs(config.clock.now()-proof.issuedAt)>60)fail('unauthorized',401);
+   const hash=sha256(authorization.slice(7)),s=db.prepare('SELECT * FROM sessions WHERE token_hash=?').get(hash);
+   if(!s||s.revoked||s.expires_at<config.clock.now()||s.key_id!==proof.keyID)fail('unauthorized',401);
+   const d=db.prepare('SELECT * FROM devices WHERE device_id=? AND account_id=?').get(s.device_id,s.account_id);
+   const fields={method,path,requestID,bodySHA256:sha256(bodyBytes),sessionID:s.session_id,activationEpoch:s.activation_epoch,keyID:proof.keyID,nonce:proof.nonce,issuedAt:proof.issuedAt};
+   if(!d||!signatureOK(d.public_key,'football-record.device.pop.v1',fields,proof.signature))fail('unauthorized',401);
+   const ctx={accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,sessionID:s.session_id};
+   return transaction(db,config,()=>{const current=db.prepare('SELECT revoked FROM sessions WHERE session_id=?').get(s.session_id);if(!current||current.revoked)fail('unauthorized',401);validate(ctx,{active:false});consumeNonce(s.session_id,proof.nonce);return ctx;});
+ }
+ function registerWatch(ctx,r){return transaction(db,config,()=>{
+   const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
+   const old=stored(ctx,r,'registerWatch');if(old){const s=db.prepare('SELECT * FROM sessions WHERE session_id=?').get(old.sessionClaims.sessionID);return {...old,credential:credential(s)};}
+   checkChallenge(r,r.watchPublicKey,r.watchID);
+   const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.watchID),keyID=sha256(r.watchPublicKey);
+   if(prior&&(prior.account_id!==ctx.accountID||prior.public_key!==r.watchPublicKey))fail('unauthorized',401);
+   if(!prior)db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(r.watchID,ctx.accountID,keyID,r.watchPublicKey,'watch',ctx.activationEpoch);
+   db.prepare('UPDATE challenges SET consumed=1 WHERE challenge_id=?').run(r.challengeID);
+   const s=session({...ctx,deviceID:r.watchID,keyID});const result={receipt:makeReceipt(config,ctx,r,'registerWatch','registered',{}, {registration:{watchID:r.watchID,watchPublicKey:r.watchPublicKey}}),sessionClaims:{sessionID:s.session_id,expiresAt:s.expires_at}};persist(ctx,r,'registerWatch',result);return {...result,credential:credential(s)};
+ });}
+ authority.registerWatch=registerWatch;
+ return {challenge,authenticate,recover,authenticateRequest,registerWatch,credential};
+}

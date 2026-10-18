@@ -16,6 +16,12 @@ export function openDatabase(config) {
       CREATE TABLE IF NOT EXISTS active_locks(account_id TEXT PRIMARY KEY,lock_id TEXT NOT NULL UNIQUE,match_id TEXT NOT NULL,recorder_id TEXT NOT NULL,activation_epoch INTEGER NOT NULL) STRICT;
       CREATE TABLE IF NOT EXISTS terminal_locks(account_id TEXT NOT NULL,lock_id TEXT NOT NULL,match_id TEXT NOT NULL,recorder_id TEXT NOT NULL,activation_epoch INTEGER NOT NULL,result TEXT NOT NULL,PRIMARY KEY(account_id,lock_id)) STRICT;
       CREATE TABLE IF NOT EXISTS requests(account_id TEXT NOT NULL,request_id TEXT NOT NULL,operation TEXT NOT NULL,request_digest TEXT NOT NULL,result BLOB NOT NULL,PRIMARY KEY(account_id,request_id)) STRICT;
+
+      CREATE TABLE IF NOT EXISTS challenges(challenge_id TEXT PRIMARY KEY,challenge_hash TEXT NOT NULL,device_id TEXT NOT NULL,key_fingerprint TEXT NOT NULL,expires_at INTEGER NOT NULL,consumed INTEGER NOT NULL) STRICT;
+      CREATE TABLE IF NOT EXISTS sessions(session_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,device_id TEXT NOT NULL,key_id TEXT NOT NULL,activation_epoch INTEGER NOT NULL,expires_at INTEGER NOT NULL,token_hash TEXT NOT NULL UNIQUE,revoked INTEGER NOT NULL) STRICT;
+      CREATE TABLE IF NOT EXISTS auth_records(auth_request_id TEXT NOT NULL,device_id TEXT NOT NULL,account_id TEXT NOT NULL,request_digest TEXT NOT NULL,public_key TEXT NOT NULL,session_id TEXT NOT NULL,public_result BLOB NOT NULL,PRIMARY KEY(auth_request_id,device_id)) STRICT;
+      CREATE TABLE IF NOT EXISTS nonces(session_id TEXT NOT NULL,nonce TEXT NOT NULL,PRIMARY KEY(session_id,nonce)) STRICT;
+      CREATE TABLE IF NOT EXISTS reauthentications(reauthentication_id TEXT PRIMARY KEY,account_id TEXT NOT NULL,device_id TEXT NOT NULL,key_id TEXT NOT NULL,issued_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,consumed INTEGER NOT NULL) STRICT;
       PRAGMA user_version=1;`);
     const fingerprint=db.prepare('SELECT value FROM metadata WHERE key=?').get('configuration');
     if(fingerprint&&fingerprint.value!==config.fingerprint)throw new Error('persistent key configuration mismatch');
