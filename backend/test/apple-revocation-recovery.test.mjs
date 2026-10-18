@@ -62,3 +62,23 @@ test('a genuine verified bundle from another Apple account cannot be substituted
  material.authorizationCode=other.authorizationCode;material.expectedApple=other.expectedApple;
  assert.equal((await h.call(d.login,'/v1/accounts/delete',d.request)).status,403);assert.equal(exchangeCount(h),0);assert.equal(material.authorizationCode,'');
 });
+
+test('auth rollback leaves no orphan material while committed lost auth recovers the original live material',async t=>{
+ const h=await openRevocationAuthority();t.after(()=>h.close());const login=await h.login(),state=authorityState(h.f.authority),rollback=await h.prepareLogin(login.d);
+ h.f.faults.beforeCommit=true;assert.equal((await h.raw('/v1/auth/apple',rollback.request)).status,503);h.f.faults.beforeCommit=false;assert.equal(state.transientReauthCodes.size,0);
+ const lost=await h.prepareLogin(login.d);h.f.faults.afterCommitResponseLost=true;await assert.rejects(h.raw('/v1/auth/apple',lost.request));h.f.faults.afterCommitResponseLost=false;assert.equal(state.transientReauthCodes.size,1);
+ const recover=req({authRequestID:lost.request.requestID,deviceID:login.d.deviceID,keyID:login.credential.keyID,nonce:randomUUID(),issuedAt:h.f.clock.now()});const {signRecover}=await import('../src/device-auth.mjs');recover.deviceProof=signRecover(login.d.privateKey,recover);
+ const recovered=await h.raw('/v1/auth/recover',recover);assert.equal(recovered.status,200);assert.equal(state.transientReauthCodes.has(recovered.data.reauthenticationID),true);
+ const capability=randomBytes(32).toString('base64url'),request=req({reauthenticationID:recovered.data.reauthenticationID,recoveryCapabilityDigest:sha256(capability)});assert.equal((await h.call(login,'/v1/accounts/delete',request)).status,200);assert.equal(revokeCount(h),1);
+});
+
+test('DB WAL captured logs receipts and errors contain no raw code token Apple subject P8 or client secret on success and failure',async t=>{
+ const {readFileSync,existsSync}=await import('node:fs');
+ const h=await openRevocationAuthority();t.after(()=>h.close());const d=await deletion(h);
+ const needles=[d.login.request.identityToken,d.fresh.request.identityToken,d.login.request.authorizationCode,d.fresh.request.authorizationCode,d.login.credential.token,d.fresh.credential.token,'account-subject-SENTINEL',d.capability,h.apple.config.privateKey.export({format:'pem',type:'pkcs8'})];
+ function scan(extra=[]){const chunks=[JSON.stringify(h.logs),...extra];for(const path of [h.f.config.databasePath,h.f.config.databasePath+'-wal',h.f.config.databasePath+'-shm'])if(existsSync(path))chunks.push(readFileSync(path));for(const request of h.apple.requests){if(request.fields?.client_secret)needles.push(request.fields.client_secret);if(request.path==='/auth/revoke')needles.push(request.fields.token);}for(const n of needles)for(const bytes of chunks)assert.equal(Buffer.from(bytes).includes(Buffer.from(n)),false);}
+ scan();h.apple.controls.exchangeStatus=400;h.apple.controls.errorSentinel='APPLE-ERROR-SENTINEL-'+d.fresh.request.authorizationCode;const failed=await h.call(d.login,'/v1/accounts/delete',d.request);assert.equal(failed.data.code,'reauthenticationRequired');needles.push(h.apple.controls.errorSentinel);scan([failed.text]);
+ h.apple.controls.exchangeStatus=undefined;const fresh=await h.login(d.login.d);needles.push(fresh.request.identityToken,fresh.request.authorizationCode,fresh.credential.token);const done=await h.call(d.login,'/v1/accounts/delete',d.request);assert.equal(done.status,200);scan([done.text]);
+ const status=await h.raw('/v1/accounts/delete-status',req({deleteRequestID:d.request.requestID,recoveryCapability:d.capability}));scan([status.text]);
+ assert.equal(h.f.inspect('PRAGMA user_version')[0].user_version,1);assert.equal(JSON.stringify(h.f.inspect("SELECT sql FROM sqlite_master WHERE type='table'")).includes('expectedApple'),false);
+});
