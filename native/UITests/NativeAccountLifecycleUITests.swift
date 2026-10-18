@@ -30,6 +30,16 @@ import XCTest
     XCTAssertTrue(app.staticTexts["account-status"].waitForExistence(timeout: 15))
     XCTAssertTrue(app.staticTexts["m4-development-marker"].exists)
     capture(app, "development-account-before-login")
+    #if os(iOS)
+    let unavailableStatistics = app.switches["analytics-toggle"].firstMatch
+    reveal(unavailableStatistics, "analytics-toggle", app)
+    unavailableStatistics.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+    let dataIssue = app.staticTexts["account-lifecycle-issue"].firstMatch
+    reveal(dataIssue, "account-lifecycle-issue", app)
+    XCTAssertFalse(dataIssue.label.isEmpty); XCTAssertEqual(unavailableStatistics.value as? String, "0")
+    XCTAssertFalse(app.staticTexts["account-issue"].exists)
+    capture(app, "signed-out-statistics-failure-visible")
+    #endif
     tap("account-sign-in", app)
     XCTAssertTrue(app.buttons["start-match"].waitForExistence(timeout: 20), app.debugDescription)
     tap("start-match", app); tap("choose-starter", app); tap("confirm-start", app)
@@ -55,13 +65,19 @@ import XCTest
     let analytics = app.switches["analytics-toggle"].firstMatch
     reveal(analytics, "analytics-toggle", app)
     XCTAssertEqual(analytics.value as? String, "0")
+    tap("account-renew", app)
+    let renewed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "enabled == YES"), object: app.buttons["account-renew"].firstMatch)
+    XCTAssertEqual(XCTWaiter.wait(for: [renewed], timeout: 10), .completed)
     tap("account-migration", app); capture(app, "phone-migration-controls")
     app.navigationBars.buttons.firstMatch.tap()
     tap("account-delete", app); capture(app, "phone-independent-deletion-choices")
-    let local = app.switches["delete-local-choice"].firstMatch
-    XCTAssertTrue(local.waitForExistence(timeout: 5)); local.tap()
-    app.switches["delete-health-choice"].firstMatch.tap()
-    app.switches["delete-health-confirm"].firstMatch.tap()
+    for id in ["delete-local-choice", "delete-health-choice", "delete-health-confirm"] {
+      let control = app.switches[id].firstMatch
+      reveal(control, id, app)
+      control.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+      let selected = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "1"), object: control)
+      XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 3), .completed)
+    }
     tap("request-account-delete", app); tap("confirm-account-delete", app)
     XCTAssertTrue(app.staticTexts["account-status"].waitForExistence(timeout: 20))
     tap("account-delete", app)

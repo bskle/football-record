@@ -91,7 +91,7 @@ public struct SyncStatusView: View {
       if let issue = status.issue { Text(issue).foregroundStyle(.orange).accessibilityIdentifier("sync-issue") }
       Text(lifecycle?.cloudLabel ?? status.cloud).foregroundStyle(.secondary).accessibilityIdentifier("sync-cloud-state")
       if let backend = lifecycle?.backendLabel ?? status.backend { Text(backend).accessibilityIdentifier("sync-backend-state") }
-      if lifecycle?.development == true { Text("开发云 · 文件台账演练").foregroundStyle(.secondary).accessibilityIdentifier("development-cloud-marker") }
+      if lifecycle?.development == true { Text("开发账号 · 开发配对（私有邮箱）").foregroundStyle(.secondary).accessibilityIdentifier("development-account-transport-marker"); Text("开发云 · 文件台账演练 · 真实设备通信待验收").foregroundStyle(.secondary).accessibilityIdentifier("development-cloud-marker") }
       if let lifecycle, let id = model.snapshot?.replay.matchID, lifecycle.available {
         Button("保存到云并确认后台状态") { Task { await lifecycle.perform(.synchronize(id), matchID: id) } }.frame(minHeight: 44).disabled(lifecycle.busy).accessibilityIdentifier("sync-authority")
         if let issue = lifecycle.issue { Text(issue).foregroundStyle(.orange).accessibilityIdentifier("lifecycle-issue") }

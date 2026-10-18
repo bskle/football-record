@@ -42,6 +42,8 @@ if [[ "${NATIVE_M4_UI:-0}" == 1 ]]; then
 import base64,hashlib,json,os,pathlib,signal,subprocess,sys,time,uuid
 repo,run,platform,device,phone_device,derived=sys.argv[1:]
 run=pathlib.Path(run);os.umask(0o077)
+def interrupted(*_):raise KeyboardInterrupt()
+signal.signal(signal.SIGTERM,interrupted)
 def write(path,data):
  path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
  temporary=path.with_name(path.name+'.'+uuid.uuid4().hex+'.tmp')
@@ -109,7 +111,12 @@ try:
  if platform!='Watch':(run/'ready').touch(mode=0o600)
  startup_deadline=time.monotonic()+20
  next_resolution=0.0
+ next_clock=0.0
  while not (run/'stop').exists():
+  if time.monotonic()>=next_clock:
+   wall=int(time.time());command({'op':'clock','now':wall})
+   write(run/'bridge-wallclock.json',encode({'wallSeconds':wall}))
+   next_clock=time.monotonic()+1
   if time.monotonic()>=next_resolution:
    # Xcode test installation can relocate the data container while preserving its
    # contents. Follow only the actual installation with our exact private pin.
@@ -140,7 +147,7 @@ try:
     except Exception:reply={'issue':'unavailable'}
     write(response,encode(reply))
   time.sleep(.02)
-except Exception as error:
+except BaseException as error:
  # Finite diagnostic only; errors may contain tokens/URLs, so never stringify them.
  write(run/'broker-failed',type(error).__name__.encode());sys.exit(1)
 finally:

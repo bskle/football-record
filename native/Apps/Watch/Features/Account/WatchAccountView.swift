@@ -29,5 +29,5 @@ struct WatchAccountView: View {
       }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8)
     }.buttonStyle(.bordered).disabled(context.account.busy).task { await context.refresh() }
   }
-  private func run(_ action: AccountUserAction) { Task { await context.account.perform(action); await context.refreshRecording() } }
+  private func run(_ action: AccountUserAction) { Task { await context.account.perform(action); if context.account.issue == nil { await context.refreshRecording() } } }
 }

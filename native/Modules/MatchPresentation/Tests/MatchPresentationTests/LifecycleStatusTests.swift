@@ -70,6 +70,8 @@ import MatchSession
     var fields = AuthorityFields(); fields.reauthenticationID = "fresh-reauth"; fields.recoveryCapabilityDigest = AuthorityWire.hash(Data(AuthorityWire.base64URL(Data(repeating: 3, count: 32)).utf8))
     let intent = try ControlIntentV1(requestID: "delete-original", operation: .deleteAccount, fields: fields)
     var saga = try DeletionSagaV4(intent: intent, accountID: "account", activationEpoch: 1, recoveryCapability: AuthorityWire.base64URL(Data(repeating: 3, count: 32)), cloudChoice: .keep, localChoice: .delete, healthChoice: .keep, healthConfirmed: false, originalScope: CloudScopeV1(accountID: "account", cloudSpaceID: "cloud", zoneID: "matches", activationEpoch: 1))
+    saga.lastIssue = .unavailable
+    XCTAssertEqual(LifecycleStatusModel.deletionRows(saga)[0].progress, .failed)
     saga.backendDeleted = true; saga.localProgress = .completed; saga.localTransportProgress = .failed
     let rows = LifecycleStatusModel.deletionRows(saga)
     XCTAssertEqual(rows.count, 4)

@@ -73,7 +73,7 @@ public struct DeletionStatusRow: Sendable {
     return max(0, Double(migration.eligibleAt) - now.timeIntervalSince1970)
   }
   public static func deletionRows(_ saga: DeletionSagaV4) -> [DeletionStatusRow] {
-    [DeletionStatusRow(id: "backend", title: "后台账号与 Apple 撤销", progress: saga.backendDeleted ? .completed : .pending),
+    [DeletionStatusRow(id: "backend", title: "后台账号与 Apple 撤销", progress: saga.backendDeleted ? .completed : saga.lastIssue == nil ? .pending : .failed),
      DeletionStatusRow(id: "cloud", title: "CloudKit 比赛数据", progress: saga.cloudProgress),
      DeletionStatusRow(id: "local", title: "本地数据", progress: saga.localDataProgress),
      DeletionStatusRow(id: "health", title: "App 创建的健康运动", progress: saga.healthProgress)]

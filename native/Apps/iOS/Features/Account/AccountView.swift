@@ -27,6 +27,7 @@ struct AccountView: View {
           if context.account.phase != .unavailable {
             if context.account.phase == .signedOut {
               Button("通过 Apple 登录") { run(.signIn) }.accessibilityIdentifier("account-sign-in")
+              if context.account.issue != nil { Button("明确重新验证 Apple 身份") { run(.renew) }.accessibilityIdentifier("account-renew") }
             } else {
               Button("继续确认原请求") { run(.recover) }.accessibilityIdentifier("account-recover")
               Button("重新验证 Apple 身份") { run(.renew) }.accessibilityIdentifier("account-renew")
@@ -42,6 +43,7 @@ struct AccountView: View {
           Toggle("允许匿名使用统计", isOn: Binding(get: { context.lifecycle.analyticsEnabled == true }, set: { enabled in Task { await context.lifecycle.perform(.analytics(enabled)) } }))
             .disabled(!context.lifecycle.available || context.lifecycle.busy || context.lifecycle.analyticsEnabled == nil).accessibilityIdentifier("analytics-toggle")
           Text(context.lifecycle.analyticsEnabled == nil ? "统计设置待确认。" : "统计默认关闭；关闭后清除尚未发送的统计队列。").font(.caption).foregroundStyle(.secondary)
+          if let issue = context.lifecycle.issue { Text(issue).foregroundStyle(.orange).accessibilityIdentifier("account-lifecycle-issue") }
         }
         if context.account.development {
           Section("开发身份检查") {
@@ -56,5 +58,5 @@ struct AccountView: View {
         } message: { Text("会暂停当前写入并保留记录，随后需要重新验证并载入。") }
     }
   }
-  private func run(_ action: AccountUserAction) { Task { await context.account.perform(action); await context.refreshRecording() } }
+  private func run(_ action: AccountUserAction) { Task { await context.account.perform(action); if context.account.issue == nil { await context.refreshRecording() } } }
 }

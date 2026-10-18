@@ -10,3 +10,9 @@
 - 真实 Watch 注册必须保留 submit / recover 类型、原 request 与 challenge、knownAbandoned 关闭语义；WC transport 激活、配对失效及唯一观察者沿018约束，不从来包或连接状态推断账号身份。
 
 Debug 仅使用 `M4-Debug-Info.plist` 的本地网络能力；Release 使用原 Info，无开发 provider / 控制文件入口。Mac `ui-test.sh` 启动仓库既有 fixture executable，通过每安装私有0600配置和 typed mailbox 交换短暂授权；App 不启动进程。该方案不能代表 Apple 登录、CloudKit、WatchConnectivity 或健康权限验收。
+
+已只读核对024冻结 final `a8ad01157cc0752f41790ac2b88b06bda04efb0e` 的两个 README；025未合入该SDK候选。026还需明确：
+
+- `KeychainDeviceCredentialStore` 的固定 service/account、真实 installationID、businessDatabaseURL、可选 accessGroup，以及所有同 item 进程共用的保留 controlDirectory；owner lease inode 与父目录不得作为业务数据删除。
+- `CloudKitDriverConfiguration` 的明确 containerIdentifier/environment，与实际签名构建一致；它不能在运行时切换服务器环境。`CloudOwnedStaging` root/control URL 及其 DB/WAL/owner 文件必须独立登记并保留控制，SDK回调停止后再做原scope分项擦除。
+- 显式双身份 admission 后的 identityGeneration，同时 fence vault 与 staging；旧 actors/tasks 先取消并 join。真实 Apple adapter 的当前 scene anchor、取消和身份回调，以及真实 Cloud identity availability 均由026装配验收。

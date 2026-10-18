@@ -175,13 +175,19 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
   var closed = false
   init(_ configuration: DevelopmentAuthorityConfiguration, root: URL) async throws {
     self.configuration = configuration; self.root = root
+    let directory = root.appendingPathComponent(configuration.namespace)
+    let existingDatabase = FileManager.default.fileExists(atPath: directory.appendingPathComponent("matches.sqlite").path)
+    if existingDatabase {
+      for original in ["development.key", "device.identity", "authority.fixture"] {
+        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(original).path) else { throw SessionError.identityUnavailable }
+      }
+    }
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
     let repo = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: configuration.namespace, authorityTrust: trust, cloudSavePolicy: .development(databaseNamespace: configuration.namespace))
     repository = repo
-    let directory = root.appendingPathComponent(configuration.namespace)
     let matches = try await repo.matchIDs(), binding = try await repo.accountBindingV4()
     let attempts = try await repo.authAttemptsV4(), registrations = try await repo.pendingWatchRegistrationAttemptsV4()
-    let hasData = !matches.isEmpty || binding != nil || !attempts.isEmpty || !registrations.isEmpty
+    let hasData = existingDatabase || !matches.isEmpty || binding != nil || !attempts.isEmpty || !registrations.isEmpty
     let fingerprint = Data((configuration.keyID + "\n" + configuration.publicKey + "\n" + configuration.cloudSpaceID + "\n" + configuration.subject).utf8)
     let pin = directory.appendingPathComponent("authority.fixture")
     if FileManager.default.fileExists(atPath: pin.path) { guard try Data(contentsOf: pin) == fingerprint else { throw SessionError.identityUnavailable } }

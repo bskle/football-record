@@ -39,6 +39,58 @@ import CloudSync
     XCTAssertEqual(context.recording.feedbackCount, feedback + 1)
     await context.shutdown()
   }
+  func testSignedOutStatisticsFailureAndAccountFailureRemainIndependent() async throws {
+    let host = try DevelopmentFixtureHost(); defer { host.close() }
+    let context = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+    XCTAssertNil(context.recording.snapshot)
+    await context.lifecycle.perform(.analytics(true))
+    XCTAssertEqual(context.lifecycle.analyticsEnabled, false)
+    let dataIssue = try XCTUnwrap(context.lifecycle.issue)
+    XCTAssertNil(context.account.issue)
+    await context.account.perform(.recover)
+    let accountIssue = try XCTUnwrap(context.account.issue)
+    XCTAssertEqual(context.lifecycle.issue, dataIssue)
+    await context.lifecycle.refresh()
+    XCTAssertNil(context.lifecycle.issue); XCTAssertEqual(context.account.issue, accountIssue)
+    await context.lifecycle.perform(.analytics(true)); await context.account.refresh()
+    XCTAssertNotNil(context.lifecycle.issue); XCTAssertNil(context.account.issue)
+    XCTAssertNil(context.recording.snapshot)
+    await context.shutdown()
+  }
+  func testExistingEmptyDatabaseNeverRegeneratesMissingOriginalIdentityKeyOrPin() async throws {
+    for file in ["development.key", "device.identity", "authority.fixture"] {
+      let host = try DevelopmentFixtureHost(); defer { host.close() }
+      let first = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+      let matches = try await first.repository.matchIDs(); XCTAssertTrue(matches.isEmpty)
+      await first.shutdown()
+      let original = host.appRoot.appendingPathComponent(host.configuration.namespace).appendingPathComponent(file)
+      try FileManager.default.removeItem(at: original)
+      do {
+        let invalid = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+        await invalid.shutdown(); XCTFail("Existing database must retain its original identity/key/pin")
+      } catch { XCTAssertEqual(error as? SessionError, .identityUnavailable) }
+      XCTAssertFalse(FileManager.default.fileExists(atPath: original.path), "No missing original file may be regenerated")
+    }
+  }
+  func testExpiredChallengeRequiresExplicitFreshAuthentication() async throws {
+    let host = try DevelopmentFixtureHost(); defer { host.close() }; host.serve()
+    let context = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
+    _ = try host.command(["op":"clock", "now":Int(Date().timeIntervalSince1970)-600])
+    await context.account.perform(.signIn)
+    XCTAssertFalse(context.account.canEnterRecording)
+    XCTAssertEqual(context.account.issue, "原验证已过期，请明确重新验证。")
+    let pending = try await context.repository.pendingAuthAttemptsV4(); XCTAssertTrue(pending.isEmpty)
+    let ids = host.appRoot.appendingPathComponent(host.configuration.namespace).appendingPathComponent("development-requests.json")
+    let original = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: ids))
+    _ = try host.command(["op":"clock", "now":Int(Date().timeIntervalSince1970)])
+    await context.account.perform(.renew)
+    XCTAssertTrue(context.account.canEnterRecording, context.account.issue ?? "")
+    let renewed = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: ids))
+    XCTAssertNotEqual(original["auth"], renewed["auth"]); XCTAssertNotEqual(original["challenge"], renewed["challenge"])
+    let attempt = try await context.repository.authAttemptV4(requestID: XCTUnwrap(renewed["auth"]))
+    XCTAssertNotNil(attempt)
+    await context.shutdown()
+  }
   func testInitiallyUnverifiedAccountGatePublishesRealHTTPAdmission() async throws {
     let host = try DevelopmentFixtureHost(); defer { host.close() }; host.serve()
     let context = try await DevelopmentAuthorityScenario.make(configuration: host.configuration, rootDirectory: host.appRoot)
