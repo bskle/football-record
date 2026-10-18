@@ -1,6 +1,6 @@
 # M4 账号、权威锁、私有云与生命周期合同
 
-状态：NATIVE-020 工程冻结稿；它定义 NATIVE-021～026 的交接边界，不表示相关软件已实现或真实环境已通过。依据为产品 [0.10 / 0.11 / 0.12 / 0.17](../../0-产品方案.md)、[母计划 M4](../../superpowers/plans/2026-10-15-native-development.md)、[M3 合同](m3-durable-sync.md)；执行文件见 [M4 子计划](../../superpowers/plans/2026-10-18-native-m4.md)。最低 iOS 17 / watchOS 10 不变。
+状态：NATIVE-020冻结合同，2026-10-19由[GIT-005](../tasks/GIT-005.md)补交付记录及027/028删除适配责任。021/022本地软件已双审合入（Node56 / Cloud42与两个新增最低simulator SDK编译），023仍在独立树；024～028及真实环境未由本合同宣告完成。依据为产品 [0.10 / 0.11 / 0.12 / 0.17](../../0-产品方案.md)、[母计划 M4](../../superpowers/plans/2026-10-15-native-development.md)、[M3 合同](m3-durable-sync.md)；执行文件见 [M4 子计划](../../superpowers/plans/2026-10-18-native-m4.md)。最低 iOS 17 / watchOS 10 不变。
 
 ## 1. 事实源和实现层次
 
@@ -12,7 +12,7 @@
 | AccountKit | 严格控制 DTO、HTTP、签名验证、Apple / 凭据边界 | 解码 JWT 不等于验证 Apple 身份 |
 | HealthKit / DeviceSync | 原记录设备的采集与已授权 peer 传输 | WC 配对、checksum 或 iCloud 登录不等于 App 账号认证 |
 
-021 首先交付 Node `v22.23.1` 内置 HTTP / crypto / `node:sqlite` 的文件持久本地 reference authority，默认只监听 loopback。实际 Serverless 供应商、原子持久存储适配、TLS、密钥管理、部署与备份恢复均在 026 实际服务门槛验收；本地 SQLite 或 Experimental API 不称为已部署生产服务。022 首先交付持久云传输台账与 fake driver，023 完成真实 loopback HTTP → 原 Session / SQLite 的软件纵向切片。024 交付 SDK 适配，025 交付装配与状态 UI，026 才执行真实服务/账号/设备 E2E。
+021已交付 Node `v22.23.1` 内置 HTTP / crypto / `node:sqlite` 的文件持久本地 reference authority，默认只监听 loopback。实际 Serverless 供应商、原子持久存储适配、TLS、密钥管理、部署与备份恢复均在 026 实际服务门槛验收；本地 SQLite 或 Experimental API 不称为已部署生产服务。022已交付持久云传输台账与fake driver；023正在独立树实现真实 loopback HTTP → 原 Session / SQLite 的软件纵向切片。024交付客户端SDK，027补服务端AppleRevoker，028交付独立HealthKitDeletion；025交付工程/UI，026映射删除saga并执行真实服务/账号/设备E2E。
 
 生产 Bootstrap 的 permit、workout、transport、peer trust、CloudKit 和 auth 默认 unavailable；只有逐项通过相应真实验收后由唯一工程所有者显式装配。开发服务、开发签名 key、测试鉴权 factory、开发云 driver 只可进入独立 development namespace，UI 持续显示“开发模拟锁 / 开发配对 / 开发云演练”。不能通过设置一个 URL、注入 permit provider 或删除 guard 开放生产。
 
@@ -150,10 +150,34 @@ M3 `receiveV2`、fragment/ACK 接收的 development permit 精确匹配、防伪
 
 分析默认关闭；关闭即丢弃尚未发送的可选 analytics queue，不删除业务、锁控制或必要故障状态。metric allowlist：`registered, activeDay, matchCompleted, matchIncomplete, watchRecorded, syncSucceeded, syncFailed, recoverySucceeded, recoveryFailed`，计数去重稳定 requestID；活动只由实际使用事件采样，无持续心跳。服务根据匿名账号计数和日桶计算比赛数/最后活跃/DAU、WAU、MAU、设备与资格状态、版本分布和成功率，不保存事件内容、心率或精确位置。退出/删号关闭发送并清理未发统计；匿名去身份 aggregate 可保留。日志只输出有限 code/requestID/operation/耗时，不输出 DTO/body/Authorization/Apple 字段。
 
+### 7.1 NATIVE-027：服务端AppleRevoker
+
+027是`backend/**`唯一写入者，可在含021的最新已验证dev上与023独立并行。024只负责客户端AuthenticationServices/fresh reauthentication和Keychain/CloudKit；服务端token exchange、revoke及ES256 client_secret由027承担，TeamID、KeyID、`.p8`私钥和client_secret绝不进入App、业务库、仓库或日志。默认revoker仍unavailable；development受控transport/factory与固定Apple生产transport严格分离，真实配置/撤销留026。
+
+当前021 hook只接`authorizationCode`，不足以独立核验code所代表的身份。027把`apple-verifier.mjs`验证结果补为内存已验证`issuer/subject/audience/nonce/issuedAt/environment`；`device-auth.mjs`仅在transient reauth map中保留code及此上下文，绑定原account/device/key/epoch/reauthenticationID。`lifecycle.mjs`在原pending-delete和同设备PoP验证后，将该对象交`appleRevoker({authorizationCode, expectedApple, reauthenticationID})`（返回`Promise<{revoked: true}>`）；expectedApple不得从客户端自报字段或解码未验JWT构造，不持久真实subject/code/token。await后沿021既有pending-request/digest/epoch/reauth CAS推进，不能把别人的code或新的删除请求代入。
+
+生产网络固定HTTPS且拒绝redirect：`POST https://appleid.apple.com/auth/token` 的form字段为`client_id, client_secret, code, grant_type=authorization_code`；仅当原已验证授权流程明确携带且匹配配置的redirect_uri时原值带入，原生AS无该值则省略。client_id须等于配置allowlist和expected audience；client_secret为服务端ES256 JWT，header `alg=ES256,kid=配置KeyID`，claims `iss=TeamID,sub=client_id,aud=https://appleid.apple.com,iat=当前秒,exp=iat+300`，JOSE签名用64-byte P1363而非DER。Apple返回的id_token仍按可信Apple JWKS及其alg/key匹配验签，校验exp/iat合法并比对iss/sub/aud/nonce与expectedApple一致；此RS256验证边界与ES256 client_secret签名不是同一用途。身份不匹配、缺id_token或refresh_token拒绝，不调用revoke。
+
+通过后以同一client_id/client_secret向`POST https://appleid.apple.com/auth/revoke`发form `client_id, client_secret, token=内存refresh_token, token_type_hint=refresh_token`。HTTP200空body正确视为该次撤销成功，不强制JSON；非200/超时/非法交换响应转有限错误码，不输出response body、code或token。网络await全在SQL外。未知token exchange结果不得盲重放单次code；状态保持待撤销/需fresh reauthentication。refresh_token仅在本次内存中存在时可重试同一撤销，进程重启或token遗失必须fresh auth并绑定原pending-delete，不伪造已撤销、不重建删除请求。仅成功撤销且原本地CAS提交后才推进appleRevocation；删除其他分项不由该adapter推进。
+
+### 7.2 NATIVE-028：独立HealthKitDeletion
+
+028仅持新`native/Modules/HealthKitDeletion/**`及自身任务/验证卡；不写008/018采集候选、AccountKit、Apps、project/scheme/entitlements或脚本。模块自带SwiftPM、受控driver和独立文件SQLite控制ledger，不成为第二业务MatchStore。默认driver unavailable，SDK执行默认关闭；第一阶段只host受控测试及iOS17/watchOS10 sim/device四triple编译，不调用用户HealthStore查询、删除或授权prompt。
+
+删除请求固定稳定requestID、selectionDigest及单独Health删除confirmation（确认ID/时间/同一选择摘要）；每目标精确含`workoutUUID, matchID, recordingDeviceID, segmentToken, expectedSourceBundleID`。这些本地控制字段不送后台/云，不保存健康样本；同requestID异选择拒绝。026从原采集registry映射已确认范围，缺映射/metadata/source匹配时保留分项失败，不能扩大为所有Workout。真实predicate为 **当前`HKSource.default()` AND OR(每个目标UUID AND matchID AND recorderID AND segmentToken)**，先比expected source与当前App source；不能把各字段多值集合交叉匹配。仅允许App自身source保存对象；Phone/Watch source及授权不可假定相同，不删除第三方或另一source的数据。无需先做Health查询；空可见query不证明读权限或全局已空。
+
+ledger独立于普通本地业务擦除目录，先事务持久`executing/attemptID/完整request摘要`再调用SDK；超时保留`awaitingOutcome`，同一未决attempt不并发重复发。重开未知结果只能对原scope/原request恢复或重试；迟到callback必须匹配原request/selectionDigest/attemptID，不覆盖更新选择、不推进CloudKit/本地/账号分项。`success=true,count=0`只记录该精确scope本次操作结果，不称全部健康数据已空或已获读取权限；错误/未知结果保留分项状态和可恢复诊断。普通本地擦除后控制ledger及最小恢复信息仍可读取，完成或用户明确保留分项后才按026的saga规则收尾。
+
+026将028的requestID/选择摘要/confirmation/per-scope结果映射到既有healthConfirmed/healthProgress；025负责运行时明确确认和进度UI。027后端删除与028 Health删除互不代替成功；真实source/权限、本人明确确认及目标对象删除验收在026单独登记，SDK候选此前保留树。
+
 ## 8. 必测故障与真实门槛
+
+027/028是原删除要求的责任补足，不新增产品决策。024客户端SDK、027服务端撤销和028独立删除driver分别验证；025只负责工程/UI装配，026统一映射saga和实际环境。027纯参考server可按双审及本地gate入dev而不开放生产；024/028 SDK候选门槛前保留独立树。受控driver/四triple编译不证明用户HealthStore读/删或真实Apple撤销。
 
 自动层必须覆盖两个真实 DB connection/worker 并发 acquire、auth首次COMMIT丢响应恢复同session且不重消费challenge、仅修改PoP nonce/时间而不换签名被拒绝、删号COMMIT丢响应凭capability恢复、删号同Apple重注册拒旧epoch proof、同 ID 异载荷、commit 前失败/后丢响应/关闭重开、锁得而本地启动失败、终结和新开交错、旧 epoch/旧 match 终结、新 Watch/账号切换、伪签名/kid/跨域重放、生产 DTO 不能通过开发 factory、schema3→4 每故障点回滚及旧 canonical bytes 零变化。云覆盖 token 与事实原子性、同batch首次receipt优先重放/不同batch乱序parent-token CAS/expired后旧generation不复活cursor、冲突/配额/partial failure、tombstone 不复活、tokenExpired 全扫、账号切换停写与完整 proof 失效。迁移覆盖所有拒绝项、604799/604800 秒、时钟倒退/重开、重认证过期；删除覆盖每一步独立失败与重开，不合并成功提示。
 
 真实层须绑定 exact SHA、服务部署版本、两个 Apple/iCloud 身份、签名设备/OS、时间和结果：Apple 登录/撤销、双身份不匹配、Watch 自身联网与经 iPhone 代理开赛、完整离线结束→手机持久→CloudKit→后台释放→新开、手机异常终结与迟到 Watch、正常/七天丢失迁移、删号四分项。008/010/016/018 保留原门槛；编译、fixture、单机服务和两模拟器都不替代真实层。M4 全部属于 V1，未测项目留在 024/026 任务分支，不提前勾完成或晋级 release/main。
 
 实现依据（2026-10-18 官方预检）：[Apple 用户验证](https://developer.apple.com/documentation/signinwithapple/verifying-a-user)、[Apple JWKS](https://appleid.apple.com/auth/keys)、[CloudKit zone 变更](https://developer.apple.com/documentation/cloudkit/ckfetchrecordzonechangesoperation)、[条件保存策略](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/recordsavepolicy/ifserverrecordunchanged)、[Apple private DB 示例](https://github.com/apple/sample-cloudkit-privatedb-sync)、[Node 22.23.1 SQLite](https://nodejs.org/download/release/v22.23.1/docs/api/sqlite.html)、[Node crypto](https://nodejs.org/download/release/v22.23.1/docs/api/crypto.html)。官方 API 页面与本机 SDK 编译只证明接口依据；Node SQLite 文档仍标 active development，真实 Apple/CloudKit/Serverless 行为另验。
+
+027/028补充依据（2026-10-19官方只读预检）：[Apple token验证/交换](https://developer.apple.com/documentation/signinwithapplerestapi/generate-and-validate-tokens)、[token撤销](https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens)、[服务端client secret](https://developer.apple.com/documentation/accountorganizationaldatasharing/creating-a-client-secret)、[HKSource](https://developer.apple.com/documentation/healthkit/hksource)、[限定predicate删除](https://developer.apple.com/documentation/healthkit/hkhealthstore/deleteobjects%28of%3Apredicate%3Awithcompletion%3A%29)。文档和SDK检查不表示实际Apple凭据、用户HealthStore授权或删除已执行。
