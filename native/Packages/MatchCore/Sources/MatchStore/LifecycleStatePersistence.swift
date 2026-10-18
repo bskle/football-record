@@ -20,7 +20,8 @@ extension MatchStore {
         return try verifyLifecycleV4(value).body.migration
     }
     func migrationBlocksBusinessV4()throws->Bool {guard let m=try latestMigrationV4() else {return false};return m.state != "activated"}
-    func validateAccountBusinessWriteV4()throws {if let b=try currentBindingV4() {guard !b.suspended,try !migrationBlocksBusinessV4() else {throw AuthorityError.identityChanged}}}
+    func deletionBlocksBusinessV4()throws->Bool {try db.rows("SELECT id FROM lifecycle_steps_v4 WHERE id LIKE 'deletion:%' LIMIT 1").first != nil}
+    func validateAccountBusinessWriteV4()throws {if let b=try currentBindingV4() {guard !b.suspended,try !migrationBlocksBusinessV4(),try !deletionBlocksBusinessV4() else {throw AuthorityError.identityChanged}}}
     public func acceptLifecycleResultV4(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1)throws {
         try db.transaction {
             guard let b=try currentBindingV4(),let trust=authorityTrust,try controlV4(intent.requestID)==intent else {throw AuthorityError.intentMismatch}
@@ -70,6 +71,7 @@ extension MatchStore {
               prior.intent==saga.intent,prior.accountID==saga.accountID,prior.activationEpoch==saga.activationEpoch,prior.recoveryCapability==saga.recoveryCapability,
               prior.cloudChoice==saga.cloudChoice,prior.localChoice==saga.localChoice,prior.healthChoice==saga.healthChoice,prior.healthConfirmed==saga.healthConfirmed,
               !prior.backendDeleted || saga.backendDeleted,prior.backendReceipt==nil || prior.backendReceipt==saga.backendReceipt else {throw StoreError.staleGeneration}
+        guard saga.localProgress != .completed || prior.localProgress == .completed else {throw AuthorityError.intentMismatch}
         // A client progress update cannot invent backend deletion proof.
         guard prior.backendDeleted==saga.backendDeleted,prior.backendReceipt==saga.backendReceipt else {throw AuthorityError.intentMismatch}
         try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+saga.intent.requestID)
@@ -93,6 +95,7 @@ extension MatchStore {
     public func eraseLocalBusinessV4(requestID:String,expectedRevision:Int64)throws->DeletionSagaV4 {
         let result=try db.transaction {
             guard var saga=try deletionSagaV4(requestID:requestID),saga.revision==expectedRevision,saga.backendDeleted,saga.backendReceipt != nil,saga.localChoice == .delete,expectedRevision<Int64.max else {throw AuthorityError.intentMismatch}
+            for id in try matchIDs() {if let descriptor=try descriptorAndGeneration(id)?.0 {guard try loadOperations(matchID:id,descriptor:descriptor).allSatisfy({$0.state != .pending && $0.state != .needsReconciliation}) else {throw AuthorityError.unavailable}}}
             let tables=["matches","events","commands","outbox","inbound","diagnostics","completion","capture_identities","capture_revisions","capture_operations","capture_operation_history","business_outbox","commands_v2","completion_confirmations","completion_v2","sync_delivery_v3","sync_fragments_v3","sync_context_v3","sync_registry_v3","sync_routes_v3","sync_sequences_v3","sync_inbox_v3","sync_acknowledgements_v3","sync_ack_controls_v3","sync_receive_progress_v3","cloud_applied_batches_v4","cloud_checkpoints_v4","cloud_records_v4","cloud_history_v4","cloud_cursors_v4","cloud_deletions_v4","peer_contexts_v4","peer_inbox_v4","peer_grants_v4"]
             for table in tables {try db.execute("DELETE FROM "+table)}
             saga.localProgress = .completed;saga.revision += 1
@@ -102,7 +105,7 @@ extension MatchStore {
     func analyticsStateV4()throws->StoredAnalyticsV4 {try readLifecycleV4(StoredAnalyticsV4.self,"analytics-state") ?? StoredAnalyticsV4()}
     public func analyticsEnabledV4()throws->Bool {try analyticsStateV4().enabled}
     public func setAnalyticsEnabledV4(_ enabled:Bool)throws {
-        try db.transaction {if enabled {_=try activeBindingV4()};var state=try analyticsStateV4();state.enabled=enabled;if !enabled {state.pending=[]};try writeV4(state,table:"lifecycle_steps_v4",id:"analytics-state");try fail(.beforeCommit)}
+        try db.transaction {if enabled {_=try activeBindingV4();guard try !deletionBlocksBusinessV4() else {throw AuthorityError.identityChanged}};var state=try analyticsStateV4();state.enabled=enabled;if !enabled {state.pending=[]};try writeV4(state,table:"lifecycle_steps_v4",id:"analytics-state");try fail(.beforeCommit)}
     }
     public func enqueueAnalyticsV4(_ event:AnalyticsEventV4)throws {
         try db.transaction {

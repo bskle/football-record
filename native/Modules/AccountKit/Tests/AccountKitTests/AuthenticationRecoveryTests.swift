@@ -13,19 +13,19 @@ actor FixtureAppleSignIn:AppleSignInDriver {
     func authorize(nonceSHA256:String) async throws->AppleAuthorization {
         let response=try fixture.command(["op":"apple","nonce":nonceSHA256,"subject":subject]);let token=try XCTUnwrap(response["identityToken"] as? String);lastToken=token
         if failBeforeCommit {failBeforeCommit=false;_=try fixture.command(["op":"databaseFault","value":true])}
-        return AppleAuthorization(identityToken:token,authorizationCode:"client-transient-code-never-durable")
+        return AppleAuthorization(identityToken:token,authorizationCode:response["authorizationCode"] as? String ?? "client-transient-code-never-durable")
     }
 }
 final class AuthenticationRecoveryTests:XCTestCase,@unchecked Sendable {
-    struct Harness {let repo:SQLiteSessionRepository;let service:AccountService;let vault:MemoryDeviceCredentialVault;let signer:DevelopmentDeviceSigner;let session:MatchSession;let apple:FixtureAppleSignIn;let root:URL}
-    func harness(_ f:NodeAuthorityFixture,root:URL?=nil,signer:DevelopmentDeviceSigner?=nil,subject:String="new-auth-subject",now:Date?=nil) async throws->Harness {
+    struct Harness {let repo:SQLiteSessionRepository;let service:AccountService;let vault:MemoryDeviceCredentialVault;let signer:DevelopmentDeviceSigner;let session:MatchSession;let apple:FixtureAppleSignIn;let root:URL;let client:AuthorityClient}
+    func harness(_ f:NodeAuthorityFixture,root:URL?=nil,signer:DevelopmentDeviceSigner?=nil,subject:String="new-auth-subject",now:Date?=nil,deviceID:String="new-client") async throws->Harness {
         let root=root ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),date=now ?? Date(timeIntervalSince1970:Double(f.metadata.now))
         let signer=try signer ?? DevelopmentDeviceSigner(namespace:"auth-tests"),vault=MemoryDeviceCredentialVault(),apple=FixtureAppleSignIn(f,subject:subject)
         let trust=try AuthorityTrustConfiguration(environment:.development,publicKeys:[f.metadata.keyID:f.metadata.publicKey]),repo=try SQLiteSessionRepository(rootDirectory:root,databaseNamespace:"auth-session",authorityTrust:trust)
         let client=AuthorityClient(relay:try URLSessionAuthorityRelay(baseURL:URL(string:f.metadata.baseURL)!,environment:.development),vault:vault,signer:signer,trust:trust,now:{date})
-        let session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:"new-client"),clock:FixedClock(date:date),ids:UUIDSessionIDFactory(),permits:UnavailableStartPermitProvider(),workout:UnavailableWorkoutGateway(),environment:.development(databaseNamespace:"auth-session"))
-        let service=AccountService(client:client,repository:repo,coordinator:session,deviceID:"new-client",cloudSpaceID:"fixture-cloud",apple:apple)
-        return Harness(repo:repo,service:service,vault:vault,signer:signer,session:session,apple:apple,root:root)
+        let session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:deviceID),clock:FixedClock(date:date),ids:UUIDSessionIDFactory(),permits:UnavailableStartPermitProvider(),workout:UnavailableWorkoutGateway(),environment:.development(databaseNamespace:"auth-session"))
+        let service=AccountService(client:client,repository:repo,coordinator:session,deviceID:deviceID,cloudSpaceID:"fixture-cloud",apple:apple)
+        return Harness(repo:repo,service:service,vault:vault,signer:signer,session:session,apple:apple,root:root,client:client)
     }
     func testRealAppleChallengeProofAndAuthRecoverUseOriginalCanonicalDigestWithoutPersistingSecrets() async throws {
         let f=try NodeAuthorityFixture();defer {f.close()};let h=try await harness(f)

@@ -57,3 +57,7 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 
 - auth未知结果补测：真实 Node beforeCommit 后401不能证明原请求未提交，client持久保留原attempt并限制新auth ID/challenge；实际红2断言→绿，auth单轮3/0。明确 knownRevoked/knownExpired可解除原attempt并暂停旧身份。后台永久absence防迟到补口由root独立032处理，未消费未审wire。
 - 原 Store / v2 新业务也受持久 suspended 与迁移fence限制；新增直接Store绕过红→绿，生命周期Store选测单轮4/0。附加LifecycleInboundCoordinator共用同Session账号队列，不扩大原协议。
+
+- 删除/身份HTTP实际红→绿3/0：真实027 Apple exchange/revoke loopback sidecar，delete COMMIT丢响应后无session capability恢复；cloud失败/local及单独确认health成功，各进度重开保留并仅重试失败项；identityChanged同时业务与transport DB停写，仅清可选统计；正常迁移本地endedPending在HTTP前拒绝。
+- 非空业务本地擦除新增红→绿：内部复用原capture校验避免public读取嵌套transaction；尚有pending/reconcile原token时不擦业务；普通saga update不能伪造local completed。
+- 此checkpoint完整Core单轮240/0（44/132/47/17）与AccountKit单轮23/0（Cloud7/HTTP10/Auth3/Lifecycle3），日志 `023-5-deletion-core-checkpoint.log` / `023-5-deletion-account-checkpoint.log`。正常最终checkpoint/七天迁移、peer、032终态仍在执行，不表示whole023冻结。

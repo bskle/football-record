@@ -25,7 +25,7 @@ final class LifecycleStateTests:XCTestCase,@unchecked Sendable {
         let after=try await r.pendingAnalyticsV4(),binding=try await r.accountBindingV4();XCTAssertTrue(after.isEmpty);XCTAssertEqual(binding,c.binding)
     }
     func testDeletionStagesCASAndLocalEraseRetainCapabilityUntilIndependentChoicesFinish() async throws {
-        let c=try context(),s=try store(c),saga=try saga(c);try await s.bindAccountV4(c.binding);try await s.createDeletionSagaV4(saga)
+        let c=try context(),s=try store(c),saga=try saga(c);try await s.bindAccountV4(c.binding);_=try await s.commit(StoreCommit(commandID:"local-data",expectedGeneration:0,descriptor:h.descriptor(),events:[],packets:[]));try await s.createDeletionSagaV4(saga)
         do {_=try await s.eraseLocalBusinessV4(requestID:"delete",expectedRevision:0);XCTFail()}catch{}
         let receipt=try receipt(c,requestID:"delete",digest:saga.intent.digest,operation:.deleteAccount,result:.deleted,extra:["deletion":["backend":"backendDeleted","apple":"revoked","cloud":"clientManaged","local":"clientManaged","health":"separateConfirmation"]])
         let backend=try await s.acceptDeletionV4(requestID:"delete",receipt:receipt,expectedRevision:0);XCTAssertTrue(backend.backendDeleted);XCTAssertFalse(backend.finished)

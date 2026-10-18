@@ -324,7 +324,7 @@ extension MatchStore {
     func validateCaptureAbsenceIntegrity(descriptor: MatchDescriptor) throws {
         _ = try loadOperations(matchID: descriptor.matchID, descriptor: descriptor)
     }
-    private func loadOperations(matchID: String, descriptor: MatchDescriptor) throws -> [CaptureOperationRecord] {
+    func loadOperations(matchID: String, descriptor: MatchDescriptor) throws -> [CaptureOperationRecord] {
         let saved = try loadSavedOperations(matchID: matchID, descriptor: descriptor)
         try validateAbsentCancellations(saved, descriptor: descriptor)
         return saved.map(\.record)
