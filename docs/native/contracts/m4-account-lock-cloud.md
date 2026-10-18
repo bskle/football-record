@@ -1,6 +1,6 @@
 # M4 账号、权威锁、私有云与生命周期合同
 
-状态：NATIVE-020冻结合同，GIT-005补适配责任；2026-10-19当前本地交付见[GIT-006](../tasks/GIT-006.md)。021/022/027及029～033已双审集成，当前033本轮Cloud80，Node128仅032旧后端层；028 final `0fa3dff4d3232e72257f6fa115ecada873f086db` 为29host/四SDK双审候选留树，023未freeze/final/合入，024/025待接口交接。所有真实账号/设备/配置门槛仍留026，不宣称M4完成。依据为产品[0.10/0.11/0.12/0.17](../../0-产品方案.md)、[母计划M4](../../superpowers/plans/2026-10-15-native-development.md)、[M3合同](m3-durable-sync.md)及[M4子计划](../../superpowers/plans/2026-10-18-native-m4.md)；最低iOS17/watchOS10不变。
+状态快照：2026-10-19截止[GIT-007](../tasks/GIT-007.md)基线`dev=origin/dev=2642b426ee0ade276316a348537f72c0b2a1ed8a`。023执行source5ee7bd3/final f7f7a3b whole root+m2 exact PASS、actual2642全树同f7，单轮591/0+12最低sim SDK+2无签名generic sim App通过并同步，原生树实际archive/safe-d；034/035/036本地交付及清理完成。024/025已按base17f+accepted whole f7正式各树推进但未final/未入dev，selected不计591；028及008/010/016/018继续held，真实SDK/账号/设备/配置/部署/026组合擦除仍延后，production Unavailable、M4未完成。以下合同wire与证明边界不因本次状态更新改变；依据仍为[产品](../../0-产品方案.md)、[母计划](../../superpowers/plans/2026-10-15-native-development.md)、[M3合同](m3-durable-sync.md)及[M4计划](../../superpowers/plans/2026-10-18-native-m4.md)，最低系统不变。
 
 ## 1. 事实源和实现层次
 
@@ -12,7 +12,7 @@
 | AccountKit | 严格控制 DTO、HTTP、签名验证、Apple / 凭据边界 | 解码 JWT 不等于验证 Apple 身份 |
 | HealthKit / DeviceSync | 原记录设备的采集与已授权 peer 传输 | WC 配对、checksum 或 iCloud 登录不等于 App 账号认证 |
 
-021已交付 Node `v22.23.1` 内置 HTTP / crypto / `node:sqlite` 的文件持久本地 reference authority，默认只监听 loopback。实际 Serverless 供应商、原子持久存储适配、TLS、密钥管理、部署与备份恢复均在 026 实际服务门槛验收；本地 SQLite 或 Experimental API 不称为已部署生产服务。022已交付持久云传输台账与fake driver；023正在独立树实现真实 loopback HTTP → 原 Session / SQLite 的软件纵向切片。027服务端AppleRevoker及后续030/032已交本地参考软件；028为独立SDK候选。024客户端SDK、025工程/UI待023正式接口交接，026映射删除saga及全本地删除聚合并执行真实服务/账号/设备E2E。
+021已交付 Node `v22.23.1` 内置 HTTP / crypto / `node:sqlite` 的文件持久本地 reference authority，默认只监听 loopback。实际 Serverless 供应商、原子持久存储适配、TLS、密钥管理、部署与备份恢复均在 026 实际服务门槛验收；本地 SQLite 或 Experimental API 不称为已部署生产服务。022及023同facade本机软件已交付；当前591整轮含Node161/Core257/Cloud80/Account54/Presentation39，非早期选测累计。034仅本机ops/TLS fixture/备份点恢复，不证明持续durability/RPO/epoch高水位或生产部署。024客户端SDK和025工程/UI已正式独立推进，未final/未入dev；028保持独立SDK候选，026真实SDK/账号/设备及全owned ledger/staging/Store聚合验收未完成。
 
 生产 Bootstrap 的 permit、workout、transport、peer trust、CloudKit 和 auth 默认 unavailable；只有逐项通过相应真实验收后由唯一工程所有者显式装配。开发服务、开发签名 key、测试鉴权 factory、开发云 driver 只可进入独立 development namespace，UI 持续显示“开发模拟锁 / 开发配对 / 开发云演练”。不能通过设置一个 URL、注入 permit provider 或删除 guard 开放生产。
 
