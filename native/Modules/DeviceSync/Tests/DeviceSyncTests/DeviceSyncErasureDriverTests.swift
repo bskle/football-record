@@ -262,3 +262,84 @@ private struct UnboundDrainedWCDriver: WCSessionDriving, DeviceSyncErasureDrivin
     func enqueueFile(_ transfer: DriverFileTransfer) async throws { throw DeviceSyncError.unavailable }
     func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus { .drained }
 }
+
+
+extension DeviceSyncErasureDriverTests {
+    func testFencedReopenAdmissionOnlyAcceptsOriginalErasureRequest() async throws {
+        let f = try ManagedErasureFixture()
+        _ = try await f.service(driver: UnavailableDeviceSyncErasureDriver()).erase(f.request)
+        let reopened = try DeviceSyncStorageContext(root: f.root)
+        XCTAssertThrowsError(try DeviceSyncNativeStorageAdmission(context: reopened))
+        let admission = try DeviceSyncNativeStorageAdmission(context: reopened, erasureRequest: f.request)
+        XCTAssertEqual(try admission.withAccess { "control-only" }, "control-only")
+        let changed = try DeviceSyncLocalEraseRequest(binding: f.binding, requestID: f.request.requestID, requestDigest: String(repeating: "d", count: 64))
+        XCTAssertThrowsError(try DeviceSyncNativeStorageAdmission(context: reopened, erasureRequest: changed))
+        XCTAssertThrowsError(try PairingBaseline(directory: f.root.appendingPathComponent("state")))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.root.appendingPathComponent("state").path), "erasure admission cannot create pairing/canonical state")
+    }
+    func testNativeInventoryReadinessRejectsEmptyBeforeActivationAndAfterInvalidation() throws {
+        var readiness = DeviceSyncNativeErasureReadiness()
+        var reads = 0
+        func status(_ activated: Bool) throws -> DeviceSyncDrainStatus {
+            try readiness.drain(nativeActivated: activated, current: { reads += 1; return [String]() }, ownership: { _ in .foreign }, cancel: { _ in })
+        }
+        XCTAssertEqual(try status(false), .pending)
+        XCTAssertEqual(try status(true), .pending, "native state alone cannot replace this owner's activation callback")
+        XCTAssertEqual(reads, 0)
+        readiness.completed(active: true, failed: true)
+        XCTAssertEqual(try status(true), .pending)
+        readiness.completed(active: true, failed: false)
+        XCTAssertEqual(try status(false), .pending)
+        XCTAssertEqual(try status(true), .drained)
+        XCTAssertEqual(reads, 2, "trusted inventory is checked before and after cancellation")
+        readiness.invalidate()
+        XCTAssertEqual(try status(true), .pending)
+        XCTAssertEqual(reads, 2)
+    }
+    func testFencedNativeReopenStaysPendingUntilReadyAndOwnedInventoryActuallyDrains() async throws {
+        let f = try ManagedErasureFixture(), raw = Data("reopened-native-original".utf8)
+        let transfer = try f.queue().stage(raw, id: "reopened-original")
+        _ = try await f.service(driver: UnavailableDeviceSyncErasureDriver()).erase(f.request)
+        let reopened = try DeviceSyncStorageContext(root: f.root)
+        let driver = try ReopenedNativeHostDriver(context: reopened, request: f.request, transfers: [transfer])
+        let service = DeviceSyncErasureService(context: reopened, driver: driver)
+        let pending = try await service.erase(f.request)
+        XCTAssertEqual(pending, .pending(.pending))
+        XCTAssertEqual(driver.inventoryReads, 0)
+        driver.activationCompleted()
+        let ownedPending = try await service.erase(f.request)
+        XCTAssertEqual(ownedPending, .pending(.pending))
+        XCTAssertEqual(driver.cancelled, [transfer.token])
+        XCTAssertEqual(try Data(contentsOf: transfer.url), raw)
+        driver.finishOriginal()
+        guard case .completed(let receipt) = try await service.erase(f.request) else { return XCTFail("ready SDK inventory now drained") }
+        XCTAssertEqual(receipt.request, f.request)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: transfer.url.path))
+        XCTAssertThrowsError(try reopened.withActive {})
+        let replay = try await service.erase(f.request)
+        XCTAssertEqual(replay, .completed(receipt))
+    }
+}
+private final class ReopenedNativeHostDriver: DeviceSyncErasureDriving, @unchecked Sendable {
+    private let admission: DeviceSyncNativeStorageAdmission
+    private let lock = NSLock()
+    private var readiness = DeviceSyncNativeErasureReadiness()
+    private var activated = false
+    private var transfers: [DriverFileTransfer]
+    private var reads = 0
+    private var cancellations: [String] = []
+    init(context: DeviceSyncStorageContext, request: DeviceSyncLocalEraseRequest, transfers: [DriverFileTransfer]) throws {
+        admission = try DeviceSyncNativeStorageAdmission(context: context, erasureRequest: request); self.transfers = transfers
+    }
+    var inventoryReads: Int { lock.withLock { reads } }
+    var cancelled: [String] { lock.withLock { cancellations } }
+    func activationCompleted() { lock.withLock { activated = true; readiness.completed(active: true, failed: false) } }
+    func finishOriginal() { lock.withLock { transfers = [] } }
+    func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus {
+        try admission.withAccess { try lock.withLock {
+            try readiness.drain(nativeActivated: activated, current: { reads += 1; return transfers }, ownership: {
+                try deviceSyncTransferOwnership(namespaceID: request.binding.namespaceID, ownerDigest: request.binding.ownerDigest, transfer: $0, protocolMatches: true, sourceInsideRoot: true, request: request, expected: expected)
+            }, cancel: { cancellations.append($0.token) })
+        } }
+    }
+}

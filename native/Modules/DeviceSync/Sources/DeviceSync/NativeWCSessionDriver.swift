@@ -1,5 +1,30 @@
 import Foundation
 
+// Shared admission and queue readiness used by host regressions and native owners.
+struct DeviceSyncNativeStorageAdmission: Sendable {
+    let context: DeviceSyncStorageContext
+    let erasureRequest: DeviceSyncLocalEraseRequest?
+    init(context: DeviceSyncStorageContext, erasureRequest: DeviceSyncLocalEraseRequest? = nil) throws {
+        self.context = context; self.erasureRequest = erasureRequest
+        try withAccess {}
+    }
+    func withAccess<T>(_ body: () throws -> T) throws -> T {
+        if let erasureRequest { return try context.withFenced(erasureRequest, body) }
+        return try context.withActive(body)
+    }
+}
+struct DeviceSyncNativeErasureReadiness {
+    private var completedActivation = false
+    private(set) var revision = UUID()
+    mutating func completed(active: Bool, failed: Bool) { completedActivation = active && !failed; revision = UUID() }
+    mutating func invalidate() { completedActivation = false; revision = UUID() }
+    func isReady(nativeActivated: Bool) -> Bool { completedActivation && nativeActivated }
+    func drain<Handle>(nativeActivated: Bool, current: () throws -> [Handle], ownership: (Handle) throws -> DeviceSyncTransferOwnership, cancel: (Handle) throws -> Void) throws -> DeviceSyncDrainStatus {
+        guard isReady(nativeActivated: nativeActivated) else { return .pending }
+        return try deviceSyncDrainInventory(current: current, ownership: ownership, cancel: cancel)
+    }
+}
+
 enum DeviceSyncTransferOwnership { case owned, foreign, unresolved }
 func deviceSyncSourceInsideRoot(_ source: URL, root: URL) -> Bool {
     guard let actual = try? DeviceSyncStorageContext.identity(source.deletingLastPathComponent(), directory: true),
@@ -70,12 +95,22 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
     private var callbacks: DriverCallbacks?
     private var pending: [UUID: DriverSettlement<TransportReply>] = [:]
     private var activating = false
-    private let pairing: PairingBaseline
+    private let pairing: PairingBaseline?
     private var activationAccepted = false
-    public init(stateDirectory: URL) throws {
+    private var drainingRequest: DeviceSyncLocalEraseRequest?
+    private var erasureReadiness = DeviceSyncNativeErasureReadiness()
+    public convenience init(stateDirectory: URL) throws { try self.init(stateDirectory: stateDirectory, request: nil) }
+    /// Reopens only the retained control gate for an already persisted erasure.
+    /// It never creates pairing state or admits normal send/receive/activation.
+    public convenience init(stateDirectory: URL, erasureRequest: DeviceSyncLocalEraseRequest) throws {
+        try self.init(stateDirectory: stateDirectory, request: erasureRequest)
+    }
+    private init(stateDirectory: URL, request: DeviceSyncLocalEraseRequest?) throws {
         storage = try DeviceSyncStorageContext.component(stateDirectory, role: "state")
-        pairing = try PairingBaseline(directory: stateDirectory)
-        session = try storage.withActive { WCSession.isSupported() ? WCSession.default : nil }
+        let admission = try DeviceSyncNativeStorageAdmission(context: storage, erasureRequest: request)
+        drainingRequest = request
+        pairing = request == nil ? try PairingBaseline(directory: stateDirectory) : nil
+        session = try admission.withAccess { WCSession.isSupported() ? WCSession.default : nil }
         proxy = WCDelegateProxy(); proxy.owner = self
     }
     public func install(_ callbacks: DriverCallbacks) async {
@@ -83,7 +118,7 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
         catch { callbacks.event(.activationCompleted(DriverSnapshot(activated: false, reachable: false, counterpartAvailable: false), error as? DeviceSyncError ?? .unavailable)) }
     }
     private func values(_ session: WCSession) -> DriverSnapshot {
-        let active = session.activationState == .activated && activationAccepted && !pairing.isInvalidated
+        let active = session.activationState == .activated && activationAccepted && pairing?.isInvalidated == false
         #if os(iOS)
         let counterpart = active && session.isPaired && session.isWatchAppInstalled
         #else
@@ -190,13 +225,25 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
     }
     public func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus {
         try storage.withFenced(request) {
-            let values = lock.withLock { () -> (WCSession?, [DriverSettlement<TransportReply>]) in
-                activationAccepted = false; activating = false
+            let values = try lock.withLock { () throws -> (WCSession?, [DriverSettlement<TransportReply>]) in
+                if let previous = drainingRequest, previous != request { throw DeviceSyncErasureError.intentMismatch }
+                drainingRequest = request; callbacks = nil; activationAccepted = false
                 let results = Array(pending.values); pending = [:]; return (session, results)
             }
             for result in values.1 { result.finish(.failure(DeviceSyncError.erased)) }
             guard let native = values.0 else { return .unresolved }
-            return try deviceSyncDrainInventory(current: { native.outstandingFileTransfers }, ownership: { try self.ownership($0, request: request, expected: expected) }, cancel: { $0.cancel() })
+            // WCSession.h requires delegate + completed asynchronous activation before
+            // state is populated. Reopening with an empty pre-activation queue is not proof.
+            let start = lock.withLock { () -> Bool in
+                guard !erasureReadiness.isReady(nativeActivated: native.activationState == .activated), !activating else { return false }
+                erasureReadiness.invalidate(); activating = true; return true
+            }
+            if start { native.delegate = proxy; native.activate() }
+            let readiness = lock.withLock { erasureReadiness }
+            let result = try readiness.drain(nativeActivated: native.activationState == .activated, current: { native.outstandingFileTransfers }, ownership: { try self.ownership($0, request: request, expected: expected) }, cancel: { $0.cancel() })
+            return lock.withLock {
+                erasureReadiness.revision == readiness.revision && erasureReadiness.isReady(nativeActivated: native.activationState == .activated) ? result : .pending
+            }
         }
     }
     private func ownership(_ transfer: WCSessionFileTransfer, request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) throws -> DeviceSyncTransferOwnership {
@@ -219,10 +266,21 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
         try? storage.withActive { let receiver = lock.withLock { callbacks }; receiver?.file(url) }
     }
     fileprivate func activated(_ active: Bool, failed: Bool) {
+        if let request = lock.withLock({ drainingRequest }) {
+            do {
+                try storage.withFenced(request) { lock.withLock {
+                    activating = false; activationAccepted = false
+                    erasureReadiness.completed(active: active && session?.activationState == .activated, failed: failed)
+                } }
+            } catch { lock.withLock { activating = false; erasureReadiness.invalidate() } }
+            return
+        }
         let value: (DriverCallbacks?, DriverSnapshot, Bool, DeviceSyncError?)
         do {
             value = try storage.withActive { lock.withLock {
                 activating = false; activationAccepted = false
+                erasureReadiness.completed(active: active && session?.activationState == .activated, failed: failed)
+                guard let pairing else { return (callbacks, inactiveSnapshot, false, .erased) }
                 var changed = pairing.isInvalidated, issue: DeviceSyncError? = failed || !active ? .activationFailed : nil
                 if active, let session, session.activationState == .activated {
                     do { changed = try pairing.observe(fingerprint(session)) }
@@ -231,7 +289,10 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
                 }
                 return (callbacks, session.map(values) ?? inactiveSnapshot, changed, issue)
             } }
-        } catch { lock.withLock { callbacks }?.event(.activationCompleted(inactiveSnapshot, error as? DeviceSyncError ?? .unavailable)); return }
+        } catch {
+            let receiver = lock.withLock { activating = false; erasureReadiness.invalidate(); return callbacks }
+            receiver?.event(.activationCompleted(inactiveSnapshot, error as? DeviceSyncError ?? .unavailable)); return
+        }
         if value.2 {
             #if os(iOS)
             value.0?.event(.pairingChanged)
@@ -247,7 +308,7 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
     }
     fileprivate func changedCounterpart() {
         guard let value = try? storage.withActive({ lock.withLock { () -> (DriverCallbacks?, Bool) in
-            guard let session, session.activationState == .activated else { return (callbacks, false) }
+            guard let session, let pairing, session.activationState == .activated else { return (callbacks, false) }
             let changed: Bool
             do { changed = try pairing.observe(fingerprint(session)) }
             catch { activationAccepted = false; return (callbacks, true) }
@@ -262,12 +323,12 @@ public final class WCSessionDriver: WCSessionDriving, DeviceSyncErasureDriving, 
     }
     fileprivate func inactive() {
         let values = lock.withLock { () -> (DriverCallbacks?, [DriverSettlement<TransportReply>]) in
-            let results = Array(pending.values); pending = [:]; activating = false; activationAccepted = false; return (callbacks, results)
+            let results = Array(pending.values); pending = [:]; activating = false; activationAccepted = false; erasureReadiness.invalidate(); return (callbacks, results)
         }
         for value in values.1 { value.finish(.failure(DeviceSyncError.inactive)) }
         values.0?.event(.inactive)
     }
-    fileprivate func deactivated() { let receiver = lock.withLock { activating = false; activationAccepted = false; return callbacks }; receiver?.event(.deactivated) }
+    fileprivate func deactivated() { let receiver = lock.withLock { activating = false; activationAccepted = false; erasureReadiness.invalidate(); return callbacks }; receiver?.event(.deactivated) }
     fileprivate func fileCompleted(_ transfer: WCSessionFileTransfer, failed: Bool) {
         let value = lock.withLock { (callbacks, fileValue(transfer.file)) }
         if let file = value.1 { value.0?.event(.fileCompleted(file, failed ? .deliveryFailed : nil)) }
