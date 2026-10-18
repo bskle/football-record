@@ -1,6 +1,6 @@
 # NATIVE-028 验证记录
 
-日期：2026-10-19，上海。状态：软件候选自动验证通过，待 root + m2 对 exact source/final SHA 双审；作者交付clean停写。不宣称真实HealthKit或M4完成，不合dev、不push、不archive。
+日期：2026-10-19，上海。状态：下列首次候选证据属于 `6d87b95b8a9bc25b387d104d52e4e64e52799ff0`，其 root + m2 审阅结果为 BLOCK（Q28-1真实采集metadata兼容）。当前修复另记末节；首次证据和manifest保留原样。不宣称真实HealthKit或M4完成，不合dev、不push、不archive。
 
 ## 输入与所有权
 
@@ -50,3 +50,13 @@ Xcode27.0（27A266a）/ Apple Swift6.4，原版本输出在initial-tools/initial
 026从原采集registry映射明确范围及028的requestID/selectionDigest/confirmation/per-scope receipt；025提供实际独立确认UI。本模块不推进后台身份、CloudKit或普通本地删除。真实Phone/Watch App source归属、sharing权限、签名/entitlements、本人明确确认后的目标Workout删除与设备间同步均未验；需要真实用户操作的门槛留026。未删除关联quantity/route样本，也没有这种能力或完成声明。SDK候选在真实门槛前留树，不合dev/release/main。
 
 证据根：`/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-028`。保留initial/final六项Git输入、完整红绿与最终日志、12产品输入SHA256、SDK header输入、`input-manifest.json`与`evidence-manifest.json`。最终manifest绑定实际HEAD与原文件hash；作者不自行合并、推送、归档或删除分支。
+
+## Q28-1 修复记录（当前）
+
+重新执行基线：本树原HEAD `6d87b95b8a9bc25b387d104d52e4e64e52799ff0`，原base `204ea7a8c2b0d6f514fc6d4653aec9b6379a2a15`。root指定最新已验证target `36daa5526aac447cedab8c0b636c2db80b09cfa6`；其native相对base零差异，先提交clean修复checkpoint再ordinary merge，不消费未审031。
+
+- `Q28-1/q281-actual-metadata-runtime-red.log`：新增3项测试均实际运行失败于028构造器invalidRequest，包含真实Session start/recover/restart；不是编译红。最初fixture过早close共享Core库的诊断另存，不算P1目标红例。
+- `Q28-1/q281-raw-tuple-fidelity-red.log`：放宽opaque metadata后，真实token与字节上界已绿，Unicode不同原字节被Swift String相等错误合并的1项tuple断言红。
+- `Q28-1/q281-interop-green.log`：3/3、0 failures、exit0；真实派生token、斜杠/空格/Unicode/组合形式、canonical原值、控制ledger确认重开、逐目标匹配与0/NUL/4096字节边界通过。tests-only Core/MatchSession，产品target不依赖Core。
+
+完整单轮29项与四fresh最低SDK、普通同步merge SHA、产品及测试依赖输入hash将在实际完成后登记；本节不预先勾通过。未执行HealthStore/query/delete/权限请求；SDKNSPredicate只按原值传参并编译，不称真实SDK匹配或删除已验。旧26与新29不累加。

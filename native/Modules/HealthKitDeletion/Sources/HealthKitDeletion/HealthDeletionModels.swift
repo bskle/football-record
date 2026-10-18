@@ -12,6 +12,9 @@ enum DeletionValidation {
             (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || [45,46,58,95].contains($0)
         }
     }
+    static func metadata(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= WorkoutDeletionTargetV1.maximumMetadataUTF8Bytes && !value.utf8.contains(0)
+    }
     static func source(_ value: String) -> Bool {
         id(value) && value.contains(".") && !value.split(separator: ".", omittingEmptySubsequences: false).contains("")
             && !value.contains(":") && !value.contains("_")
@@ -20,6 +23,8 @@ enum DeletionValidation {
     static func digest(_ value: String) -> Bool { value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }
 }
 public struct WorkoutDeletionTargetV1: Codable, Equatable, Sendable {
+    /// Existing capture metadata is opaque UTF-8, not an HTTP identifier.
+    public static let maximumMetadataUTF8Bytes = 4096
     public let workoutUUID: UUID
     public let matchID, recordingDeviceID, segmentToken, expectedSourceBundleID: String
     public init(workoutUUID: UUID, matchID: String, recordingDeviceID: String, segmentToken: String, expectedSourceBundleID: String) throws {
@@ -28,7 +33,7 @@ public struct WorkoutDeletionTargetV1: Codable, Equatable, Sendable {
         try validate()
     }
     func validate() throws {
-        guard [matchID,recordingDeviceID,segmentToken].allSatisfy(DeletionValidation.id),
+        guard [matchID,recordingDeviceID,segmentToken].allSatisfy(DeletionValidation.metadata),
               DeletionValidation.source(expectedSourceBundleID) else { throw HealthDeletionIssue.invalidRequest }
     }
 }

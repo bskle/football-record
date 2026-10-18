@@ -1,6 +1,6 @@
 # HealthKitDeletion
 
-Independent local deletion control for explicitly selected App-created Workouts. SwiftPM supports iOS 17, watchOS 10 and macOS 14; it has no AccountKit, MatchCore, WorkoutCapture or external package dependency.
+Independent local deletion control for explicitly selected App-created Workouts. SwiftPM supports iOS 17, watchOS 10 and macOS 14; its product target has no AccountKit, MatchCore, WorkoutCapture or external package dependency. The tests alone depend on the local reviewed MatchCore/MatchSession package to exercise actual start/recover/restart token generation; no unreviewed 023 interfaces are used.
 
 ## Execution gate and ownership
 
@@ -10,7 +10,7 @@ NATIVE-026 maps reviewed capture-registry identities into the selection and maps
 
 ## Frozen request and confirmation
 
-A `WorkoutDeletionRequestV1` binds a stable UUID requestID, integer createdAt and 1...256 explicit targets. Each target binds a Workout UUID, matchID, recordingDeviceID, segmentToken and expectedSourceBundleID. Duplicate UUIDs, empty or malformed IDs, out-of-range time and oversized scopes are rejected. Missing registry/metadata mapping must remain a failed selection; it must not widen to all Workouts.
+A `WorkoutDeletionRequestV1` binds a stable UUID requestID, integer createdAt and 1...256 explicit targets. Each target binds a Workout UUID, matchID, recordingDeviceID, segmentToken and expectedSourceBundleID. Duplicate UUIDs, empty metadata, NUL bytes, metadata over 4096 UTF-8 bytes, invalid source bundle identifiers, out-of-range time and oversized scopes are rejected. The three metadata values are opaque existing local values: slashes, spaces and Unicode are retained without trimming, escaping, or normalization. They do not use the HTTP identifier grammar. Missing registry/metadata mapping must remain a failed selection; it must not widen to all Workouts.
 
 Canonical bytes contain the full request with fixed sorted JSON keys and canonical UUID strings; targets are UUID-sorted, while metadata/source strings retain their exact values. SHA-256 is domain-separated by `football-record.health-workout-delete.v1\n`. Same ID with different canonical selection is an identity conflict. These local control fields are never uploaded and contain no health samples.
 
@@ -32,7 +32,7 @@ The SDK verifies every expectedSourceBundleID against `HKSource.default().bundle
 
 `current App source AND OR(each target UUID AND matchID AND recordingDeviceID AND segmentToken)`
 
-The three fixed metadata keys are `app.football-record.match-id`, `app.football-record.recording-device-id` and `app.football-record.segment-token`, matching the reviewed NATIVE-008 metadata. Each UUID stays attached to its own three values. The adapter uses only `HKObjectType.workoutType()` and SDK predicate constructors; it accepts no caller predicate, arbitrary metadata dictionary, alternative object type or broad fallback. An empty or source-mismatched selection cannot become a successful no-op by filtering targets away.
+The three fixed metadata keys are `app.football-record.match-id`, `app.football-record.recording-device-id` and `app.football-record.segment-token`, matching the reviewed NATIVE-008 metadata. Each UUID stays attached to its own three original values. The pure controlled tuple matcher compares their UTF-8 bytes, so Unicode canonical equivalence cannot broaden a selection. The adapter uses only `HKObjectType.workoutType()` and SDK predicate constructors; it accepts no caller predicate, arbitrary metadata dictionary, alternative object type or broad fallback. An empty or source-mismatched selection cannot become a successful no-op by filtering targets away.
 
 No read query is needed. `authorizationStatus(for:)` describes sharing/write authorization only. The module does not call requestAuthorization; denied or undetermined sharing permission produces a typed failure. HealthKit permits deleting only objects the calling App saved. Visible query emptiness, pairing and common Team membership cannot prove ownership or all-device absence.
 

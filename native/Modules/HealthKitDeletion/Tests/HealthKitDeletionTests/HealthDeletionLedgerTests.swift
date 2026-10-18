@@ -18,7 +18,7 @@ final class HealthDeletionLedgerTests: XCTestCase, @unchecked Sendable {
   XCTAssertThrowsError(try request(targets:[target(),target()]))
   XCTAssertThrowsError(try request(targets:[target(),target(match:"other")]))
   XCTAssertThrowsError(try target(match:""))
-  XCTAssertThrowsError(try target(segment:"bad value"))
+  XCTAssertThrowsError(try target(segment:"bad\0value"))
   XCTAssertThrowsError(try target(source:""))
   XCTAssertThrowsError(try WorkoutDeletionRequestV1(requestID:UUID(),createdAt:-1,targets:[target()]))
  }
@@ -88,7 +88,7 @@ final class HealthDeletionLedgerTests: XCTestCase, @unchecked Sendable {
   let targets=try (0..<WorkoutDeletionRequestV1.maximumTargets).map { _ in try WorkoutDeletionTargetV1(workoutUUID:UUID(),matchID:"m",recordingDeviceID:"d",segmentToken:"s",expectedSourceBundleID:"test.football.phone") }
   XCTAssertNoThrow(try request(targets:targets))
   XCTAssertThrowsError(try request(targets:targets+[target()]))
-  XCTAssertThrowsError(try target(match:String(repeating:"a",count:129)))
+  XCTAssertThrowsError(try target(match:String(repeating:"a",count:4097)))
   XCTAssertThrowsError(try target(source:"test..phone"))
   XCTAssertThrowsError(try WorkoutDeletionRequestV1(requestID:UUID(),createdAt:Int64.max,targets:[target()]))
   let a=try request(),b=try WorkoutDeletionRequestV1(requestID:a.requestID,createdAt:deletionTime+1,targets:a.targets)

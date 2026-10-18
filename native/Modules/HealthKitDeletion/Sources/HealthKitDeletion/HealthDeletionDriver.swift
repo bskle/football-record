@@ -20,5 +20,14 @@ public struct HealthDeletionPredicatePlan: Sendable {
         guard DeletionValidation.source(currentSourceBundleID), request.targets.allSatisfy({ $0.expectedSourceBundleID == currentSourceBundleID }) else { throw HealthDeletionIssue.sourceMismatch }
         self.currentSourceBundleID=currentSourceBundleID;targets=request.targets
     }
-    public func matches(_ candidate: WorkoutDeletionTargetV1) -> Bool { candidate.expectedSourceBundleID == currentSourceBundleID && targets.contains(candidate) }
+    public func matches(_ candidate: WorkoutDeletionTargetV1) -> Bool {
+        guard candidate.expectedSourceBundleID.utf8.elementsEqual(currentSourceBundleID.utf8) else { return false }
+        // String equality admits Unicode canonical equivalence; the selection binds original bytes.
+        return targets.contains {
+            $0.workoutUUID == candidate.workoutUUID
+                && $0.matchID.utf8.elementsEqual(candidate.matchID.utf8)
+                && $0.recordingDeviceID.utf8.elementsEqual(candidate.recordingDeviceID.utf8)
+                && $0.segmentToken.utf8.elementsEqual(candidate.segmentToken.utf8)
+        }
+    }
 }

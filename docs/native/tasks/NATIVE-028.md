@@ -1,6 +1,6 @@
 # NATIVE-028：独立 HealthKitDeletion SDK 候选
 
-状态：软件候选自动验证通过，作者交付前停写；待 root + m2 对 exact SHA 双审。设备敏感候选，不合 dev、不推送、不归档。执行冻结 M4 子计划 §13 / 合同 §7.2。
+状态：首次候选 `6d87b95b8a9bc25b387d104d52e4e64e52799ff0` 经 root + m2 审阅 BLOCK（Q28-1：真实采集 metadata/token 含斜杠）。当前按唯一作者授权修复；旧26项/四SDK和旧manifest保持其原输入层次。设备敏感候选，不合 dev、不推送、不归档。执行冻结 M4 子计划 §13 / 合同 §7.2。
 
 - 作者：`/root/m4_sdk_preflight`；审阅：root + m2，两位非作者 exact SHA 审阅尚待进行。
 - 完整 base / 登记目标：`204ea7a8c2b0d6f514fc6d4653aec9b6379a2a15`。
@@ -24,3 +24,11 @@
 ## 作者交付说明
 
 第一切片 `8d8e8e7e1184968e9511d228bd81dafe4352db61`；第二切片与最终HEAD见树外 `input-manifest.json`。本轮最终验证只针对该模块的12份产品输入，SHA256在 `product-inputs-before-final.json`，不包含023/027或历史App测试。SDK执行默认关闭，无App接线；全部host只用受控driver和本地SQLite。实际 Phone/Watch source、本人明确确认后的SDK删除、sharing权限、签名/entitlements及设备同步后验。未调用用户HealthStore、未读取健康数据、未请求权限、未作真实删除。
+
+## Q28-1 修复 checkpoint
+
+当前只修本地metadata与真实采集互通：matchID/recordingDeviceID/segmentToken按原始非空、无NUL、最多4096 UTF-8 bytes校验，不沿HTTP ASCII grammar；不trim、删斜杠、转义或规范化。纯受控tuple matcher用原始UTF-8字节比较，UUID/三metadata/当前App source闭合保持；SDK仍按原值构造NSPredicate，未执行真实删除。
+
+测试target单独依赖本树已验证Core/MatchSession，真实SessionRequest.start和CaptureCoordinator recover→restart产生token后经过target/canonical/submit/confirm/reopen/predicate回归。产品target不新增Core依赖，不读取023未审接口，不改008/018。新增3项互通测试已runtime红→绿；完整host与四fresh SDK将在普通合入已验证target `36daa5526aac447cedab8c0b636c2db80b09cfa6` 后运行，不把旧26累计为新一轮。
+
+新证据独立目录为原证据根下 `Q28-1/`。旧source、旧input/evidence manifest、26项/四SDK日志和原BLOCK不覆写。
