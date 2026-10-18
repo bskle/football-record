@@ -191,6 +191,15 @@ public final class CloudOwnedStaging:@unchecked Sendable {
             }
         }
     }
+    // Cloud deletion also permanently stops old writers, while preserving local files when chosen.
+    func fenceZone(_ scope:CloudScope) throws->[UUID] {
+        try owner.lock.withLock {
+            _=try owner.identity()
+            try owner.sql.transaction {try owner.sql.execute("INSERT OR IGNORE INTO staging_fences VALUES(?)",[.text(scope.stableZoneKey)])}
+            let ids=owner.operations.values.filter {$0.scope.stableZoneKey==scope.stableZoneKey}.map(\.id)
+            for id in ids {owner.operations[id]=nil};return ids
+        }
+    }
     public func erase(_ request:CloudStagingEraseRequest) throws->CloudStagingEraseReceipt {
         try owner.lock.withLock {
             _=try owner.identity();try owner.validate()

@@ -45,4 +45,17 @@ final class CloudAssetCodecTests:XCTestCase {
         XCTAssertThrowsError(try CloudAssetCodec.record(scope:upload.scope,manifestBytes:changed,parts:p.parts.map(\.bytes)))
     }
 
+    func testManifestRejectsExcessiveOrDuplicateReferencesBeforeAnyAssetCopy() throws {
+        let upload=try cloudUpload(),package=try CloudAssetCodec.package(upload,partByteLimit:128)
+        var object=try JSONSerialization.jsonObject(with:package.manifestBytes) as! [String:Any]
+        var refs=object["parts"] as! [[String:Any]]
+        refs[0]["byteCount"]=8*1024*1024
+        object["parts"]=refs
+        let huge=try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.withoutEscapingSlashes])
+        XCTAssertThrowsError(try CloudAssetCodec.boundedManifest(huge,scope:upload.scope))
+        refs=object["parts"] as! [[String:Any]];refs[1]["partID"]=refs[0]["partID"];object["parts"]=refs
+        let duplicate=try JSONSerialization.data(withJSONObject:object,options:[.sortedKeys,.withoutEscapingSlashes])
+        XCTAssertThrowsError(try CloudAssetCodec.boundedManifest(duplicate,scope:upload.scope))
+    }
+
 }

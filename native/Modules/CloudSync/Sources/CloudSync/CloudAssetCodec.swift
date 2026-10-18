@@ -17,8 +17,19 @@ enum CloudAssetCodec {
         let manifest=try CloudSaveManifest(upload:upload,parts:parts.map(\.reference))
         return CloudAssetPackage(manifest:manifest,manifestBytes:try CloudCodec.encode(manifest),parts:parts)
     }
+    static func boundedManifest(_ bytes:Data,scope:CloudScope) throws->CloudSaveManifest {
+        let manifest=try CloudCodec.decode(CloudSaveManifest.self,bytes,limit:1024*1024)
+        guard manifest.version==1,manifest.scope.stableZoneKey==scope.stableZoneKey,(1...CloudCodec.maximumBytes).contains(manifest.byteCount),
+              !manifest.parts.isEmpty,manifest.parts.count<=64,Set(manifest.parts.map(\.partID)).count==manifest.parts.count else {throw CloudError(.invalidPayload)}
+        var total=0
+        for (index,ref) in manifest.parts.enumerated() {
+            _=try CloudAssetReference(partID:ref.partID,index:ref.index,byteCount:ref.byteCount,digest:ref.digest)
+            guard ref.index==index,total<=manifest.byteCount-ref.byteCount else {throw CloudError(.invalidPayload)};total += ref.byteCount
+        }
+        guard total==manifest.byteCount else {throw CloudError(.invalidPayload)};return manifest
+    }
     static func record(scope:CloudScope,manifestBytes:Data,parts:[Data]) throws->CloudRecord {
-        let manifest=try CloudCodec.decode(CloudSaveManifest.self,manifestBytes,limit:1024*1024)
+        let manifest=try boundedManifest(manifestBytes,scope:scope)
         guard manifest.scope.stableZoneKey==scope.stableZoneKey,manifest.version==1,manifest.byteCount>0,manifest.byteCount<=CloudCodec.maximumBytes,
               !manifest.parts.isEmpty,manifest.parts.count<=64,parts.count==manifest.parts.count else {throw CloudError(.invalidPayload)}
         var original=Data()

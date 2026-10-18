@@ -1,6 +1,6 @@
 # AccountKit：账号、权威控制与同 Session 云桥
 
-NATIVE-023 的本机软件实现。生产 App Bootstrap 仍为 Unavailable；本模块没有接入真实 AuthenticationServices、Keychain、CloudKit、HealthKit 或 WatchConnectivity SDK。实际 Node loopback、文件 SQLite、受控云回读和原 Session 的证据见 [023验证卡](../../../docs/native/validation/NATIVE-023.md)。
+NATIVE-023 的本机软件与 NATIVE-024 默认关闭的 SDK 候选。生产 App Bootstrap 仍为 Unavailable；024 提供 AuthenticationServices、Keychain 与 CloudKit 身份代码，真实 SDK / 账号执行未验，HealthKit 与 WatchConnectivity 仍由后续装配。实际 Node loopback、文件 SQLite、受控云回读和原 Session 的证据见 [023验证卡](../../../docs/native/validation/NATIVE-023.md)。
 
 ## 一个 facade 与装配
 

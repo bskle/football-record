@@ -1,6 +1,7 @@
 import XCTest
 import Foundation
 import MatchStore
+import CloudSync
 @testable import AccountKit
 
 final class ManualCloudIdentity: CloudIdentityTransport, @unchecked Sendable {
@@ -33,4 +34,9 @@ final class CloudIdentityProviderTests: XCTestCase, @unchecked Sendable {
         do {_=try await p.currentIdentity();XCTFail()}catch{}
         do {_=try await identity(user:"");XCTFail()}catch{}
     }
+    func testPublicCloudKitZoneConfigurationMatchesIdentityProvider() async throws {
+        let snapshot=try await identity(),configuration=try CloudKitDriverConfiguration(containerIdentifier:"iCloud.fixture",environment:.production)
+        XCTAssertEqual(try snapshot.zoneID(accountID:"account"),try configuration.zoneID(accountID:"account",cloudSpaceID:snapshot.cloudSpaceID))
+    }
+
 }
