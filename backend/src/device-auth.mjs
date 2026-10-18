@@ -11,6 +11,8 @@ function signatureOK(key,domain,body,signature){try{return verify(null,input(dom
 export function createDeviceAuth({authority,appleVerifier}){
  const state=authorityState(authority);if(!state)throw Error('authority required');const {db,config,validate,stored,persist}=state;
  if(appleVerifier?.environment!==config.environment||(config.environment==='production'&&!isAppleVerifier(appleVerifier,'production')))throw Error('authority and verifier environment mismatch');
+ function recoveryHash(domain,values){return createHmac('sha256',config.tokenDerivationKey).update(domain+'\n'+canonicalJSON(values)).digest('hex');}
+ const absenceKey=(authRequestID,deviceID,keyID)=>recoveryHash('football-record.auth-absence.v1',[authRequestID,deviceID,keyID]);
  function tokenFor(s){const claims={sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};return createHmac('sha256',config.tokenDerivationKey).update('football-record.session.v1\n'+canonicalJSON(claims)).digest('base64url');}
  function credential(s){return {token:tokenFor(s),sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};}
  function session(ctx){const s={session_id:randomUUID(),account_id:ctx.accountID,device_id:ctx.deviceID,key_id:ctx.keyID,activation_epoch:ctx.activationEpoch,expires_at:config.clock.now()+2592000};db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(s.session_id,s.account_id,s.device_id,s.key_id,s.activation_epoch,s.expires_at,sha256(tokenFor(s)));return s;}
@@ -35,6 +37,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    if(config.environment==='production'&&(!isVerifiedApple(verified,'production')||verified.environment!=='production'))fail('unauthorized',401);
    state.pruneReauthMaterial();let createdReauthenticationID;
    try{return transaction(db,config,()=>{
+    if(db.prepare('SELECT 1 FROM auth_absence_fences WHERE fence_id=?').get(absenceKey(r.requestID,r.deviceID,sha256(r.devicePublicKey))))fail('unauthorized',401);
     checkChallenge(r,r.devicePublicKey,r.deviceID);
     const accountID=createHmac('sha256',config.accountHMACKey).update(verified.issuer+'\n'+verified.subject).digest('hex');
     let a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(accountID);
@@ -58,9 +61,17 @@ export function createDeviceAuth({authority,appleVerifier}){
  function recover(r){validatePayload('authRecover',r);return transaction(db,config,()=>{
    const row=db.prepare('SELECT * FROM auth_records WHERE auth_request_id=? AND device_id=?').get(r.authRequestID,r.deviceID);
    const body={...r};delete body.deviceProof;
-   if(!row||sha256(row.public_key)!==r.keyID||!Number.isSafeInteger(r.issuedAt)||Math.abs(config.clock.now()-r.issuedAt)>60||!signatureOK(row.public_key,'football-record.device.auth-recover.v1',body,r.deviceProof))fail('unauthorized',401);
+   const publicKey=row?.public_key??r.devicePublicKey;
+   if(!publicKey||(r.devicePublicKey!==undefined&&r.devicePublicKey!==publicKey)||sha256(publicKey)!==r.keyID||!Number.isSafeInteger(r.issuedAt)||Math.abs(config.clock.now()-r.issuedAt)>60||!signatureOK(publicKey,'football-record.device.auth-recover.v1',body,r.deviceProof))fail('unauthorized',401);
+   if(!row){
+     const fenceID=absenceKey(r.authRequestID,r.deviceID,r.keyID),nonceHash=recoveryHash('football-record.auth-recovery-nonce.v1',[fenceID,r.nonce]);
+     if(db.prepare('SELECT 1 FROM auth_recovery_nonces WHERE fence_id=? AND nonce_hash=?').get(fenceID,nonceHash))fail('unauthorized',401);
+     db.prepare('INSERT INTO auth_recovery_nonces VALUES(?,?)').run(fenceID,nonceHash);
+     db.prepare('INSERT OR IGNORE INTO auth_absence_fences VALUES(?)').run(fenceID);
+     return {status:'knownAbandoned'};
+   }
+   consumeNonce(row.session_id,r.nonce);
    const s=db.prepare('SELECT * FROM sessions WHERE session_id=?').get(row.session_id);if(!s)return {status:'knownRevoked'};
-   consumeNonce(s.session_id,r.nonce);
    const a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(s.account_id);
    if(s.revoked||!a||a.activation_epoch!==s.activation_epoch)return {status:'knownRevoked'};
    if(s.expires_at<config.clock.now())return {status:'knownExpired'};
