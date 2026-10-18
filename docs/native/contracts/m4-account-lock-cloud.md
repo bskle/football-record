@@ -1,6 +1,6 @@
 # M4 账号、权威锁、私有云与生命周期合同
 
-状态：NATIVE-020冻结合同，2026-10-19由[GIT-005](../tasks/GIT-005.md)补交付记录及027/028删除适配责任。021/022本地软件已双审合入（Node56 / Cloud42与两个新增最低simulator SDK编译），023仍在独立树；024～028及真实环境未由本合同宣告完成。依据为产品 [0.10 / 0.11 / 0.12 / 0.17](../../0-产品方案.md)、[母计划 M4](../../superpowers/plans/2026-10-15-native-development.md)、[M3 合同](m3-durable-sync.md)；执行文件见 [M4 子计划](../../superpowers/plans/2026-10-18-native-m4.md)。最低 iOS 17 / watchOS 10 不变。
+状态：NATIVE-020冻结合同，GIT-005补适配责任；2026-10-19当前本地交付见[GIT-006](../tasks/GIT-006.md)。021/022/027及029～033已双审集成，当前033本轮Cloud80，Node128仅032旧后端层；028 final `0fa3dff4d3232e72257f6fa115ecada873f086db` 为29host/四SDK双审候选留树，023未freeze/final/合入，024/025待接口交接。所有真实账号/设备/配置门槛仍留026，不宣称M4完成。依据为产品[0.10/0.11/0.12/0.17](../../0-产品方案.md)、[母计划M4](../../superpowers/plans/2026-10-15-native-development.md)、[M3合同](m3-durable-sync.md)及[M4子计划](../../superpowers/plans/2026-10-18-native-m4.md)；最低iOS17/watchOS10不变。
 
 ## 1. 事实源和实现层次
 
@@ -12,7 +12,7 @@
 | AccountKit | 严格控制 DTO、HTTP、签名验证、Apple / 凭据边界 | 解码 JWT 不等于验证 Apple 身份 |
 | HealthKit / DeviceSync | 原记录设备的采集与已授权 peer 传输 | WC 配对、checksum 或 iCloud 登录不等于 App 账号认证 |
 
-021已交付 Node `v22.23.1` 内置 HTTP / crypto / `node:sqlite` 的文件持久本地 reference authority，默认只监听 loopback。实际 Serverless 供应商、原子持久存储适配、TLS、密钥管理、部署与备份恢复均在 026 实际服务门槛验收；本地 SQLite 或 Experimental API 不称为已部署生产服务。022已交付持久云传输台账与fake driver；023正在独立树实现真实 loopback HTTP → 原 Session / SQLite 的软件纵向切片。024交付客户端SDK，027补服务端AppleRevoker，028交付独立HealthKitDeletion；025交付工程/UI，026映射删除saga并执行真实服务/账号/设备E2E。
+021已交付 Node `v22.23.1` 内置 HTTP / crypto / `node:sqlite` 的文件持久本地 reference authority，默认只监听 loopback。实际 Serverless 供应商、原子持久存储适配、TLS、密钥管理、部署与备份恢复均在 026 实际服务门槛验收；本地 SQLite 或 Experimental API 不称为已部署生产服务。022已交付持久云传输台账与fake driver；023正在独立树实现真实 loopback HTTP → 原 Session / SQLite 的软件纵向切片。027服务端AppleRevoker及后续030/032已交本地参考软件；028为独立SDK候选。024客户端SDK、025工程/UI待023正式接口交接，026映射删除saga及全本地删除聚合并执行真实服务/账号/设备E2E。
 
 生产 Bootstrap 的 permit、workout、transport、peer trust、CloudKit 和 auth 默认 unavailable；只有逐项通过相应真实验收后由唯一工程所有者显式装配。开发服务、开发签名 key、测试鉴权 factory、开发云 driver 只可进入独立 development namespace，UI 持续显示“开发模拟锁 / 开发配对 / 开发云演练”。不能通过设置一个 URL、注入 permit provider 或删除 guard 开放生产。
 
@@ -34,7 +34,7 @@ Apple auth 的 responseLost 不能依赖重新消费原 challenge/JWT/code。成
 
 客户端已持久首次auth但未发送、服务beforeCommit失败或原记录已被删号清除时，可没有可恢复row。旧wire缺公钥仍401，不能推断未提交或生成新ID绕过unknown。新wire缺row时须验证公钥指纹等于keyID、有效原私钥签名覆盖全部请求字段、deviceID/authRequestID绑定、60秒时间与nonce；同一BEGIN IMMEDIATE事务消费nonce并持久永久per(authRequestID,deviceID,keyID) absence fence，只有COMMIT成功才返回 `{status:"knownAbandoned"}`。其含义仅为“当前无可恢复原auth记录，且该tuple不能未来晚提交”，不声称历史从未committed（例如删号后旧attempt）。authenticate在Apple验证await后、同一SQL事务内、任何账户/epoch/session/challenge变更前检查同tuple fence，已封尝试不能晚提交；race只能恢复先提交的原session或封住尚未提交尝试。另一device/key可证明自己的tuple，但其fence不能取消原key尝试或取得原session。已有row始终优先原结果；缺row终态不创建session/epoch。
 
-schema2新增absence和缺row恢复nonce表，只持久 `HMAC(tokenDerivationKey, domain + canonical[authRequestID,deviceID,keyID])` opaque fence及独立域的scoped nonce HMAC，不保存新增可关联account/device/authID、公钥、Apple输入或原token。永久fence在删号后保留防止旧attempt复活，无新增身份关联，不能称绝对不可识别；持久key配置须稳定，schema1升级与fingerprint检查在同初始化事务，失败回滚且不改旧结果bytes。新requestID不允许重用已消费nonce，关闭重开也拒重放。恢复beforeCommit失败或COMMIT后丢响应仍是unknown，保原attempt再用新nonce恢复；401/网络失败不能当knownAbandoned。只有收到已验证的knownAbandoned/knownRevoked/knownExpired，客户端才能显式结束原unknown尝试并新建正常auth（新ID/challenge），不得自动绕过未知gate。公开auth响应中的token只在内存codec重构，requests原结果存不含secret的固定claims。
+schema2新增absence和缺row恢复nonce表，只持久 `HMAC(tokenDerivationKey, domain + canonical[authRequestID,deviceID,keyID])` opaque fence及独立域的scoped nonce HMAC，不保存新增可关联account/device/authID、公钥、Apple输入或原token。永久fence在删号后保留防止旧attempt复活，无新增身份关联，不能称绝对不可识别；持久key配置须稳定，schema1升级与fingerprint检查在同初始化事务，失败回滚且不改旧结果bytes。新requestID不允许重用已消费nonce，关闭重开也拒重放。恢复beforeCommit失败或COMMIT后丢响应仍是unknown，保原attempt再用新nonce恢复；404/401/timeout及其他网络失败不能当knownAbandoned或将原auth视为已关闭。只有收到已验证的knownAbandoned/knownRevoked/knownExpired，客户端才能显式结束原unknown尝试并新建正常auth（新ID/challenge），不得自动绕过未知gate。公开auth响应中的token只在内存codec重构，requests原结果存不含secret的固定claims。
 
 ## 3. HTTP 控制协议 v1
 
@@ -158,17 +158,17 @@ NATIVE-030补足服务端角色证明：`peerGrant` nested签名正文除既有`
 
 分析默认关闭；关闭即丢弃尚未发送的可选 analytics queue，不删除业务、锁控制或必要故障状态。metric allowlist：`registered, activeDay, matchCompleted, matchIncomplete, watchRecorded, syncSucceeded, syncFailed, recoverySucceeded, recoveryFailed`，计数去重稳定 requestID；活动只由实际使用事件采样，无持续心跳。服务根据匿名账号计数和日桶计算比赛数/最后活跃/DAU、WAU、MAU、设备与资格状态、版本分布和成功率，不保存事件内容、心率或精确位置。退出/删号关闭发送并清理未发统计；匿名去身份 aggregate 可保留。日志只输出有限 code/requestID/operation/耗时，不输出 DTO/body/Authorization/Apple 字段。
 
-### 7.1 NATIVE-027：服务端AppleRevoker
+### 7.1 NATIVE-027：服务端AppleRevoker（本地软件已交付）
 
 027是`backend/**`唯一写入者，可在含021的最新已验证dev上与023独立并行。024只负责客户端AuthenticationServices/fresh reauthentication和Keychain/CloudKit；服务端token exchange、revoke及ES256 client_secret由027承担，TeamID、KeyID、`.p8`私钥和client_secret绝不进入App、业务库、仓库或日志。默认revoker仍unavailable；development受控transport/factory与固定Apple生产transport严格分离，真实配置/撤销留026。
 
-当前021 hook只接`authorizationCode`，不足以独立核验code所代表的身份。027把`apple-verifier.mjs`验证结果补为内存已验证`issuer/subject/audience/nonce/issuedAt/environment`；`device-auth.mjs`仅在transient reauth map中保留code及此上下文，绑定原account/device/key/epoch/reauthenticationID。`lifecycle.mjs`在原pending-delete和同设备PoP验证后，将该对象交`appleRevoker({authorizationCode, expectedApple, reauthenticationID})`（返回`Promise<{revoked: true}>`）；expectedApple不得从客户端自报字段或解码未验JWT构造，不持久真实subject/code/token。await后沿021既有pending-request/digest/epoch/reauth CAS推进，不能把别人的code或新的删除请求代入。
+021初始hook只接`authorizationCode`；已交付027补足身份核验，将`apple-verifier.mjs`验证结果补为内存已验证`issuer/subject/audience/nonce/issuedAt/environment`；`device-auth.mjs`仅在transient reauth map中保留code及此上下文，绑定原account/device/key/epoch/reauthenticationID。`lifecycle.mjs`在原pending-delete和同设备PoP验证后，将该对象交`appleRevoker({authorizationCode, expectedApple, reauthenticationID})`（返回`Promise<{revoked: true}>`）；expectedApple不得从客户端自报字段或解码未验JWT构造，不持久真实subject/code/token。await后沿021既有pending-request/digest/epoch/reauth CAS推进，不能把别人的code或新的删除请求代入。
 
 生产网络固定HTTPS且拒绝redirect：`POST https://appleid.apple.com/auth/token` 的form字段为`client_id, client_secret, code, grant_type=authorization_code`；仅当原已验证授权流程明确携带且匹配配置的redirect_uri时原值带入，原生AS无该值则省略。client_id须等于配置allowlist和expected audience；client_secret为服务端ES256 JWT，header `alg=ES256,kid=配置KeyID`，claims `iss=TeamID,sub=client_id,aud=https://appleid.apple.com,iat=当前秒,exp=iat+300`，JOSE签名用64-byte P1363而非DER。Apple返回的id_token仍按可信Apple JWKS及其alg/key匹配验签，校验exp/iat合法并比对iss/sub/aud/nonce与expectedApple一致；此RS256验证边界与ES256 client_secret签名不是同一用途。身份不匹配、缺id_token或refresh_token拒绝，不调用revoke。
 
 通过后以同一client_id/client_secret向`POST https://appleid.apple.com/auth/revoke`发form `client_id, client_secret, token=内存refresh_token, token_type_hint=refresh_token`。HTTP200空body正确视为该次撤销成功，不强制JSON；非200/超时/非法交换响应转有限错误码，不输出response body、code或token。网络await全在SQL外。未知token exchange结果不得盲重放单次code；状态保持待撤销/需fresh reauthentication。refresh_token仅在本次内存中存在时可重试同一撤销，进程重启或token遗失必须fresh auth并绑定原pending-delete，不伪造已撤销、不重建删除请求。仅成功撤销且原本地CAS提交后才推进appleRevocation；删除其他分项不由该adapter推进。
 
-### 7.2 NATIVE-028：独立HealthKitDeletion
+### 7.2 NATIVE-028：独立HealthKitDeletion（SDK候选保留）
 
 028仅持新`native/Modules/HealthKitDeletion/**`及自身任务/验证卡；不写008/018采集候选、AccountKit、Apps、project/scheme/entitlements或脚本。模块自带SwiftPM、受控driver和独立文件SQLite控制ledger，不成为第二业务MatchStore。默认driver unavailable，SDK执行默认关闭；第一阶段只host受控测试及iOS17/watchOS10 sim/device四triple编译，不调用用户HealthStore查询、删除或授权prompt。
 
@@ -177,6 +177,16 @@ NATIVE-030补足服务端角色证明：`peerGrant` nested签名正文除既有`
 ledger独立于普通本地业务擦除目录，先事务持久`executing/attemptID/完整request摘要`再调用SDK；超时保留`awaitingOutcome`，同一未决attempt不并发重复发。重开未知结果只能对原scope/原request恢复或重试；迟到callback必须匹配原request/selectionDigest/attemptID，不覆盖更新选择、不推进CloudKit/本地/账号分项。`success=true,count=0`只记录该精确scope本次操作结果，不称全部健康数据已空或已获读取权限；错误/未知结果保留分项状态和可恢复诊断。普通本地擦除后控制ledger及最小恢复信息仍可读取，完成或用户明确保留分项后才按026的saga规则收尾。
 
 026将028的requestID/选择摘要/confirmation/per-scope结果映射到既有healthConfirmed/healthProgress；025负责运行时明确确认和进度UI。027后端删除与028 Health删除互不代替成功；真实source/权限、本人明确确认及目标对象删除验收在026单独登记，SDK候选此前保留树。
+
+### 7.3 NATIVE-033：单ledger本地传输逻辑擦除
+
+已集成033的`CloudLocalTransportErasing`是独立可选协议，原CloudLedger required方法及canonical编码/hash域不变，默认eraser unavailable。稳定requestID绑定完整原scope；只在该ledger文件按accountID/cloudSpaceID/zoneID三ID原UTF-8精确选择全部epoch，清理upload、staged batch（含ACK）、conflict双方、save evidence四类canonical副本；其他stable zone原bytes不变，Unicode规范等价不能合并不同原bytes身份。重开不使用新epoch替换原同ID请求。
+
+同事务先重放首次相同请求receipt，否则严格校验原bytes/归属/digest/ACK，写永久stable-zone fence、清理目标、再枚举核实canonical零并保存最小receipt；未知/损坏/无法归属失败保留，COMMIT前全回滚、后丢响应以原请求重放。该文件所有canonical写事务均查fence，旧连接、await中save/fetch及迟到回调不能复活；新epoch和clearScopeIssue都不能解除，无in-file unfence。两个控制表只留最小请求/摘要/scope hash，不存被清业务原bytes或saga秘密。
+
+receipt仅证明**该文件四类canonical的逻辑清理**，不能代表全本地删除、CloudKit删除或物理介质/备份擦除。026必须遍历完整owned ledger catalog，聚合所有033逐文件结果、024 owned CKAsset staging清理和023业务Store结果；独立saga、recovery capability及028 selection/分项控制必须在普通业务擦除后仍可恢复，不能以某一receipt提前推进“本地全部完成”。
+
+用户选择保留云并恢复时，由026先使全部旧actors失效，再显式选择新ledger namespace/文件及已授权业务cursor初始化；旧文件永久fence持续挡旧实例。023/024/026相关聚合与真实环境尚未验收，033本地Cloud80或两项最低SDK编译不能代替这些门槛，生产装配不因该任务开放。
 
 ## 8. 必测故障与真实门槛
 
