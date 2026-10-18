@@ -61,6 +61,13 @@ final class AuthorityTransactionTests: XCTestCase, @unchecked Sendable {
             let result=try await reopened.recordAuthorityResultV4(receipt);XCTAssertEqual(result.rawDigest,AuthorityWire.hash(raw));try await reopened.close()
         }
     }
+    func testUntrustedExtremeLiveTimeRejectsWithoutArithmeticTrap() throws {
+        let (_,trust,_,_)=try vector()
+        let q=try LiveLockQueryV1(requestID:"q",acquireRequestID:"a",matchID:"m",lockID:"l",recordingDeviceID:"watch",activationEpoch:42,nonce:"nonce")
+        let body:[String:Any]=["version":1,"requestID":q.requestID,"acquireRequestID":q.acquireRequestID,"matchID":q.matchID,"lockID":q.lockID,"recordingDeviceID":q.recordingDeviceID,"activationEpoch":q.activationEpoch,"nonce":q.nonce,"accountID":"fixture-account-v1","receiptID":"receipt","environment":"development","keyID":"fixture-ed25519-v1","requestDigest":AuthorityWire.hash(try AuthorityWire.encode(q)),"status":"held","observedAt":Int64(-1),"expiresAt":Int64.max]
+        let raw=try JSONSerialization.data(withJSONObject:["body":body,"signature":AuthorityWire.base64URL(Data(repeating:0,count:64))],options:[.sortedKeys,.withoutEscapingSlashes])
+        XCTAssertThrowsError(try VerifiedLiveLockV1.verify(raw,query:q,accountID:"fixture-account-v1",trust:trust,now:Date(timeIntervalSince1970:-1)))
+    }
     func testTamperWrongKeyEnvironmentIntentAndDERFailClosed() throws {
         let (raw,trust,expected,_) = try vector()
         var changed=raw; changed[changed.count-4] ^= 1

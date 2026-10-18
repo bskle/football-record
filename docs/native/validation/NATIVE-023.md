@@ -18,3 +18,7 @@
 - 真实 Node 子进程 + 文件 DB + 原 Session：单轮 5/0，涵盖 HTTP start、acquire COMMIT 丢响应后本地重开同 ID、异常终结后旧 acquire 不复活、status timeout、原签名 relay / nonce 重放拒绝。
 - 完整 Core 包实际 host 回归见 `023-2-core-regression.log`；原 M3 fixtures 与原 wrappers 保持。
 - harness 首次换行与退出故障、一次 Swift async 短路编译错误原日志保留，均已修复并重新运行。真实 Apple / SDK 与 WC relay 未测试。
+
+## 审阅期修复：live-lock 坏时间
+
+root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减法。新增坏 wire 测试在独立进程实测 signal 5 红；先限制客户端时间与所有服务器时间为非负 JS safeInteger 后安全抛错绿 1/0。原 HTTP 正常时间不改称失败。证据 `023-2-live-overflow-red.log` / `green.log`。

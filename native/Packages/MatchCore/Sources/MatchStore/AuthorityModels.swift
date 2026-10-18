@@ -195,7 +195,9 @@ public struct VerifiedLiveLockV1: Sendable, Equatable {
     private init(raw: Data, query: LiveLockQueryV1, body: LiveLockBodyV1) { self.raw=raw;self.query=query;self.body=body }
     public static func verify(_ raw: Data, query: LiveLockQueryV1, accountID: String, trust: AuthorityTrustConfiguration, now: Date) throws -> Self {
         let e = try AuthorityWire.decode(Envelope.self,raw), b=e.body, time=now.timeIntervalSince1970
-        guard time.isFinite, b.version == 1, b.environment == trust.environment, let key=trust.publicKeys[b.keyID],
+        guard time.isFinite, time >= 0, time <= 9_007_199_254_740_991,
+              b.observedAt >= 0, b.observedAt <= 9_007_199_254_740_991, b.expiresAt >= 0, b.expiresAt <= 9_007_199_254_740_991,
+              b.activationEpoch > 0, b.activationEpoch <= 9_007_199_254_740_991, b.version == 1, b.environment == trust.environment, let key=trust.publicKeys[b.keyID],
               b.accountID == accountID, b.requestID == query.requestID, b.acquireRequestID == query.acquireRequestID,
               b.matchID == query.matchID, b.lockID == query.lockID, b.recordingDeviceID == query.recordingDeviceID,
               b.activationEpoch == query.activationEpoch, b.nonce == query.nonce,
