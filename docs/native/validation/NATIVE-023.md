@@ -48,3 +48,9 @@ root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减�
 - 云历史真实 HTTP 查询原 acquire，原 receipt 已 terminal 仍只读；缺原 receipt 整批停 token；显式 tombstone 不复活，`cloudDeletionsV4(scope:)` 给 025 同 facade 展示删除状态。已提交 receipt 在身份暂停后只读重放，新 batch 仍停写。
 - 保留测试错误记录：原测试 SQL 误用不存在的 locks 表造成 fixture unwrap trap；修为 active_locks + checked unwrap。完整回归曾挂测试 Process.waitUntilExit，经自身进程采样确认后改三秒有界 terminationHandler；这些轮次未计通过。新增 SQL fault fixture 曾遗漏业务 outbox，修为原 v2 完整 seed 后全绿。
 - 生产 Bootstrap、原 v2 canonical / 路由 / ACK 未变；真实 Apple / CloudKit / Keychain / Workout / 配对设备未验。
+
+## 023.5 auth / 状态持久 checkpoint（生命周期纵向仍在执行）
+
+- 真实 Node HTTP auth 宿主 2/0：challenge字符串UTF8 hash同时绑定 Apple nonce与原设备PoP；首次COMMIT丢响应按原auth requestID / key / canonical digest重开recover同session，错误key停写；文件DB扫描无原JWT/code/credential token。设备私钥与credential由注入接口持有，真实Keychain留024。
+- 同文件Store生命周期选测3/0：auth accept三个fault/reopen保持原attempt；默认关闭分析、重复计数ID和关闭清队列；签名backendDeleted后方可本地擦业务，cloud/health独立pending且重开保留256-bit capability，revision CAS拒旧写。
+- 原始红绿与测试编译/故障名修正日志均保留 `023-5-auth-*` / `023-5-lifecycle-state-*`。迁移/删除真实HTTP及全包回归尚待，未把此checkpoint计作023.5全部完成。
