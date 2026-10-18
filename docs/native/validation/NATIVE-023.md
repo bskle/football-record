@@ -22,3 +22,10 @@
 ## 审阅期修复：live-lock 坏时间
 
 root 只读预审指出未验签 observedAt/expiresAt 可先做 Int64 溢出减法。新增坏 wire 测试在独立进程实测 signal 5 红；先限制客户端时间与所有服务器时间为非负 JS safeInteger 后安全抛错绿 1/0。原 HTTP 正常时间不改称失败。证据 `023-2-live-overflow-red.log` / `green.log`。
+
+## 审阅期修复：已知终态与离线恢复
+
+- root/m2 预审的已知 authority terminal 不得续采；已有合法比赛允许全程离线，不能把 status timeout 当终结。
+- 真实 Node + 文件 SQLite + TrackingGateway：在线获知终态的重开恢复红（续采/替代 start）→绿；全 HTTP 单轮 9/0，包含已知 terminal 离线重开、recover callback 门闩之后拒替代、网络 status 失败仍同 match/recorder 恢复并建合法新 segment。
+- 新开首次物理 start 仍须 fresh held；未知旧 start 仅 reconcile 原 token。terminal/release 作为持久 fence，dispatch、planRecovery、callback 和 replacement 读同 facade，网络在 queue 外。
+- `023-2-fence-core-regression.log` 完整 Core 包当前单轮通过（其中含本树尚在后续 slice 的 2 项 cloud 事务测试；不当作已提交 cloud slice 完成）。真实 Workout/设备仍留 024/026。

@@ -34,6 +34,7 @@ extension MatchSession: AuthorityInboundCoordinator {
         let key=receipt.body.matchID.isEmpty ? "_authority-account" : receipt.body.matchID
         await acquire(key);defer { release(key) }
         let result=try await repository.recordAuthorityResultV4(receipt)
+        if receipt.body.result == .releasedNormal || receipt.body.result == .releasedAbnormal { authorityTerminalMatches.insert(receipt.body.matchID); scheduleCapture(receipt.body.matchID) }
         if !receipt.body.matchID.isEmpty,let snapshot=try? await store.snapshotV2(matchID:receipt.body.matchID) { publish(try projected(snapshot)) }
         return result
     }
@@ -41,5 +42,38 @@ extension MatchSession: AuthorityInboundCoordinator {
         try await validateEnvironment();let repository=try authorityRepository()
         await acquire(proof.body.matchID);defer { release(proof.body.matchID) }
         try await repository.recordLiveLockV4(proof,now:clock.now())
+        if proof.body.status == .terminal { authorityTerminalMatches.insert(proof.body.matchID);scheduleCapture(proof.body.matchID) }
+    }
+}
+
+extension MatchSession {
+    /// Pure SQL read inside the queue. A persisted terminal fence never expires with an attestation.
+    func updateAuthorityFence(_ snapshot:StoreSnapshotV2) async throws {
+        guard try await authorityManaged() else {return}
+        let repository=try authorityRepository()
+        guard let b=try await repository.accountBindingV4(),!b.suspended else {throw AuthorityError.identityChanged}
+        let state=try await repository.authorityStateV4(matchID:snapshot.business.descriptor.matchID,now:clock.now())
+        if [.terminal,.releasedNormal,.releasedAbnormal].contains(state.status) {authorityTerminalMatches.insert(snapshot.business.descriptor.matchID);return}
+        if snapshot.business.descriptor.startPermit != nil {
+            guard let acquire=state.acquire,acquire.body.accountID==b.accountID,acquire.body.activationEpoch==b.activationEpoch,
+                  acquire.body.matchID==snapshot.business.descriptor.matchID,acquire.body.recordingDeviceID==snapshot.business.descriptor.recordingDeviceID else {throw AuthorityError.identityChanged}
+        }
+    }
+    /// Opportunity to learn server terminal state. A network failure does not revoke an existing lock.
+    /// Only an as-yet unperformed first start needs a fresh held proof before creating a Workout.
+    func learnAuthorityForRecovery(_ snapshot:StoreSnapshotV2) async throws {
+        guard try await authorityManaged(),snapshot.business.descriptor.startPermit != nil else {return}
+        try await updateAuthorityFence(snapshot)
+        if terminal(snapshot) {return}
+        do {_=try await permits.acquire(for:snapshot.business.descriptor.startIntent)}
+        catch {
+            try await updateAuthorityFence(snapshot)
+            if terminal(snapshot) {return}
+            let transient=(error is URLError) || ((error as? any AuthorityTransientFailure)?.permitsOfflineContinuation == true)
+            let positive=snapshot.captureOperations.contains {$0.observation?.hasPositiveCaptureEvidence == true}
+            let uncertain=snapshot.captureOperations.contains {$0.operation.action == .start && $0.state == .needsReconciliation}
+            guard transient,(positive || uncertain) else {throw error}
+        }
+        try await updateAuthorityFence(snapshot)
     }
 }

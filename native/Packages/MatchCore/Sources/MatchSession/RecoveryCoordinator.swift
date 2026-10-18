@@ -8,7 +8,12 @@ extension MatchSession {
     let device = try await identity()
     var candidates: [StoreSnapshotV2] = []
     for match in try await store.matchIDs() {
-      let s = try await store.snapshotV2(matchID: match)
+      var s = try await store.snapshotV2(matchID: match)
+      if s.business.descriptor.recordingDeviceID == device {
+        try await learnAuthorityForRecovery(s)
+        s = try await store.snapshotV2(matchID: match)
+        try await updateAuthorityFence(s)
+      }
       guard !s.business.diagnostics.contains(where: { $0.severity == .blocking }) else {
         throw SessionError.blockedDiagnostics
       }

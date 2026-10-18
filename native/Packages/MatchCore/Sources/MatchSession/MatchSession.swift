@@ -19,6 +19,7 @@ public actor MatchSession {
   var captureWakeups = Set<String>()
   var recoveryRequested = Set<String>()
   var recoveredTokens = Set<String>()
+  var authorityTerminalMatches = Set<String>()
   struct Subscriber {
     let continuation: AsyncStream<SessionSnapshot>.Continuation
     var generation: Int64 = -1
@@ -93,7 +94,7 @@ public actor MatchSession {
     else { throw SessionError.blockedDiagnostics }
   }
   func terminal(_ s: StoreSnapshotV2) -> Bool {
-    s.business.events.contains { $0.type == .matchEnded || $0.type == .matchTerminated }
+    authorityTerminalMatches.contains(s.business.descriptor.matchID) || s.business.events.contains { $0.type == .matchEnded || $0.type == .matchTerminated }
   }
   func captureAction(_ action: SessionAction, snapshot: StoreSnapshotV2) -> CaptureAction? {
     // No physical instance exists while its start is still pending. Its first dispatch
@@ -201,6 +202,7 @@ public actor MatchSession {
       return SessionReceipt(receipt: receipt, snapshot: snapshot)
     }
     let s = try await store.snapshotV2(matchID: request.matchID)
+    try await updateAuthorityFence(s)
     try requireWritable(s, device: device)
     guard s.business.generation == request.expectedGeneration else {
       throw StoreError.staleGeneration

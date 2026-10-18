@@ -13,6 +13,7 @@ public protocol SessionRepository: SyncRepository {
 public protocol DeviceIdentityProvider: Sendable { func localDeviceID() async throws -> String }
 public protocol SessionClock: Sendable { func now() -> Date }
 public protocol SessionIDFactory: Sendable { func nextID() -> String }
+public protocol AuthorityTransientFailure: Error { var permitsOfflineContinuation: Bool { get } }
 public protocol StartPermitProvider: Sendable {
   func acquire(for intent: StartIntent) async throws -> TrustedStartPermit
 }

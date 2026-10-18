@@ -14,13 +14,13 @@ final class HTTPAuthorityIntegrationTests:XCTestCase,@unchecked Sendable {
         let session:MatchSession
         let date:Date
     }
-    func harness(_ f:NodeAuthorityFixture,root:URL?=nil) async throws -> Harness {
+    func harness(_ f:NodeAuthorityFixture,root:URL?=nil,gateway:any WorkoutGateway=UnavailableWorkoutGateway()) async throws -> Harness {
         let client=try f.client(),meta=f.metadata,date=Date(timeIntervalSince1970:Double(meta.now))
         let root=root ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let repo=try SQLiteSessionRepository(rootDirectory:root,databaseNamespace:"http-session",authorityTrust:client.trust)
         try await repo.bindAccountV4(AccountBindingV4(accountID:meta.credential.accountID,cloudSpaceID:"fixture-cloud",deviceID:meta.credential.deviceID,activationEpoch:meta.credential.activationEpoch,role:.phone,environment:.development))
         let provider=AuthorityStartPermitProvider(client:client,repository:repo,now:{date})
-        let session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:meta.credential.deviceID),clock:FixedClock(date:date),ids:UUIDSessionIDFactory(),permits:provider,workout:UnavailableWorkoutGateway(),environment:.development(databaseNamespace:"http-session"))
+        let session=MatchSession(store:repo,deviceIdentity:FixedIdentity(value:meta.credential.deviceID),clock:FixedClock(date:date),ids:UUIDSessionIDFactory(),permits:provider,workout:gateway,environment:.development(databaseNamespace:"http-session"))
         try await provider.attach(session)
         return Harness(fixture:f,client:client,root:root,repo:repo,provider:provider,session:session,date:date)
     }
@@ -71,6 +71,65 @@ final class HTTPAuthorityIntegrationTests:XCTestCase,@unchecked Sendable {
         let replay=try await proxy.send(signed);XCTAssertEqual(replay.status,401)
         let original=try VerifiedAuthorityReceiptV1.verify(response.body,expected:AuthorityExpectedIntent(intent,accountID:c.accountID,epoch:c.activationEpoch),trust:client.trust)
         let query=try await client.query(requestID:intent.requestID);XCTAssertEqual(query,original.raw)
+    }
+    func testReopenedStartedMatchUsesFreshAuthorityAndTerminalOnlyFinishesOriginalToken() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()}
+        let original=TrackingGateway(),h=try await harness(f,gateway:original),request=try await h.session.prepareStart(starter:true)
+        _=try await h.session.execute(request);try await waitForCapture(h.repo,matchID:request.matchID)
+        let state=try await h.repo.authorityStateV4(matchID:request.matchID,now:h.date)
+        var fields=AuthorityFields();fields.matchID=request.matchID;fields.lockID=state.acquire!.body.lockID;fields.recordingDeviceID=request.startIntent!.recordingDeviceID;fields.activationEpoch=f.metadata.credential.activationEpoch;fields.mode="abnormal"
+        _=try await h.client.send(ControlIntentV1(requestID:UUID().uuidString,operation:.terminate,fields:fields))
+        try await h.repo.close()
+        let after=TrackingGateway(),reopened=try await harness(f,root:h.root,gateway:after)
+        _=try await reopened.session.recover()
+        try await Task.sleep(for:.milliseconds(100))
+        let operations=await after.operations
+        XCTAssertFalse(operations.contains(where:{$0.action == .start || $0.action == .resume || $0.action == .recover}),"terminal authority must not recreate or resume a Workout")
+        let current=try await reopened.repo.authorityStateV4(matchID:request.matchID,now:h.date)
+        XCTAssertEqual(current.status,.terminal)
+        XCTAssertTrue(operations.allSatisfy({$0.action == .finish && $0.externalToken==request.captureOperationID}))
+    }
+    func testStartedOriginalMatchCanRecoverAndReplaceSegmentWhenStatusNetworkFails() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()}
+        let original=TrackingGateway(),h=try await harness(f,gateway:original),request=try await h.session.prepareStart(starter:true)
+        _=try await h.session.execute(request);try await waitForCapture(h.repo,matchID:request.matchID);try await h.repo.close()
+        _=try f.command(["op":"fault","value":"liveStatus"])
+        let after=TrackingGateway(),reopened=try await harness(f,root:h.root,gateway:after)
+        let recovered=try await reopened.session.recover()
+        if case .active(let value)=recovered {XCTAssertEqual(value.store.business.descriptor.recordingDeviceID,request.startIntent!.recordingDeviceID)} else {XCTFail("offline recovery must remain available for an established match")}
+        try await Task.sleep(for:.milliseconds(100))
+        let operations=await after.operations
+        XCTAssertTrue(operations.contains(where:{$0.action == .recover}));XCTAssertTrue(operations.contains(where:{$0.action == .start}))
+        XCTAssertTrue(operations.allSatisfy({$0.binding.matchID==request.matchID && $0.binding.recordingDeviceID==request.startIntent!.recordingDeviceID}))
+    }
+    func terminateOnServer(_ h:Harness,request:SessionRequest) async throws {
+        let state=try await h.repo.authorityStateV4(matchID:request.matchID,now:h.date)
+        var fields=AuthorityFields();fields.matchID=request.matchID;fields.lockID=state.acquire!.body.lockID;fields.recordingDeviceID=request.startIntent!.recordingDeviceID;fields.activationEpoch=h.fixture.metadata.credential.activationEpoch;fields.mode="abnormal"
+        _=try await h.client.send(ControlIntentV1(requestID:UUID().uuidString,operation:.terminate,fields:fields))
+        let query=try LiveLockQueryV1(requestID:UUID().uuidString,acquireRequestID:request.commandID,matchID:request.matchID,lockID:state.acquire!.body.lockID,recordingDeviceID:request.startIntent!.recordingDeviceID,activationEpoch:h.fixture.metadata.credential.activationEpoch,nonce:UUID().uuidString)
+        try await h.session.acceptLiveLock(h.client.liveStatus(query,accountID:h.fixture.metadata.credential.accountID))
+    }
+    func testPersistedTerminalFenceSurvivesReopenEvenWhenNetworkIsUnavailable() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()}
+        let first=TrackingGateway(),h=try await harness(f,gateway:first),request=try await h.session.prepareStart(starter:true)
+        _=try await h.session.execute(request);try await waitForCapture(h.repo,matchID:request.matchID)
+        try await terminateOnServer(h,request:request);try await waitForCapture(h.repo,matchID:request.matchID);try await h.repo.close()
+        _=try f.command(["op":"fault","value":"liveStatus"])
+        let next=TrackingGateway(),reopened=try await harness(f,root:h.root,gateway:next)
+        _=try await reopened.session.recover();try await Task.sleep(for:.milliseconds(30))
+        let actions=await next.operations;XCTAssertFalse(actions.contains(where:{$0.action != .finish}))
+        let state=try await reopened.repo.authorityStateV4(matchID:request.matchID,now:h.date);XCTAssertEqual(state.status,.terminal)
+    }
+    func testTerminalLearnedWhileRecoveryCallbackIsSuspendedCannotCreateReplacement() async throws {
+        let f=try NodeAuthorityFixture();defer {f.close()}
+        let first=TrackingGateway(),h=try await harness(f,gateway:first),request=try await h.session.prepareStart(starter:true)
+        _=try await h.session.execute(request);try await waitForCapture(h.repo,matchID:request.matchID);try await h.repo.close()
+        let next=TrackingGateway(suspendRecovery:true),reopened=try await harness(f,root:h.root,gateway:next)
+        _=try await reopened.session.recover()
+        for _ in 0..<100 {if await next.operations.contains(where:{$0.action == .recover}) {break};try await Task.sleep(for:.milliseconds(5))}
+        try await terminateOnServer(reopened,request:request)
+        await next.releaseRecovery();try await Task.sleep(for:.milliseconds(60))
+        let operations=await next.operations;XCTAssertFalse(operations.contains(where:{$0.action == .start || $0.action == .resume}))
     }
     func testOriginalSessionStartsThroughRealNodeHTTPAndPersistsOriginalIDs() async throws {
         let f=try NodeAuthorityFixture();defer { f.close() }

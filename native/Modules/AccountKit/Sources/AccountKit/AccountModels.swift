@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import MatchStore
+import MatchSession
 
 /// Credentials remain in the injected vault; no business SQLite DTO serializes this type.
 public struct DeviceCredential: Decodable, Sendable, Equatable {
@@ -52,4 +53,8 @@ public struct AuthorityHTTPFailure: Error, Decodable, Sendable {
     public let code,requestID:String
     public let retryable:Bool
     public let retryAfterSeconds:Int?
+}
+
+extension AuthorityHTTPFailure:AuthorityTransientFailure {
+    public var permitsOfflineContinuation:Bool {retryable || code == "unavailable"}
 }
