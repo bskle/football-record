@@ -128,3 +128,39 @@ extension DeviceSyncErasureTests {
         XCTAssertEqual(try Data(contentsOf: transfer.url), Data("original".utf8))
     }
 }
+
+private struct ReceiptWaitErasureDriver: DeviceSyncErasureDriving {
+    let barrier: ErasureDispatchBarrier
+    func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus { await barrier.pause(); return .drained }
+}
+extension DeviceSyncErasureTests {
+    func testReceiptReplayChecksCurrentZeroAndPreservesRestoredBytes() async throws {
+        for known in [true, false] {
+            let f = try ManagedErasureFixture(), inbox = try f.inbox(), raw = Data("restored-canonical".utf8)
+            _ = try inbox.adoptData(raw)
+            let first = try await f.service().erase(f.request)
+            let file = f.root.appendingPathComponent("inbox/" + (known ? "frame-" + digest(raw) + ".frame" : "unknown.bin"))
+            try raw.write(to: file) // external restore, not a sanctioned writer
+            do { _ = try await f.service().erase(f.request); XCTFail("receipt replay hid current remaining bytes") } catch {}
+            let reopened = try DeviceSyncStorageContext(root: f.root)
+            do { _ = try await DeviceSyncErasureService(context: reopened, driver: DrainedErasureDriver()).erase(f.request); XCTFail("reopened receipt hid remaining bytes") } catch {}
+            XCTAssertEqual(try Data(contentsOf: file), raw)
+            guard case .completed(let receipt) = first else { return XCTFail("original receipt") }
+            XCTAssertEqual(try f.context.withLocked { try f.context.ledger.state().receipt }, receipt)
+        }
+    }
+    func testReceiptCommittedDuringAwaitCannotSkipCurrentZeroCheck() async throws {
+        let f = try ManagedErasureFixture(), raw = Data("restored-after-concurrent-commit".utf8)
+        _ = try f.inbox().adoptData(raw)
+        let barrier = ErasureDispatchBarrier(), waiting = Task { try await f.service(driver: ReceiptWaitErasureDriver(barrier: barrier)).erase(f.request) }
+        try await settle { await barrier.entered }
+        let first = try await f.service().erase(f.request)
+        let file = f.root.appendingPathComponent("inbox/frame-" + digest(raw) + ".frame")
+        try raw.write(to: file)
+        await barrier.release()
+        do { _ = try await waiting.value; XCTFail("post-driver receipt replay hid restored bytes") } catch {}
+        XCTAssertEqual(try Data(contentsOf: file), raw)
+        guard case .completed(let receipt) = first else { return XCTFail("original receipt") }
+        XCTAssertEqual(try f.context.withLocked { try f.context.ledger.state().receipt }, receipt)
+    }
+}

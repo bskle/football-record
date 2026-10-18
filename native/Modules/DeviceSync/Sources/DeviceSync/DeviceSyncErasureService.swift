@@ -13,7 +13,7 @@ public struct DeviceSyncErasureService: DeviceSyncLocalTransportErasing {
             let state = try context.ledger.state()
             guard state.owner == request.binding else { throw DeviceSyncErasureError.intentMismatch }
             if let previous = state.request { guard previous == request else { throw DeviceSyncErasureError.intentMismatch } }
-            if let receipt = state.receipt { return (receipt, state.transfers) }
+            if let receipt = state.receipt { return (try verifiedReplay(receipt), state.transfers) }
             let inventory = try inventory()
             if state.request == nil { try context.ledger.begin(request, transfers: inventory.transfers, fault: fault) }
             return (nil, try context.ledger.state().transfers)
@@ -22,7 +22,7 @@ public struct DeviceSyncErasureService: DeviceSyncLocalTransportErasing {
         let drain = try await driver.quiesceForErasure(request, expected: prepared.1)
         guard drain == .drained else { return .pending(drain) }
         return try context.withFenced(request) {
-            if let receipt = try context.ledger.state().receipt { return .completed(receipt) }
+            if let receipt = try context.ledger.state().receipt { return .completed(try verifiedReplay(receipt)) }
             let files = try inventory().files
             for (index, file) in files.enumerated() {
                 try FileManager.default.removeItem(at: file)
@@ -32,6 +32,10 @@ public struct DeviceSyncErasureService: DeviceSyncLocalTransportErasing {
             guard try inventory().files.isEmpty else { throw DeviceSyncErasureError.unknownInventory }
             return .completed(try context.ledger.complete(request, fault: fault))
         }
+    }
+    private func verifiedReplay(_ receipt: DeviceSyncLocalEraseReceipt) throws -> DeviceSyncLocalEraseReceipt {
+        guard try inventory().files.isEmpty else { throw DeviceSyncErasureError.unknownInventory }
+        return receipt
     }
     private func inventory() throws -> (files: [URL], transfers: [DeviceSyncTransferIdentity]) {
         var files: [URL] = [], transfers: [DeviceSyncTransferIdentity] = []
