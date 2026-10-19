@@ -45,7 +45,7 @@ extension MatchSession {
     }
     for key in unsavedObservations.keys.sorted() {
       guard let original = unsavedObservations[key] else { continue }
-      try await saveObservation(original.observation, operation: original.operation)
+      try await saveObservation(original.observation, operation: original.operation, retryingRetained: true)
       unsavedObservations.removeValue(forKey: key)
       observationCommits.removeValue(forKey: key)
     }

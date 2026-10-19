@@ -26,7 +26,7 @@ extension MatchSession {
       for id in unsavedObservations.keys.sorted() {
         guard let original = unsavedObservations[id],
           Data(original.operation.binding.matchID.utf8) == Data(match.utf8) else { continue }
-        try await saveObservation(original.observation, operation: original.operation)
+        try await saveObservation(original.observation, operation: original.operation, retryingRetained: true)
         unsavedObservations.removeValue(forKey: id); observationCommits.removeValue(forKey: id)
         captureErrors.removeValue(forKey: match)
       }
@@ -263,7 +263,7 @@ extension MatchSession {
     default: return .failed
     }
   }
-  func saveObservation(_ observation: WorkoutObservation, operation: CaptureOperation) async throws
+  func saveObservation(_ observation: WorkoutObservation, operation: CaptureOperation, retryingRetained: Bool = false) async throws
   {
     let match = operation.binding.matchID
     await acquire(match)
@@ -295,6 +295,7 @@ extension MatchSession {
       // Store validates this snapshot's immutable operation history; only the exact
       // normalized observation (or the original command above) can satisfy readback.
       let expected = try self.normalized(observation, operation: operation, current: current)
+      if retryingRetained { try verifyRetainedObservation(expected, raw: observation, operation: operation) }
       guard let saved = current.observation, try observationBytes(saved) == observationBytes(expected)
       else { throw StoreError.operationConflict }
       return
@@ -309,6 +310,7 @@ extension MatchSession {
       normalized = observation
     } else {
       normalized = try self.normalized(observation, operation: operation, current: current)
+      if retryingRetained { try verifyRetainedObservation(normalized, raw: observation, operation: operation) }
       if normalized == current.observation { return }
     }
     let encoder = JSONEncoder()
@@ -382,6 +384,13 @@ extension MatchSession {
     }
     publish(try projected(await store.snapshotV2(matchID: match)))
     if case .notCreated = normalized.outcome { scheduleCapture(match) }
+  }
+  private func verifyRetainedObservation(_ normalized: WorkoutObservation, raw: WorkoutObservation, operation: CaptureOperation) throws {
+    // Monotonic saved/stopped evidence may prevent replacing B, but cannot stand in
+    // for an uncommitted original A. Preserve A and block retirement in that case.
+    let original = try observationCommits[operation.id]?.captureOperationUpdates.first(where: { $0.operationID == operation.id })?.observation
+      ?? self.normalized(raw, operation: operation, current: CaptureOperationRecord(operation: operation, state: .needsReconciliation, observation: nil))
+    guard try observationBytes(original) == observationBytes(normalized) else { throw StoreError.operationConflict }
   }
   private func observationBytes<T: Encodable>(_ value: T) throws -> Data {
     let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]

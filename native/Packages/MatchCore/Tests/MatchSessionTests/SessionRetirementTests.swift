@@ -167,6 +167,31 @@ final class SessionRetirementTests: XCTestCase, @unchecked Sendable {
     let calls = await h.gateway.performed.count; XCTAssertEqual(calls, 1)
   }
 
+  func testPendingSaveProofCannotNormalizeAwayRetainedOriginalObservation() async throws {
+    for laterOutcome in [WorkoutOutcome.savedAwaitingLink, .stopped] {
+      let h = try Harness()
+      await h.repo.failNextObservation("before")
+      let request = try await h.session.prepareStart(starter: true)
+      _ = try await h.session.execute(request); await h.repo.waitForObservation()
+      let current = try await h.repo.snapshotV2(matchID: request.matchID)
+      let original = try XCTUnwrap(current.captureOperations.first?.operation)
+      let different = try WorkoutObservation(operationID: original.id, binding: original.binding,
+        externalToken: original.externalToken, observedAt: original.requestedAt.addingTimeInterval(0.3),
+        outcome: laterOutcome, window: CaptureWindow(start: nil, end: nil),
+        failure: laterOutcome == .stopped ? .captureFailed : nil)
+      let update = try CaptureOperationUpdate(operationID: original.id, expectedState: .needsReconciliation, state: .needsReconciliation, observation: different)
+      _ = try await h.repo.commitV2(StoreCommitV2(commandID: "independent-pending-save", expectedGeneration: current.business.generation,
+        descriptor: current.business.descriptor, events: [], captureRevisions: [], newCaptureOperations: [], captureOperationUpdates: [update], businessOutbox: []))
+      do { try await h.session.retireBusiness(); XCTFail("first save error") }
+      catch { XCTAssertEqual(error as? StoreError, .injectedFailure) }
+      do { try await h.session.retireBusiness(); XCTFail("B cannot stand in for uncommitted original A: \(laterOutcome)") }
+      catch { XCTAssertEqual(error as? StoreError, .operationConflict) }
+      let after = try await h.repo.snapshotV2(matchID: request.matchID)
+      XCTAssertEqual(after.captureOperations.first?.observation, different)
+      let calls = await h.gateway.performed.count; XCTAssertEqual(calls, 1)
+    }
+  }
+
   func testRetirementBeforeIntentReplyCannotDispatchNewPermitRequest() async throws {
     let permits = CountingRetirementPermit(), h = try Harness(permits: permits)
     await h.repo.holdIntentReplyForRetirement()
