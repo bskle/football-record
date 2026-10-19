@@ -70,3 +70,32 @@ Source checkpoint `bfe5b2aeb064a24ce31618b42dfb0705f74d4ac7` adds only the catal
 | `catalog-full-green.log` (single complete 36/0) | `49f4c80511fcfe49947595ac45748dc33215db1c51ad6f3def931eb0d1dfaf76` |
 
 Health reservation fields are currently an unconsumed draft: 028 request UUID, selection digest, optional confirmation UUID and a missing-mapping/source/unsupported issue. Exact targets belong in the retained 028 ledger. The bridge and its confirmation/reopen contract are not implemented or verified by this checkpoint. All actual saga creation/seal/first-erasure crash cases and every explicit/background/control-retry resume entrance must still be guarded by the eventual composition. Local aggregate leaf receipts, full membership discovery and application wiring remain pending. No real SDK, account, device, signing, UI or whole-task acceptance is claimed.
+
+## Catalog interruption repair checkpoint (S26-catalog-1 / S26-catalog-2)
+
+Source `c8f0e78d0cbf3b9c4484b4d111dc43a8aafca362` follows root's accepted-038 ordinary merge `fb6eb0e4f85da87bef3b42f144ec126eef9bbd55`. The two findings remain subject to exact root+m2 review; this records author evidence only.
+
+The v2 owner permanently binds two slot inodes and the final directory ancestry. `catalog.json` is a hard link to the committed slot. A normal transaction writes/fsyncs only the inactive original slot, then publishes an exact descriptor hard link containing both revisions and both payload SHA256 hashes. Recovery requires that descriptor, the original owner/slot inodes and the old committed journal to agree before completing the atomic rename. Foreign inode copies, bad hashes/revisions, replaced slots and unknown entries are preserved and rejected. A genuinely missing published journal is never replaced with empty state. Legacy owner-only state has no v2 proof and is preserved with a typed refusal.
+
+Fresh initialization creates a private sibling candidate. Slots, complete owner and the initial journal hard link are fully fsynced there. `RENAME_EXCL` publishes the complete directory, then parent fsync makes the namespace publication durable. No owner-only state is published at the final path. Interrupted unpublished candidates are preserved without prefix scanning, cleanup or adoption; a retry builds a new unpublished candidate and cannot overwrite an unknown/concurrent final directory. Owner bytes are upper-bound encoded with maximum inode widths before the first candidate file, then checked again before writing; the permanent 64 KiB owner and 1 MiB per-slot journal limits are consistent with their readers.
+
+- Original real-process RED: four tests / seven failures (two unexpected). The writer's fsynced-owner and fsynced-pending hooks terminate a child with `_exit(86)`, bypassing Swift cleanup; the old final path then cannot reopen. A 705-byte control path in 300 short directory levels writes a 143,081-byte owner that its 64 KiB reader rejects.
+- Reproducible old-writer regression layer: seven boundary tests / 15 failures (four unexpected), 330 inputs unchanged. Exact writer/test snapshots and manifest are retained; the fixed writer was restored byte for byte before green verification. Hooks absent from the old writer correctly fail their expected-child-exit assertions and are not represented as old crash windows reached.
+- Final single complete AppIntegration run: **43 tests / 0 failures**, including **15 catalog tests** and **13 child exits with status 86**. It covers initialization after stage creation, slot sync, zero-length owner creation, owner sync, before directory publication, after directory rename and after parent sync; normal transaction before journal rename, after rename and after directory sync; and three negative publication variants. Initial unpublished fixture files are preserved on retry.
+- Negative cases retain wrong-hash descriptors, same-name foreign inodes, replaced slots, legacy owner-only bytes and genuinely missing journals; a concurrent final directory containing foreign bytes is preserved. Existing 256-member and 1 MiB no-truncation boundaries remain included.
+- The deep path now rejects before creating any owner/journal (observed owner bytes: zero). All **330 conservative inputs** were unchanged before/after and matched the committed source byte for byte. `git diff --check` passed. The run took 99 seconds.
+- Raw host output retains 104 CoreData helper diagnostic lines with no XCTest failure. These are not represented as empty diagnostics or real SDK readiness. The crash tests demonstrate process interruption, not power-loss or whole-machine durability.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `catalog-crash-red.log` (first four-test RED) | `f4b24259b1579f8a78d7ee629365ef159a4bd95d52aa99b918ad267922778278` |
+| `catalog-crash-red-writer.swift` | `3b4a8ed14810c967d06b3b17615928ed8484c9a834970364b1a6b3c4951aec57` |
+| `catalog-crash-regression-red.log` | `fc5de232e8fa6e56189e36461ece750ab7432ccf9213022703bc68450203f477` |
+| `catalog-crash-red-inputs.json` | `ceda9b4bd893a97766300ccd4d5e79d5af7ee0991ca371425c91d52d61db1edb` |
+| `catalog-crash-red-post.json` | `719cd984707f089b9548313f858a5f7718c78edde204535d076e58bfc7251d18` |
+| `catalog-crash-red-tests.swift` | `f30b021478b08b9951fa0303f63f63f70546c07c172aea8e508e1565f7ce8283` |
+| `catalog-crash-checkpoint-inputs.json` | `2cd84c155c3dce73854108d6b06659a29a1a8ea43b76162c80e4434e5e5c7df0` |
+| `catalog-crash-checkpoint-post.json` | `6f0d72b999dcd763c7e9ce851be17b142066909e6d147dc4fc25d174d6b9e3cf` |
+| `catalog-crash-full-green.log` | `fb65386fdfd23bcafd9f1e0485825525b8d0c8051d532dd9924091ea51d3b318` |
+
+This repairs only local catalog publication. Health remains upstream 039; typed Watch relay remains upstream 040. Neither WIP API is consumed here. Same-facade composition, every deletion resume entry, complete owned-leaf receipts and final combined App/UI/SDK verification remain incomplete. No real accounts, devices, signing, SDK factories or long-lived branch promotion was performed.
