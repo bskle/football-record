@@ -2,8 +2,10 @@ import Foundation
 import Darwin
 import SQLite3
 import XCTest
+import CryptoKit
 import MatchCore
 import MatchStore
+import MatchSession
 import AccountKit
 import HealthKitDeletion
 @testable import AppIntegration
@@ -234,6 +236,108 @@ import HealthKitDeletion
       let before=try inventory(h.directory);XCTAssertThrowsError(try open(h));XCTAssertEqual(try inventory(h.directory),before)
     }
   }
+  func testCanonicalPathAliasKeepsOriginalLocationAndArtifactBytes() async throws {
+    let h=try fixture(),first=h.root.appendingPathComponent("retained-é"),second=h.root.appendingPathComponent("retained-e\u{301}")
+    let s=try M4RetainedHealthArtifactStore(directory:first,owner:h.owner,removableRoots:[h.business]);try await s.reserve(reservation());try await s.close()
+    if !FileManager.default.fileExists(atPath:second.path){try FileManager.default.moveItem(at:first,to:second)}
+    let before=try inventory(second)
+    if Data(first.standardizedFileURL.path.utf8)==Data(second.standardizedFileURL.path.utf8) {
+      let next=try M4RetainedHealthArtifactStore(directory:second,owner:h.owner,removableRoots:[h.business]),saved=try await next.readReservation(parentID:"parent-delete")
+      XCTAssertEqual(try saved?.canonicalBytes(),try reservation().canonicalBytes());try await next.close()
+      let after=try inventory(second);XCTAssertEqual(after["health.owner"],before["health.owner"]);XCTAssertEqual(after["health.sqlite"],before["health.sqlite"])
+    }else {XCTAssertThrowsError(try M4RetainedHealthArtifactStore(directory:second,owner:h.owner,removableRoots:[h.business]));XCTAssertEqual(try inventory(second),before)}
+  }
+  func testCorruptionDuringOpenHandleRemainsTypedBlockedAndCannotAdvanceAnotherParent() async throws {
+    let h=try fixture(),s=try open(h);try await s.reserve(reservation())
+    let malformed=Data("{bad-json".utf8),hex=malformed.map{String(format:"%02x",$0)}.joined(),digest=Data(M4HealthBytes.hash(malformed).utf8).map{String(format:"%02x",$0)}.joined()
+    try modify(h,"UPDATE health_artifacts SET canonical=x'"+hex+"',digest=x'"+digest+"'")
+    await rejects(.storageBlocked){_=try await s.readReservation(parentID:"parent-delete")}
+    await rejects(.storageBlocked){try await s.reserve(reservation(parentID:"later-parent"))}
+    XCTAssertEqual(try scalar(h,"SELECT count(*) FROM health_artifacts"),1);try await s.close()
+  }
+  func testProviderAwaitAllowsArtifactTransactionThenCloseRejectsLateSeal() async throws {
+    let h=try fixture(),gate=ArtifactSealGate(),s=try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],fullSealProvider:{try await gate.read($0)})
+    let pending=Task{try await s.readFullSeal(parentID:"parent-delete")};try await gate.waitStarted()
+    try await s.reserve(reservation());let saved=try await s.readReservation(parentID:"parent-delete");XCTAssertNotNil(saved)
+    try await s.close();await gate.finish(nil)
+    do{_=try await pending.value;XCTFail("closed context cannot accept a late provider")}catch{XCTAssertEqual(error as? M4HealthArtifactError,.closed)}
+  }
+  func testProviderLateReturnRechecksOriginalOwnerAndNeverWritesItsSeal() async throws {
+    let h=try fixture(),gate=ArtifactSealGate(),s=try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],fullSealProvider:{try await gate.read($0)})
+    let pending=Task{try await s.readFullSeal(parentID:"parent-delete")};try await gate.waitStarted()
+    let owner=h.directory.appendingPathComponent("health.owner"),bytes=try Data(contentsOf:owner)
+    try FileManager.default.moveItem(at:owner,to:h.root.appendingPathComponent("original-provider.owner"));try bytes.write(to:owner)
+    await gate.finish(nil)
+    do{_=try await pending.value;XCTFail("changed original owner")}catch{XCTAssertEqual(error as? M4HealthArtifactError,.invalidOwner)}
+    XCTAssertEqual(try scalar(h,"SELECT count(*) FROM health_artifacts"),0);try await s.close()
+  }
+  func testReal039PrepareAnd028ConfirmationReplayAfterStoreCommitResponseLoss() async throws {
+    let h=try fixture(),parent=try await parentRepository(h),s=try open(h),ledger=try healthLedger(h),raw=try reservation()
+    let bridge=M4HealthDeletionBridge(mapping:s,parents:parent.repo,ledger:ledger,allowedSourceOrigin:.controlledFixture,clock:{100})
+    try await bridge.reserve(raw);await s.injectNextFault(.afterCommitLost)
+    do{_=try await bridge.prepare(parentID:raw.parentID);XCTFail()}catch{XCTAssertEqual(error as? M4HealthArtifactError,.storageBlocked)}
+    let first=try await s.readPrepared(parentID:raw.parentID),frozen=try XCTUnwrap(first),entries=try await ledger.pendingRequests();XCTAssertTrue(entries.isEmpty)
+    try await bridge.close();try await s.close()
+    let next=try open(h),nextLedger=try healthLedger(h),nextBridge=M4HealthDeletionBridge(mapping:next,parents:parent.repo,ledger:nextLedger,allowedSourceOrigin:.controlledFixture,clock:{100})
+    let prepared=try await nextBridge.prepare(parentID:raw.parentID),entry=try await nextLedger.entry(prepared.request.requestID)
+    XCTAssertEqual(try prepared.canonicalBytes(),try frozen.canonicalBytes());XCTAssertEqual(entry.confirmation,frozen.confirmation);XCTAssertEqual(entry.attemptCount,0)
+    do{try await nextBridge.deleteAppCreatedWorkouts(confirmationID:raw.parentID);XCTFail("before backend deletion and full seal")}catch{}
+    let unchanged=try await nextLedger.entry(prepared.request.requestID);XCTAssertEqual(unchanged,entry)
+    try await nextBridge.close();try await next.close();try await parent.repo.close()
+  }
+  func testReal039And028UnknownRestartKeepsOriginalRequestAndNeverRedispatches() async throws {
+    let h=try fixture(),parent=try await parentRepository(h),seals=ArtifactSealBox(),s=try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],fullSealProvider:{await seals.read($0)}),ledger=try healthLedger(h)
+    let initial=M4HealthDeletionBridge(mapping:s,parents:parent.repo,ledger:ledger,allowedSourceOrigin:.controlledFixture,clock:{100}),raw=try reservation()
+    try await initial.reserve(raw);let prepared=try await initial.prepare(parentID:raw.parentID);try await backend(parent.repo,parent.saga,parent.key)
+    await seals.set(M4HealthFullSeal(version:1,parentID:raw.parentID,parentDigest:prepared.parentDigest,reservationDigest:try raw.digest(),preparedDigest:try M4HealthBytes.hash(prepared.canonicalBytes()),catalogDigest:String(repeating:"c",count:64),scope:raw.scope,cloud:raw.cloud,local:raw.local,health:raw.health,healthConfirmed:true))
+    let driver=ArtifactUnknownHealthDriver(),bridge=M4HealthDeletionBridge(mapping:s,parents:parent.repo,ledger:ledger,driver:driver,allowedSourceOrigin:.controlledFixture,clock:{100},timeout:.milliseconds(10))
+    do{try await bridge.deleteAppCreatedWorkouts(confirmationID:raw.parentID);XCTFail()}catch{XCTAssertEqual(error as? M4HealthBridgeError,.outcomeUnknown)}
+    let prior=try await ledger.entry(prepared.request.requestID);XCTAssertEqual(prior.phase,.awaitingOutcome);XCTAssertEqual(driver.calls,1)
+    try await bridge.close();try await s.close()
+    let next=try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],fullSealProvider:{await seals.read($0)}),nextLedger=try healthLedger(h),nextDriver=ArtifactUnknownHealthDriver(),nextBridge=M4HealthDeletionBridge(mapping:next,parents:parent.repo,ledger:nextLedger,driver:nextDriver,allowedSourceOrigin:.controlledFixture,clock:{100},timeout:.milliseconds(10))
+    let restored=try await nextBridge.prepare(parentID:raw.parentID),entry=try await nextLedger.entry(prepared.request.requestID)
+    XCTAssertEqual(try restored.canonicalBytes(),try prepared.canonicalBytes());XCTAssertEqual(entry.phase,.interrupted)
+    do{try await nextBridge.deleteAppCreatedWorkouts(confirmationID:raw.parentID);XCTFail()}catch{XCTAssertEqual(error as? M4HealthBridgeError,.outcomeUnknown)}
+    driver.complete();for _ in 0..<100{await Task.yield()}
+    let after=try await nextLedger.entry(prepared.request.requestID);XCTAssertEqual(after,entry);XCTAssertEqual(nextDriver.calls,0)
+    let saved=try await next.readPrepared(parentID:raw.parentID);XCTAssertEqual(try saved?.canonicalBytes(),try prepared.canonicalBytes())
+    try await nextBridge.close();try await next.close();try await parent.repo.close()
+  }
+  func testNearSixteenMiBRealArtifactReopensAndOversizeCannotChangeIt() async throws {
+    let h=try fixture(),base=try reservation(),fact=try XCTUnwrap(base.facts.first),revision=try XCTUnwrap(fact.revisions.first),size=try base.canonicalBytes().count,step=try M4HealthBytes.encode(revision).count+1
+    let repetitions=(M4HealthBytes.maximumArtifactBytes-size)/step+1
+    func raw(_ count:Int)throws->M4HealthRawReservation {try M4HealthRawReservation(parentID:base.parentID,scope:base.scope,cloud:base.cloud,local:base.local,health:base.health,healthConfirmed:true,createdAt:base.createdAt,confirmedAt:base.confirmedAt,facts:[M4HealthCaptureFacts(binding:fact.binding,revisions:Array(repeating:revision,count:count),operations:fact.operations)],sources:base.sources)}
+    let near=try raw(repetitions),bytes=try near.canonicalBytes();XCTAssertLessThanOrEqual(bytes.count,16*1024*1024);XCTAssertGreaterThan(bytes.count,16*1024*1024-1024)
+    let s=try open(h);try await s.reserve(near)
+    do{try await s.reserve(raw(repetitions+1));XCTFail("oversize must fail before changing original bytes")}catch{XCTAssertEqual(error as? M4HealthBridgeError,.unsupportedSelection)}
+    try await s.close();let next=try open(h),saved=try await next.readReservation(parentID:near.parentID)
+    XCTAssertEqual(try saved?.canonicalBytes(),bytes);XCTAssertEqual(try saved?.digest(),try near.digest());try await next.close()
+    print("NATIVE041-near-artifact-bytes=\(bytes.count)")
+  }
+  func testExclusiveOwnerLeaseAlsoRejectsAnotherProcess() async throws {
+    let env=ProcessInfo.processInfo.environment
+    if let path=env["NATIVE041_CHILD_ROOT"] {
+      let h=try fixture(root:URL(fileURLWithPath:path))
+      do{_=try open(h);XCTFail("another process bypassed original owner lease")}catch {if error as? M4HealthArtifactError == .leaseInUse{_exit(86)};throw error};return
+    }
+    let h=try fixture(),s=try open(h);try crashChild(h,method:#function,phase:"lease")
+    try await s.reserve(reservation());try await s.close();let next=try open(h);try await next.close()
+  }
+  private func healthLedger(_ h:Fixture)throws->SQLiteHealthDeletionLedger {try SQLiteHealthDeletionLedger(url:h.root.appendingPathComponent("health-selection/requests.sqlite"),businessDataDirectory:h.business)}
+  private func parentRepository(_ h:Fixture) async throws -> (repo:SQLiteSessionRepository,saga:DeletionSagaV4,key:Curve25519.Signing.PrivateKey) {
+    let key=Curve25519.Signing.PrivateKey(),trust=try AuthorityTrustConfiguration(environment:.development,publicKeys:["artifact-fixture":AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
+    let repo=try SQLiteSessionRepository(rootDirectory:h.business,databaseNamespace:h.owner.namespace,authorityTrust:trust,cloudSavePolicy:.development(databaseNamespace:h.owner.namespace))
+    try await repo.bindAccountV4(AccountBindingV4(accountID:h.owner.scope.accountID,cloudSpaceID:h.owner.scope.cloudSpaceID,deviceID:"phone",activationEpoch:1,role:.phone,environment:.development))
+    let capability=AuthorityWire.base64URL(Data(repeating:41,count:32));var fields=AuthorityFields();fields.reauthenticationID="fresh-fixture";fields.recoveryCapabilityDigest=AuthorityWire.hash(Data(capability.utf8))
+    let saga=try DeletionSagaV4(intent:ControlIntentV1(requestID:"parent-delete",operation:.deleteAccount,fields:fields),accountID:h.owner.scope.accountID,activationEpoch:1,recoveryCapability:capability,cloudChoice:.keep,localChoice:.delete,healthChoice:.delete,healthConfirmed:true,originalScope:h.owner.scope)
+    try await repo.createDeletionSagaV4(saga);return(repo,saga,key)
+  }
+  private func backend(_ repo:SQLiteSessionRepository,_ saga:DeletionSagaV4,_ key:Curve25519.Signing.PrivateKey) async throws {
+    let body:[String:Any]=["version":1,"environment":"development","keyID":"artifact-fixture","receiptID":"parent-delete-receipt","requestID":saga.intent.requestID,"requestDigest":saga.intent.digest,"operation":"deleteAccount","accountID":saga.accountID,"activationEpoch":1,"matchID":"","lockID":"","recordingDeviceID":"","result":"deleted","issuedAt":100,"deletion":["backend":"backendDeleted","apple":"revoked","cloud":"clientManaged","local":"clientManaged","health":"separateConfirmation"]]
+    let bytes=try JSONSerialization.data(withJSONObject:body,options:[.sortedKeys,.withoutEscapingSlashes]),signature=try key.signature(for:AuthorityWire.signedInput("football-record.authority.receipt.v1",body:bytes)),envelope=try JSONSerialization.data(withJSONObject:["body":body,"signature":AuthorityWire.base64URL(signature)],options:[.sortedKeys,.withoutEscapingSlashes])
+    let trust=try AuthorityTrustConfiguration(environment:.development,publicKeys:["artifact-fixture":AuthorityWire.base64URL(key.publicKey.rawRepresentation)]),verified=try VerifiedAuthorityReceiptV1.verify(envelope,expected:AuthorityExpectedIntent(saga.intent,accountID:saga.accountID,epoch:1),trust:trust)
+    _=try await repo.acceptDeletionV4(requestID:saga.intent.requestID,receipt:verified,expectedRevision:0)
+  }
   private func crashChild(_ h:Fixture,method:String,phase:String)throws {
     let p=Process();p.executableURL=URL(fileURLWithPath:"/usr/bin/xcrun");p.arguments=["xctest","-XCTest","AppIntegrationTests.M4RetainedHealthArtifactStoreTests/"+method.replacingOccurrences(of:"()",with:""),Bundle(for:Self.self).bundleURL.path]
     var env=ProcessInfo.processInfo.environment;env["NATIVE041_CHILD_ROOT"]=h.root.path;env["NATIVE041_CHILD_PHASE"]=phase.replacingOccurrences(of:"-no-shm",with:"");p.environment=env
@@ -278,4 +382,23 @@ import HealthKitDeletion
     var statement:OpaquePointer?;guard sqlite3_prepare_v2(db,sql,-1,&statement,nil)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable};defer{sqlite3_finalize(statement)}
     guard sqlite3_step(statement)==SQLITE_ROW else {throw M4HealthBridgeError.mappingUnavailable};return Int(sqlite3_column_int64(statement,0))
   }
+}
+
+private actor ArtifactSealGate {
+  private var continuation:CheckedContinuation<M4HealthFullSeal?,Never>?
+  private var started=false
+  func read(_ parent:String) async throws -> M4HealthFullSeal? {started=true;return await withCheckedContinuation{continuation=$0}}
+  func waitStarted() async throws {let deadline=ContinuousClock.now.advanced(by:.seconds(3));while !started && ContinuousClock.now<deadline{await Task.yield()};guard started else{throw M4HealthArtifactError.storageBlocked}}
+  func finish(_ value:M4HealthFullSeal?){continuation?.resume(returning:value);continuation=nil}
+}
+private actor ArtifactSealBox {
+  private var value:M4HealthFullSeal?
+  func set(_ value:M4HealthFullSeal){self.value=value}
+  func read(_ parent:String)->M4HealthFullSeal?{value}
+}
+private final class ArtifactUnknownHealthDriver:HealthDeletionDriver,@unchecked Sendable {
+  private let lock=NSLock();private var callback:(@Sendable(HealthDeletionDriverOutcome)->Void)?;private var count=0
+  var calls:Int{lock.withLock{count}}
+  func delete(_ attempt:HealthDeletionDriverAttempt,completion:@escaping @Sendable(HealthDeletionDriverOutcome)->Void){lock.withLock{count+=1;callback=completion}}
+  func complete(){let current=lock.withLock{callback};current?(.success(deletedObjectCount:1))}
 }

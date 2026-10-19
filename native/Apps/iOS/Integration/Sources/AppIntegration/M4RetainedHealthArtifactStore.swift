@@ -27,6 +27,8 @@ actor M4RetainedHealthArtifactStore:M4HealthMappingStore {
   func putPrepared(_ value:M4HealthPreparedMapping) throws {try storage.insert(parent:Data(value.parentID.utf8),kind:2,bytes:value.canonicalBytes())}
   func readPrepared(parentID:String) throws->M4HealthPreparedMapping? {try storage.prepared(parent:Data(parentID.utf8))}
   func readFullSeal(parentID:String) async throws->M4HealthFullSeal? {
+    // Only the nonblocking lifetime ownership lease survives this await; no SQL
+    // transaction or file mutation critical section spans the provider.
     try storage.validate();let result=try await fullSealProvider(parentID)
     guard !closed else {throw M4HealthArtifactError.closed};try storage.validate();return result
   }
@@ -36,6 +38,7 @@ actor M4RetainedHealthArtifactStore:M4HealthMappingStore {
 private struct M4HAAnchor:Codable,Equatable {
   let path:String
   let device,inode:UInt64
+  static func ==(a:Self,b:Self)->Bool {Data(a.path.utf8)==Data(b.path.utf8) && a.device==b.device && a.inode==b.inode}
 }
 private struct M4HAOwnerRecord:Codable {
   let version:Int
@@ -150,6 +153,7 @@ private final class M4HealthArtifactStorage {
       try sql("PRAGMA application_id=\(Self.applicationID)");try sql("PRAGMA user_version=1");try sql("COMMIT")
     }catch {sqlite3_close(handle);throw error}
     guard sqlite3_close(handle)==SQLITE_OK else{throw M4HealthArtifactError.storageBlocked}
+    try FileManager.default.setAttributes([.posixPermissions:0o600],ofItemAtPath:main.path)
     let fd=Darwin.open(main.path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);guard fd>=0 else{throw M4HealthArtifactError.storageBlocked};let synced=fsync(fd);Darwin.close(fd);guard synced==0 else{throw M4HealthArtifactError.storageBlocked};boundaryHook(.afterDatabaseSync)
     // Create the original owner inode before encoding its exact immutable identity.
     let candidateOwner=candidate.appendingPathComponent("health.owner");try M4HAFile.write(Data(),candidateOwner)
@@ -186,7 +190,7 @@ private final class M4HealthArtifactStorage {
   }
   private func stabilize()throws {
     try validateFiles();let parent=directory.deletingLastPathComponent(),fd=Darwin.open(parent.path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC)
-    guard fd>=0,let expected=record?.ancestors.first(where:{$0.path==parent.path})else{if fd>=0{Darwin.close(fd)};throw M4HealthArtifactError.storageBlocked};defer{Darwin.close(fd)}
+    guard fd>=0,let expected=record?.ancestors.first(where:{Data($0.path.utf8)==Data(parent.path.utf8)})else{if fd>=0{Darwin.close(fd)};throw M4HealthArtifactError.storageBlocked};defer{Darwin.close(fd)}
     var value=stat();guard fstat(fd,&value)==0,UInt64(UInt32(bitPattern:value.st_dev))==expected.device,value.st_ino==expected.inode else{throw M4HealthArtifactError.storageBlocked}
     try trip(.directorySync);guard fsync(directoryFD)==0 else{throw M4HealthArtifactError.storageBlocked};boundaryHook(.afterDirectorySync)
     try trip(.parentSync);guard fsync(fd)==0 else{throw M4HealthArtifactError.storageBlocked};try validateFiles()
@@ -210,7 +214,7 @@ private final class M4HealthArtifactStorage {
       while true {let status=sqlite3_step(s);if status==SQLITE_DONE{break};guard status==SQLITE_ROW,rows.count<10 else{throw M4HealthArtifactError.storageBlocked};var row:[Data]=[]
         for i in 0..<sqlite3_column_count(s){guard sqlite3_column_type(s,i)==SQLITE_TEXT,let p=sqlite3_column_text(s,i)else{throw M4HealthArtifactError.storageBlocked};row.append(Data(bytes:p,count:Int(sqlite3_column_bytes(s,i))))};rows.append(row)};return rows
     }
-    guard try textRows("PRAGMA quick_check")==[[Data("ok".utf8)]],try textRows("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name")==[[Data(Self.artifactsSQL.utf8)],[Data(Self.ownerSQL.utf8)]],try textRows("SELECT name FROM sqlite_master WHERE type IN ('view','trigger')").isEmpty else{throw M4HealthArtifactError.storageBlocked}
+    guard try textRows("PRAGMA journal_mode")==[[Data("wal".utf8)]],try textRows("PRAGMA quick_check")==[[Data("ok".utf8)]],try textRows("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name")==[[Data(Self.artifactsSQL.utf8)],[Data(Self.ownerSQL.utf8)]],try textRows("SELECT name FROM sqlite_master WHERE type IN ('view','trigger') OR (type='index' AND sql IS NOT NULL)").isEmpty else{throw M4HealthArtifactError.storageBlocked}
     var s:OpaquePointer?;guard sqlite3_prepare_v2(db,"SELECT canonical FROM health_owner WHERE id=1",-1,&s,nil)==SQLITE_OK else{throw M4HealthArtifactError.storageBlocked};defer{sqlite3_finalize(s)}
     guard sqlite3_step(s)==SQLITE_ROW,sqlite3_column_type(s,0)==SQLITE_BLOB,Int(sqlite3_column_bytes(s,0))<=M4HAFile.ownerLimit,let p=sqlite3_column_blob(s,0),Data(bytes:p,count:Int(sqlite3_column_bytes(s,0)))==(try M4HAFile.encode(owner)),sqlite3_step(s)==SQLITE_DONE else{throw M4HealthArtifactError.invalidOwner}
     for (command,expected) in [("PRAGMA user_version",1),("PRAGMA application_id",Self.applicationID),("SELECT count(*) FROM health_owner",1)] {
@@ -219,6 +223,7 @@ private final class M4HealthArtifactStorage {
     }
   }
   private func all()throws->[Row] {
+    do {
     try validate();try validateSchema();var s:OpaquePointer?;guard sqlite3_prepare_v2(db,"SELECT parent,kind,canonical,digest FROM health_artifacts ORDER BY parent,kind",-1,&s,nil)==SQLITE_OK else {throw M4HealthArtifactError.storageBlocked};defer{sqlite3_finalize(s)}
     var rows:[Row]=[],total=0,parents=Set<Data>()
     while true {
@@ -241,6 +246,7 @@ private final class M4HealthArtifactStorage {
       guard Data(prepared.parentID.utf8)==row.parent,try prepared.canonicalBytes()==row.bytes,try expected.canonicalBytes()==row.bytes else {throw M4HealthArtifactError.identityConflict}
     }
     return rows
+    }catch {if let typed=error as? M4HealthArtifactError {throw typed};throw M4HealthArtifactError.storageBlocked}
   }
   func raw(parent:Data)throws->M4HealthRawReservation? {try all().first(where:{$0.parent==parent && $0.kind==1}).map{try JSONDecoder().decode(M4HealthRawReservation.self,from:$0.bytes)}}
   func prepared(parent:Data)throws->M4HealthPreparedMapping? {try all().first(where:{$0.parent==parent && $0.kind==2}).map{try JSONDecoder().decode(M4HealthPreparedMapping.self,from:$0.bytes)}}
