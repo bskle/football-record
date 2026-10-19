@@ -125,6 +125,48 @@ final class SessionRetirementTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(performs, 1); XCTAssertEqual(reconciles, 1)
   }
 
+  func testOrdinaryRecoveryMustPersistRetainedObservationBeforeAnyNewGatewayResult() async throws {
+    let h = try Harness()
+    await h.repo.failNextObservation("before")
+    let request = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(request)
+    await h.repo.waitForObservation()
+    // A was running; a later reconciliation B would say unknown. It must not overwrite A.
+    await h.gateway.configure(outcome: .unknown)
+    _ = try await h.session.recover()
+    try await eventually("original observation not retried") {
+      try await h.repo.snapshotV2(matchID: request.matchID).captureOperations.first?.observation != nil
+    }
+    let saved = try await h.repo.snapshotV2(matchID: request.matchID)
+    XCTAssertEqual(saved.captureOperations.first?.observation?.outcome, .running)
+    let reconciles = await h.gateway.reconciled.count
+    XCTAssertEqual(reconciles, 0, "SQL-only persistence of A precedes another same-op gateway call")
+    try await h.session.retireBusiness()
+  }
+
+  func testSettledDifferentObservationCannotPretendRetainedOriginalWasPersisted() async throws {
+    let h = try Harness()
+    await h.repo.failNextObservation("before")
+    let request = try await h.session.prepareStart(starter: true)
+    _ = try await h.session.execute(request)
+    await h.repo.waitForObservation()
+    let current = try await h.repo.snapshotV2(matchID: request.matchID)
+    let original = try XCTUnwrap(current.captureOperations.first?.operation)
+    let different = try WorkoutObservation(operationID: original.id, binding: original.binding,
+      externalToken: original.externalToken, observedAt: original.requestedAt.addingTimeInterval(0.3),
+      outcome: .paused, window: CaptureWindow(start: nil, end: nil))
+    let update = try CaptureOperationUpdate(operationID: original.id, expectedState: .needsReconciliation, state: .settled, observation: different)
+    _ = try await h.repo.commitV2(StoreCommitV2(commandID: "independent-positive", expectedGeneration: current.business.generation,
+      descriptor: current.business.descriptor, events: [], captureRevisions: [], newCaptureOperations: [], captureOperationUpdates: [update], businessOutbox: []))
+    do { try await h.session.retireBusiness(); XCTFail("first persistence error must surface") }
+    catch { XCTAssertEqual(error as? StoreError, .injectedFailure) }
+    do { try await h.session.retireBusiness(); XCTFail("different settled B is not proof that original A persisted") }
+    catch { XCTAssertEqual(error as? StoreError, .operationConflict) }
+    let after = try await h.repo.snapshotV2(matchID: request.matchID)
+    XCTAssertEqual(after.captureOperations.first?.observation, different)
+    let calls = await h.gateway.performed.count; XCTAssertEqual(calls, 1)
+  }
+
   func testLatePermitCannotStartAndRetirementJoinsOriginalExecute() async throws {
     let permits = HeldRetirementPermit(), h = try Harness(permits: permits)
     let request = try await h.session.prepareStart(starter: true)

@@ -41,6 +41,7 @@ extension MatchSession {
       guard let original = unsavedObservations[key] else { continue }
       try await saveObservation(original.observation, operation: original.operation)
       unsavedObservations.removeValue(forKey: key)
+      observationCommits.removeValue(forKey: key)
     }
   }
 }

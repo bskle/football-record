@@ -21,6 +21,15 @@ extension MatchSession {
     var attempted = Set<String>()
     var attemptedFinishes = Set<String>()
     do {
+      // A failed SQL save does not authorize another SDK result to replace the original.
+      // Replay its exact retained fact through SQL before planning any more gateway work.
+      for id in unsavedObservations.keys.sorted() {
+        guard let original = unsavedObservations[id],
+          Data(original.operation.binding.matchID.utf8) == Data(match.utf8) else { continue }
+        try await saveObservation(original.observation, operation: original.operation)
+        unsavedObservations.removeValue(forKey: id); observationCommits.removeValue(forKey: id)
+        captureErrors.removeValue(forKey: match)
+      }
       while !businessRetired {
         if captureWakeups.remove(match) != nil {
           // A deferred pending start must be reconsidered after a new resume fact.
@@ -55,9 +64,12 @@ extension MatchSession {
               dispatch.perform
               ? await workout.perform(dispatch.operation)
               : await workout.reconcile(dispatch.operation)
+            guard unsavedObservations[dispatch.operation.id] == nil else { throw StoreError.operationConflict }
             unsavedObservations[dispatch.operation.id] = UnsavedObservation(observation: observation, operation: dispatch.operation)
             try await saveObservation(observation, operation: dispatch.operation)
             unsavedObservations.removeValue(forKey: dispatch.operation.id)
+            observationCommits.removeValue(forKey: dispatch.operation.id)
+            captureErrors.removeValue(forKey: match)
             if dispatch.perform, dispatch.operation.action == .start,
               observation.outcome == .running || observation.outcome == .paused
             {
@@ -256,6 +268,11 @@ extension MatchSession {
     let match = operation.binding.matchID
     await acquire(match)
     defer { release(match) }
+    if let retained = observationCommits[operation.id],
+      let original = try await store.committedCommandV2(commandID: retained.commandID) {
+      guard try sameObservationCommit(original.request, retained) else { throw StoreError.commandConflict }
+      return
+    }
     let s = try await store.snapshotV2(matchID: match)
     try await updateAuthorityFence(s)
     guard let current = s.captureOperations.first(where: { $0.operation.id == operation.id }),
@@ -273,7 +290,15 @@ extension MatchSession {
     }
     // Ordinary settled-operation idempotency is unchanged. A late positive fact that
     // contradicts persisted absence must reach Store's raw-byte quarantine, not vanish.
-    guard current.state == .needsReconciliation || contradictsAbsence else { return }
+    guard current.state == .needsReconciliation || contradictsAbsence else {
+      // A later settled sibling is not evidence that our earlier failed fact was saved.
+      // Store validates this snapshot's immutable operation history; only the exact
+      // normalized observation (or the original command above) can satisfy readback.
+      let expected = try self.normalized(observation, operation: operation, current: current)
+      guard let saved = current.observation, try observationBytes(saved) == observationBytes(expected)
+      else { throw StoreError.operationConflict }
+      return
+    }
     let normalized: WorkoutObservation
     if contradictsAbsence {
       guard observation.operationID == operation.id, observation.binding == operation.binding,
@@ -346,16 +371,24 @@ extension MatchSession {
       command: command, generation: s.business.generation, descriptor: s.business.descriptor,
       revisions: revisions, operations: successors, updates: [update],
       outboxID: revisions.isEmpty ? nil : command + "/outbox", retainingObservation: true)
+    observationCommits[operation.id] = commit
     do { _ = try await store.commitV2(commit) }
     catch {
       // A lost response is success only after the complete canonical request and its
       // first receipt have passed Store's immutable fact/history checks.
       guard error as? StoreError == .responseLost,
         let original = try await store.committedCommandV2(commandID: commit.commandID),
-        original.request == commit else { throw error }
+        try sameObservationCommit(original.request, commit) else { throw error }
     }
     publish(try projected(await store.snapshotV2(matchID: match)))
     if case .notCreated = normalized.outcome { scheduleCapture(match) }
+  }
+  private func observationBytes<T: Encodable>(_ value: T) throws -> Data {
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return try encoder.encode(value)
+  }
+  private func sameObservationCommit(_ lhs: StoreCommitV2, _ rhs: StoreCommitV2) throws -> Bool {
+    try observationBytes(lhs) == observationBytes(rhs)
   }
   /// One finish attempt per token in each driver run. A confirmed failed action may be
   /// retried by recovery, while unknown/saved results must reconcile the existing operation.

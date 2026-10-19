@@ -24,6 +24,7 @@ public actor MatchSession {
   var retirement: Task<Void, Error>?
   struct UnsavedObservation { let observation: WorkoutObservation; let operation: CaptureOperation }
   var unsavedObservations: [String: UnsavedObservation] = [:]
+  var observationCommits: [String: StoreCommitV2] = [:]
   var captureErrors: [String: any Error] = [:]
   var captureWakeups = Set<String>()
   var recoveryRequested = Set<String>()
