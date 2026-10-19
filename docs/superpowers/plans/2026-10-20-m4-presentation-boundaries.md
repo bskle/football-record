@@ -27,10 +27,10 @@ Files: AppBootstrap.swift and BootstrapTests.swift under MatchPresentation exist
 
 Files: AccountStatusModel.swift and AccountStatusTests.swift.
 
-- [ ] Test real persisted binding/generation admission; reject raw byte mismatches, role/environment/epoch changes, suspended or missing binding, stale generation, stop/pause/refresh/newer admission while awaiting. Keep requiresReload monotonic across re-admission, including stopped RecordingModel behavior.
-- [ ] Record API red and meaningful runtime red using the existing unchecked confirmation behavior before replacing it. Preserve actual logs and test counts.
-- [ ] Add `public func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64) async throws`. Fixed public read uses repository generation before/after durable binding; internal read overload permits controlled delay of the real SQLite result for deterministic continuation tests. Compare each identity string as Data(utf8), all scalar fields exactly; reject with identityChanged. Before returning from await recheck local generation/stopped. Public initializer has no verified bool; existing Debug bool initializer and confirmIdentity stay internal. `requireReload()` is public but only sets the monotonic block.
-- [ ] Run focused tests, then commit. This API checks presentation evidence against durable truth;026 still performs actual AccountService/WatchRegistrationService admission first.
+- [x] Test real persisted binding/generation admission; reject raw byte mismatches, role/environment/epoch changes, suspended or missing binding, stale generation, stop/pause/refresh/newer admission while awaiting. Keep requiresReload monotonic across re-admission, including stopped RecordingModel behavior.
+- [x] Record API red and meaningful runtime red using the existing unchecked confirmation behavior before replacing it. Preserve actual logs and test counts.
+- [x] Add `public func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64) async throws`. Fixed public read uses repository generation before/after durable binding; internal read overload permits controlled delay of the real SQLite result for deterministic continuation tests. Compare each identity string as Data(utf8), all scalar fields exactly; reject with identityChanged. Before returning from await recheck local generation/stopped. Public initializer has no verified bool; existing Debug bool initializer and confirmIdentity stay internal. `requireReload()` is public but only sets the monotonic block.
+- [x] Run focused tests, then commit. This API checks presentation evidence against durable truth;026 still performs actual AccountService/WatchRegistrationService admission first.
 
 ## Task 3: checked lifecycle scope projection
 
