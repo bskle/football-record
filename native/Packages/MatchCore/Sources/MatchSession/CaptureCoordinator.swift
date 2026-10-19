@@ -5,13 +5,15 @@ import MatchStore
 
 extension MatchSession {
   func scheduleCapture(_ match: String) {
+    guard !businessRetired else { return }
     captureWakeups.insert(match)
     guard captureDrivers.insert(match).inserted else { return }
-    Task { await self.driveCapture(match) }
+    captureTasks[match] = Task { await self.driveCapture(match) }
   }
   func driveCapture(_ match: String) async {
     defer {
       captureDrivers.remove(match)
+      captureTasks.removeValue(forKey: match)
       // Error reporting also awaits a snapshot. Hand off work committed during that
       // await before retiring, exactly as the normal empty-scan path does.
       if captureWakeups.remove(match) != nil { scheduleCapture(match) }
@@ -19,7 +21,7 @@ extension MatchSession {
     var attempted = Set<String>()
     var attemptedFinishes = Set<String>()
     do {
-      while true {
+      while !businessRetired {
         if captureWakeups.remove(match) != nil {
           // A deferred pending start must be reconsidered after a new resume fact.
           attempted.removeAll()
@@ -29,6 +31,7 @@ extension MatchSession {
         // the locked preflight, which rechecks current facts before any SDK dispatch.
         let hint = try await store.snapshotV2(matchID: match)
         try await updateAuthorityFence(hint)
+        try requireBusinessActive()
         if terminal(hint) {
           while let token = try await planTerminalCleanup(match, excluding: attemptedFinishes) { attemptedFinishes.insert(token) }
         }
@@ -46,12 +49,15 @@ extension MatchSession {
           }
           if terminal(snapshot),pending.state == .needsReconciliation,pending.operation.action != .start,pending.operation.action != .finish { continue }
           if let dispatch = try await planDispatch(pending.operation, match: match) {
+            try requireBusinessActive()
             // Gateway work is outside both SQL and the business queue. End can commit here.
             let observation =
               dispatch.perform
               ? await workout.perform(dispatch.operation)
               : await workout.reconcile(dispatch.operation)
+            unsavedObservations[dispatch.operation.id] = UnsavedObservation(observation: observation, operation: dispatch.operation)
             try await saveObservation(observation, operation: dispatch.operation)
+            unsavedObservations.removeValue(forKey: dispatch.operation.id)
             if dispatch.perform, dispatch.operation.action == .start,
               observation.outcome == .running || observation.outcome == .paused
             {
@@ -74,6 +80,7 @@ extension MatchSession {
         }
       }
     } catch {
+      if error as? SessionError != .retired { captureErrors[match] = error }
       // Durable pending/needsReconciliation survives every failure. A later recover retries
       // from that ledger and never infers that a failed database response means no side effect.
       if let value = try? await self.snapshot(matchID: match) { publish(value) }
@@ -86,6 +93,7 @@ extension MatchSession {
   func planDispatch(_ operation: CaptureOperation, match: String) async throws -> Dispatch? {
     await acquire(match)
     defer { release(match) }
+    try requireBusinessActive()
     var s = try await store.snapshotV2(matchID: match)
     try await updateAuthorityFence(s)
     let device = try await identity()
@@ -177,6 +185,7 @@ extension MatchSession {
         perform: !tokenHasSaveProof(s, token: operation.externalToken)
           && (!terminal(s) || operation.action == .finish))
     }
+    try requireBusinessActive()
     return Dispatch(operation: operation, perform: false)
   }
   func normalized(
@@ -336,8 +345,15 @@ extension MatchSession {
     let commit = try makeCommit(
       command: command, generation: s.business.generation, descriptor: s.business.descriptor,
       revisions: revisions, operations: successors, updates: [update],
-      outboxID: revisions.isEmpty ? nil : command + "/outbox")
-    _ = try await store.commitV2(commit)
+      outboxID: revisions.isEmpty ? nil : command + "/outbox", retainingObservation: true)
+    do { _ = try await store.commitV2(commit) }
+    catch {
+      // A lost response is success only after the complete canonical request and its
+      // first receipt have passed Store's immutable fact/history checks.
+      guard error as? StoreError == .responseLost,
+        let original = try await store.committedCommandV2(commandID: commit.commandID),
+        original.request == commit else { throw error }
+    }
     publish(try projected(await store.snapshotV2(matchID: match)))
     if case .notCreated = normalized.outcome { scheduleCapture(match) }
   }
@@ -352,9 +368,10 @@ extension MatchSession {
   }
   /// Caller owns the same-match queue. No SDK or network await occurs in this planner.
   func planTerminalCleanupLocked(_ match: String, excluding attempted: Set<String>) async throws -> String? {
+    guard !businessRetired else { return nil }
     var s = try await store.snapshotV2(matchID: match)
     try await updateAuthorityFence(s)
-    guard terminal(s), s.business.descriptor.recordingDeviceID == (try await identity()) else { return nil }
+    guard !businessRetired, terminal(s), s.business.descriptor.recordingDeviceID == (try await identity()) else { return nil }
     try requireWritable(s, device: s.business.descriptor.recordingDeviceID)
     let pendingControls = s.captureOperations.filter { $0.state == .pending && $0.operation.action != .finish }
     if let first = pendingControls.first {
@@ -391,7 +408,7 @@ extension MatchSession {
     defer { release(match) }
     let s = try await store.snapshotV2(matchID: match)
     try await updateAuthorityFence(s)
-    guard !terminal(s), let start = currentStart(s),
+    guard !businessRetired, !terminal(s), let start = currentStart(s),
       !recoveredTokens.contains(start.operation.externalToken),
       !s.captureOperations.contains(where: {
         $0.state == .pending || $0.state == .needsReconciliation

@@ -24,15 +24,19 @@ extension MatchSession: AuthorityInboundCoordinator {
         return state.status == .terminal || state.status == .releasedNormal || state.status == .releasedAbnormal
     }
     public func prepareAuthorityControl(_ intent:ControlIntentV1) async throws -> ControlIntentReceiptV4 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();let repository=try authorityRepository()
         let key=intent.matchID.isEmpty ? "_authority-account" : intent.matchID
         await acquire(key);defer { release(key) }
+        try requireBusinessActive()
         return try await repository.prepareControlV4(intent)
     }
     public func acceptAuthorityResult(_ receipt:VerifiedAuthorityReceiptV1) async throws -> AuthorityReceiptV4 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();let repository=try authorityRepository()
         let key=receipt.body.matchID.isEmpty ? "_authority-account" : receipt.body.matchID
         await acquire(key);defer { release(key) }
+        try requireBusinessActive()
         let result=try await repository.recordAuthorityResultV4(receipt)
         if receipt.body.result == .releasedNormal || receipt.body.result == .releasedAbnormal { authorityTerminalMatches.insert(receipt.body.matchID); scheduleCapture(receipt.body.matchID) }
         if receipt.body.result == .releasedNormal {try await completeNormallyLocked(receipt.body.matchID)}
@@ -40,8 +44,10 @@ extension MatchSession: AuthorityInboundCoordinator {
         return result
     }
     public func acceptLiveLock(_ proof:VerifiedLiveLockV1) async throws {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();let repository=try authorityRepository()
         await acquire(proof.body.matchID);defer { release(proof.body.matchID) }
+        try requireBusinessActive()
         try await repository.recordLiveLockV4(proof,now:clock.now())
         if proof.body.status == .terminal { authorityTerminalMatches.insert(proof.body.matchID);scheduleCapture(proof.body.matchID) }
     }

@@ -28,6 +28,13 @@ struct Identity: DeviceIdentityProvider {
 actor TestRepository: SessionRepository {
   let syncIdentity = try! SyncRepositoryIdentity(instanceID: UUID().uuidString, databaseNamespace: "test-development")
   let store: MatchStore
+  var retirementReadHeld = false
+  var retirementReadEntered = false
+  var retirementReadWaiter: CheckedContinuation<Void, Never>?
+  var retirementReadRelease: CheckedContinuation<Void, Never>?
+  func holdNextSnapshotForRetirement() { retirementReadHeld = true; retirementReadEntered = false }
+  func waitForRetirementSnapshot() async { if !retirementReadEntered { await withCheckedContinuation { retirementReadWaiter = $0 } } }
+  func releaseRetirementSnapshot() { retirementReadRelease?.resume(); retirementReadRelease = nil }
   var holdFaultProjection = false
   var holdTail = false
   var snapshotsAfterObservation: Int?
@@ -77,6 +84,11 @@ actor TestRepository: SessionRepository {
   func databaseNamespace() async -> String { "test-development" }
   func matchIDs() async throws -> [String] { try await store.matchIDs() }
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 {
+    if retirementReadHeld {
+      retirementReadHeld = false; retirementReadEntered = true
+      retirementReadWaiter?.resume(); retirementReadWaiter = nil
+      await withCheckedContinuation { retirementReadRelease = $0 }
+    }
     if failInboundReload {
       failInboundReload = false
       throw StoreError.responseLost

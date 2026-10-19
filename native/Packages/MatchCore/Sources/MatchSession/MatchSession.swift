@@ -16,6 +16,15 @@ public actor MatchSession {
   var busy = Set<String>()
   var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
   var captureDrivers = Set<String>()
+  var captureTasks: [String: Task<Void, Never>] = [:]
+  var initialReads: [String: Task<Void, Never>] = [:]
+  var businessRetired = false
+  var businessEntries = 0
+  var businessDrainers: [CheckedContinuation<Void, Never>] = []
+  var retirement: Task<Void, Error>?
+  struct UnsavedObservation { let observation: WorkoutObservation; let operation: CaptureOperation }
+  var unsavedObservations: [String: UnsavedObservation] = [:]
+  var captureErrors: [String: any Error] = [:]
   var captureWakeups = Set<String>()
   var recoveryRequested = Set<String>()
   var recoveredTokens = Set<String>()
@@ -149,8 +158,10 @@ public actor MatchSession {
     return index < starts.count - 1
   }
   public func prepareStart(starter: Bool) async throws -> SessionRequest {
+    try beginBusiness(); defer { endBusiness() }
     try await validateEnvironment()
     let device = try await identity()
+    try requireBusinessActive()
     let now = clock.now()
     let command = ids.nextID()
     let match = ids.nextID()
@@ -159,10 +170,12 @@ public actor MatchSession {
     return try .start(intent: intent, starter: starter)
   }
   public func prepare(_ action: SessionAction, matchID: String) async throws -> SessionRequest {
+    try beginBusiness(); defer { endBusiness() }
     if case .start = action { throw SessionError.invalidRequest }
     try await validateEnvironment()
     let device = try await identity()
     let s = try await store.snapshotV2(matchID: matchID)
+    try requireBusinessActive()
     try requireWritable(s, device: device)
     if terminal(s) { throw SessionError.terminalMatch }
     let command = ids.nextID()
@@ -174,6 +187,7 @@ public actor MatchSession {
         ? command + "/capture" : nil)
   }
   public func execute(_ request: SessionRequest) async throws -> SessionReceipt {
+    try beginBusiness(); defer { endBusiness() }
     guard inFlight.insert(request.commandID).inserted else { throw SessionError.requestInFlight }
     let isStart: Bool
     if case .start = request.action { isStart = true } else { isStart = false }
@@ -190,11 +204,13 @@ public actor MatchSession {
     }
     try await validateEnvironment()
     let device = try await identity()
+    try requireBusinessActive()
     if isStart { return try await executeStart(request, device: device) }
     await acquire(request.matchID)
     defer { release(request.matchID) }
     if let saved = try await store.committedCommandV2(commandID: request.commandID) {
       try validateSaved(saved.request, for: request, device: device)
+      try requireBusinessActive()
       let receipt = try await store.commitV2(saved.request)
       let snapshot = try await snapshot(matchID: request.matchID)
       publish(snapshot)
@@ -268,6 +284,7 @@ public actor MatchSession {
     do {
       if !managed, let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
         try validateSaved(saved.request, for: request, device: device)
+        try requireBusinessActive()
         let receipt = try await store.commitV2(saved.request)
         let snapshot = try await snapshot(matchID: request.matchID)
         publish(snapshot)
@@ -295,6 +312,7 @@ public actor MatchSession {
         command: request.commandID + "/intent", generation: 0, descriptor: descriptor)
       if let saved = try await store.committedCommandV2(commandID: intentCommit.commandID) {
         guard saved.request == intentCommit else { throw StoreError.commandConflict }
+        try requireBusinessActive()
         _ = try await store.commitV2(saved.request)
       } else {
         _ = try await store.commitV2(intentCommit)
@@ -306,6 +324,7 @@ public actor MatchSession {
       throw error
     }
     let permit = try await permits.acquire(for: intent)
+    try requireBusinessActive()
     guard permit.intentID == intent.id, permit.matchID == intent.matchID,
       permit.recordingDeviceID == device, !permit.permitID.isEmpty
     else { throw SessionError.invalidRequest }
@@ -315,6 +334,7 @@ public actor MatchSession {
     await acquire(request.matchID)
     defer { release(request.matchID) }
     try await requireAuthorityStart(intent)
+    try requireBusinessActive()
     if managed {
       let fresh = try await store.snapshotV2(matchID: request.matchID)
       if terminal(fresh) { throw SessionError.terminalMatch }
@@ -322,6 +342,7 @@ public actor MatchSession {
     }
     if let saved = try await store.committedCommandV2(commandID: request.commandID + "/start") {
       try validateSaved(saved.request, for: request, device: device)
+      try requireBusinessActive()
       let receipt = try await store.commitV2(saved.request)
       let snapshot = try await snapshot(matchID: request.matchID)
       publish(snapshot)
@@ -388,8 +409,9 @@ public actor MatchSession {
   func makeCommit(
     command: String, generation: Int64, descriptor: MatchDescriptor, events: [MatchEvent] = [],
     revisions: [CaptureRevision] = [], operations: [CaptureOperation] = [],
-    updates: [CaptureOperationUpdate] = [], outboxID: String? = nil
+    updates: [CaptureOperationUpdate] = [], outboxID: String? = nil, retainingObservation: Bool = false
   ) throws -> StoreCommitV2 {
+    if !retainingObservation { try requireBusinessActive() }
     let outbox =
       try outboxID.map {
         [
@@ -464,15 +486,20 @@ public actor MatchSession {
     let id = UUID().uuidString
     let (stream, continuation) = AsyncStream<SessionSnapshot>.makeStream(
       bufferingPolicy: .bufferingNewest(1))
+    guard !businessRetired else { continuation.finish(); return stream }
     subscribers[matchID, default: [:]][id] = Subscriber(continuation: continuation)
     continuation.onTermination = { [weak self] _ in
       Task { await self?.removeSubscriber(match: matchID, id: id) }
     }
-    Task { if let value = try? await self.snapshot(matchID: matchID) { self.publish(value) } }
+    initialReads[id] = Task {
+      defer { self.initialReads.removeValue(forKey: id) }
+      if let value = try? await self.snapshot(matchID: matchID) { self.publish(value) }
+    }
     return stream
   }
   func removeSubscriber(match: String, id: String) { subscribers[match]?.removeValue(forKey: id) }
   func publish(_ snapshot: SessionSnapshot) {
+    guard !businessRetired else { return }
     let match = snapshot.store.business.descriptor.matchID
     for (id, var subscriber) in subscribers[match] ?? [:]
     where subscriber.generation <= snapshot.store.business.generation {
