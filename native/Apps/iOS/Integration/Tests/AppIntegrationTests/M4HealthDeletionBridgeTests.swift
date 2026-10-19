@@ -238,7 +238,7 @@ extension M4HealthDeletionBridgeTests {
     try await h.bridge.close();try await h.mapping.close();try await h.repo.close()
   }
 
-  private struct HealthHarness {let root:URL;let repo:SQLiteSessionRepository;let saga:DeletionSagaV4;let mapping:HealthSQLiteMapping;let ledger:SQLiteHealthDeletionLedger;let bridge:M4HealthDeletionBridge}
+  private struct HealthHarness {let root:URL;let repo:SQLiteSessionRepository;let saga:DeletionSagaV4;let key:Curve25519.Signing.PrivateKey;let mapping:HealthSQLiteMapping;let ledger:SQLiteHealthDeletionLedger;let bridge:M4HealthDeletionBridge}
   private func healthHarness() async throws -> HealthHarness {
     let root=location(), key=Curve25519.Signing.PrivateKey(), trust=try AuthorityTrustConfiguration(environment:.development,publicKeys:["health-fixture":AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
     let repo=try SQLiteSessionRepository(rootDirectory:root.appendingPathComponent("business"),databaseNamespace:"health-fixture",authorityTrust:trust,cloudSavePolicy:.development(databaseNamespace:"health-fixture"))
@@ -247,7 +247,7 @@ extension M4HealthDeletionBridgeTests {
     let saga=try DeletionSagaV4(intent:ControlIntentV1(requestID:"parent-delete",operation:.deleteAccount,fields:fields),accountID:binding.accountID,activationEpoch:1,recoveryCapability:cap,cloudChoice:.keep,localChoice:.delete,healthChoice:.delete,healthConfirmed:true,originalScope:scope())
     try await repo.createDeletionSagaV4(saga)
     let stores=try healthStores(root:root,repo:repo)
-    return HealthHarness(root:root,repo:repo,saga:saga,mapping:stores.mapping,ledger:stores.ledger,bridge:stores.bridge)
+    return HealthHarness(root:root,repo:repo,saga:saga,key:key,mapping:stores.mapping,ledger:stores.ledger,bridge:stores.bridge)
   }
   private func healthStores(root:URL,repo:SQLiteSessionRepository) throws -> (mapping:HealthSQLiteMapping,ledger:SQLiteHealthDeletionLedger,bridge:M4HealthDeletionBridge) {
     let mapping=try HealthSQLiteMapping(url:root.appendingPathComponent("retained/mapping.sqlite"))
@@ -314,4 +314,159 @@ private actor HealthLedgerResponseLoss:HealthDeletionLedger {
   func markAwaitingOutcome(_ id:UUID,digest:String,attemptID:UUID) async throws {try await base.markAwaitingOutcome(id,digest:digest,attemptID:attemptID)}
   func finish(_ id:UUID,digest:String,attemptID:UUID,outcome:HealthDeletionDriverOutcome,now:Int64) async throws {try await base.finish(id,digest:digest,attemptID:attemptID,outcome:outcome,now:now)}
   func close() async throws {try await base.close()}
+}
+
+extension M4HealthDeletionBridgeTests {
+  func testSealedOriginalParentCallbackReturnsOnly028ReceiptAndReplayDoesNotDispatch() async throws {
+    let driver=HealthControlledDeletionDriver(outcome:.success(deletedObjectCount:1)), h=try await sealedHarness(driver:driver)
+    try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID)
+    let first=try await h.base.ledger.entry(h.prepared.request.requestID)
+    XCTAssertEqual(first.phase,.succeededLocally);XCTAssertEqual(first.receipt?.requestID,h.prepared.request.requestID)
+    XCTAssertEqual(first.receipt?.selectionDigest,h.prepared.confirmation.selectionDigest)
+    try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID)
+    let again=try await h.base.ledger.entry(h.prepared.request.requestID)
+    XCTAssertEqual(first.receipt,again.receipt);XCTAssertEqual(driver.calls,1)
+    XCTAssertEqual(driver.attempts.first?.request.requestID,h.prepared.request.requestID)
+    XCTAssertNotEqual(h.raw.parentID,h.prepared.confirmation.confirmationID.uuidString)
+    try await h.bridge.close();try await h.base.mapping.close();try await h.base.repo.close()
+  }
+  func testUnsealedWrongParentMissingBackendAndTamperedSealNeverDispatch() async throws {
+    for mode in 0...4 {
+      let base=try await healthHarness(), raw=try reservation(facts:[capture(token:"start")]), driver=HealthControlledDeletionDriver(outcome:.success(deletedObjectCount:1))
+      try await base.bridge.reserve(raw);let prepared=try await base.bridge.prepare(parentID:raw.parentID)
+      if mode != 1 {_=try await backend(base)}
+      if mode != 0 {
+        let correct=try fullSeal(raw:raw,prepared:prepared)
+        if mode >= 2 {
+          var object=try XCTUnwrap(JSONSerialization.jsonObject(with:M4HealthBytes.encode(correct)) as? [String:Any])
+          object[mode == 2 ? "parentDigest":mode == 3 ? "preparedDigest":"healthConfirmed"] = mode == 4 ? false:String(repeating:"b",count:64) as Any
+          try await base.mapping.seal(JSONDecoder().decode(M4HealthFullSeal.self,from:JSONSerialization.data(withJSONObject:object)))
+        } else {try await base.mapping.seal(correct)}
+      }
+      let bridge=M4HealthDeletionBridge(mapping:base.mapping,parents:base.repo,ledger:base.ledger,driver:driver,allowedSourceOrigin:.controlledFixture,clock:{100})
+      do {try await bridge.deleteAppCreatedWorkouts(confirmationID:raw.parentID);XCTFail("missing original proof") }catch{}
+      do {try await bridge.deleteAppCreatedWorkouts(confirmationID:prepared.confirmation.confirmationID.uuidString);XCTFail("must use parent ID") }catch{}
+      XCTAssertEqual(driver.calls,0)
+      let entry=try await base.ledger.entry(prepared.request.requestID);XCTAssertEqual(entry.attemptCount,0)
+      try await bridge.close();try await base.mapping.close();try await base.repo.close()
+    }
+  }
+  func testTimeoutKeepsOriginalAttemptAndLateReceiptCanBeReplayedWithoutRedispatch() async throws {
+    let driver=HealthControlledDeletionDriver(),h=try await sealedHarness(driver:driver,timeout:.milliseconds(20))
+    do {try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.outcomeUnknown)}
+    let pending=try await h.base.ledger.entry(h.prepared.request.requestID);XCTAssertEqual(pending.phase,.awaitingOutcome)
+    do {try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.outcomeUnknown)}
+    XCTAssertEqual(driver.calls,1);driver.finish(0,.success(deletedObjectCount:1))
+    try await waitHealth(h.base.ledger,h.prepared.request.requestID,phase:.succeededLocally)
+    try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTAssertEqual(driver.calls,1)
+    try await h.bridge.close();try await h.base.mapping.close();try await h.base.repo.close()
+  }
+  func testCloseReopenUnknownDoesNotDispatchAndOldCallbackCannotRewriteNewOwner() async throws {
+    let oldDriver=HealthControlledDeletionDriver(),h=try await sealedHarness(driver:oldDriver,timeout:.milliseconds(20))
+    do {try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTFail()}catch{}
+    let pending=try await h.base.ledger.entry(h.prepared.request.requestID);XCTAssertEqual(pending.phase,.awaitingOutcome)
+    try await h.bridge.close();try await h.base.mapping.close()
+    let next=try healthStores(root:h.base.root,repo:h.base.repo),driver=HealthControlledDeletionDriver(outcome:.success(deletedObjectCount:1))
+    let bridge=M4HealthDeletionBridge(mapping:next.mapping,parents:h.base.repo,ledger:next.ledger,driver:driver,allowedSourceOrigin:.controlledFixture,clock:{100},timeout:.milliseconds(20))
+    let original=try await next.ledger.entry(h.prepared.request.requestID);XCTAssertEqual(original.phase,.interrupted)
+    do {try await bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.outcomeUnknown)}
+    oldDriver.finish(0,.success(deletedObjectCount:1));for _ in 0..<100 {await Task.yield()}
+    let after=try await next.ledger.entry(h.prepared.request.requestID)
+    XCTAssertEqual(after,original);XCTAssertEqual(driver.calls,0);XCTAssertEqual(oldDriver.calls,1)
+    try await bridge.close();try await next.mapping.close();try await h.base.repo.close()
+  }
+  func testFailedUnknownNeverRetriesButKnownPermissionFailureUsesSameOriginalRequest() async throws {
+    for issue in [HealthDeletionIssue.outcomeUnknown,.authorizationDenied] {
+      let driver=HealthControlledDeletionDriver(outcome:.failure(issue)),h=try await sealedHarness(driver:driver)
+      do {try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTFail()}catch{}
+      let failed=try await h.base.ledger.entry(h.prepared.request.requestID)
+      XCTAssertEqual(failed.phase,.failed);XCTAssertEqual(failed.issue,issue);XCTAssertEqual(driver.calls,1)
+      driver.configure(.success(deletedObjectCount:1))
+      if issue == .outcomeUnknown {
+        do {try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.outcomeUnknown)}
+        XCTAssertEqual(driver.calls,1)
+      } else {
+        try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTAssertEqual(driver.calls,2)
+        XCTAssertEqual(Set(driver.attempts.map { $0.request.requestID }),[h.prepared.request.requestID])
+        let completed=try await h.base.ledger.entry(h.prepared.request.requestID);XCTAssertEqual(completed.attemptCount,2);XCTAssertEqual(completed.phase,.succeededLocally)
+      }
+      try await h.bridge.close();try await h.base.mapping.close();try await h.base.repo.close()
+    }
+  }
+  func testWrong028FirstConfirmationCannotBeBlessedByMatchingFullSeal() async throws {
+    let h=try await healthHarness(),raw=try reservation(facts:[capture(token:"start")]),driver=HealthControlledDeletionDriver(outcome:.success(deletedObjectCount:1))
+    try await h.bridge.reserve(raw)
+    let prepared=try M4HealthPreparedMapping(reservation:raw,parentDigest:h.saga.intent.digest)
+    try await h.mapping.putPrepared(prepared);_=try await h.ledger.submit(prepared.request)
+    let wrong=try WorkoutDeletionConfirmationV1(confirmationID:UUID(),requestID:prepared.request.requestID,selectionDigest:prepared.confirmation.selectionDigest,confirmedAt:raw.confirmedAt,explicitHealthDeletion:true)
+    _=try await h.ledger.confirm(wrong,now:100);_=try await backend(h);try await h.mapping.seal(fullSeal(raw:raw,prepared:prepared))
+    let bridge=M4HealthDeletionBridge(mapping:h.mapping,parents:h.repo,ledger:h.ledger,driver:driver,allowedSourceOrigin:.controlledFixture,clock:{100})
+    do {try await bridge.deleteAppCreatedWorkouts(confirmationID:raw.parentID);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.identityConflict)}
+    let original=try await h.ledger.entry(prepared.request.requestID);XCTAssertEqual(original.confirmation,wrong);XCTAssertEqual(driver.calls,0)
+    try await bridge.close();try await h.mapping.close();try await h.repo.close()
+  }
+  func testConcurrentParentCallbacksHaveOneNativeAttemptAndOneFirstReceipt() async throws {
+    let driver=HealthControlledDeletionDriver(),h=try await sealedHarness(driver:driver)
+    let first=Task {try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID)}
+    let deadline=ContinuousClock.now.advanced(by:.seconds(3))
+    while driver.calls == 0 && ContinuousClock.now<deadline {await Task.yield()}
+    XCTAssertEqual(driver.calls,1)
+    do {try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.outcomeUnknown)}
+    XCTAssertEqual(driver.calls,1);driver.finish(0,.success(deletedObjectCount:1));try await first.value
+    let entry=try await h.base.ledger.entry(h.prepared.request.requestID);XCTAssertEqual(entry.attemptCount,1);XCTAssertEqual(entry.phase,.succeededLocally)
+    try await h.bridge.close();try await h.base.mapping.close();try await h.base.repo.close()
+  }
+  func testZeroMatchingObjectsReceiptRemainsLocalAndDoesNotCompleteOtherParentGroups() async throws {
+    let driver=HealthControlledDeletionDriver(outcome:.success(deletedObjectCount:0)),h=try await sealedHarness(driver:driver)
+    try await h.bridge.deleteAppCreatedWorkouts(confirmationID:h.raw.parentID)
+    let entry=try await h.base.ledger.entry(h.prepared.request.requestID), saga=try await h.base.repo.deletionSagaV4(requestID:h.raw.parentID)
+    XCTAssertEqual(entry.receipt?.deletedObjectCount,0);XCTAssertEqual(entry.receipt?.noMatchingObjectsInScope,true)
+    XCTAssertEqual(saga?.healthProgress,.pending);XCTAssertEqual(saga?.localProgress,.pending);XCTAssertFalse(saga?.finished ?? true)
+    try await h.bridge.close();try await h.base.mapping.close();try await h.base.repo.close()
+  }
+  func testZeroSelectionAndUnavailableDefaultCannotManufactureLocalHealthSuccess() async throws {
+    XCTAssertThrowsError(try reservation(facts:[])) {XCTAssertEqual($0 as? M4HealthBridgeError,.unsupportedSelection)}
+    let h=try await healthHarness(),raw=try reservation(facts:[capture(token:"start")])
+    let defaultBridge=M4HealthDeletionBridge(parents:h.repo,ledger:h.ledger,clock:{100})
+    do {try await defaultBridge.reserve(raw);XCTFail()}catch{}
+    let entries=try await h.ledger.pendingRequests();XCTAssertTrue(entries.isEmpty)
+    try await defaultBridge.close();try await h.mapping.close();try await h.repo.close()
+  }
+
+  private struct SealedHarness {let base:HealthHarness;let raw:M4HealthRawReservation;let prepared:M4HealthPreparedMapping;let bridge:M4HealthDeletionBridge}
+  private func sealedHarness(driver:HealthControlledDeletionDriver,timeout:Duration = .seconds(1)) async throws -> SealedHarness {
+    let h=try await healthHarness(),raw=try reservation(facts:[capture(token:"start")])
+    try await h.bridge.reserve(raw);let prepared=try await h.bridge.prepare(parentID:raw.parentID);_=try await backend(h)
+    try await h.mapping.seal(fullSeal(raw:raw,prepared:prepared))
+    return SealedHarness(base:h,raw:raw,prepared:prepared,bridge:M4HealthDeletionBridge(mapping:h.mapping,parents:h.repo,ledger:h.ledger,driver:driver,allowedSourceOrigin:.controlledFixture,clock:{100},timeout:timeout))
+  }
+  private func fullSeal(raw:M4HealthRawReservation,prepared:M4HealthPreparedMapping) throws -> M4HealthFullSeal {
+    M4HealthFullSeal(version:1,parentID:raw.parentID,parentDigest:prepared.parentDigest,reservationDigest:try raw.digest(),preparedDigest:try M4HealthBytes.hash(prepared.canonicalBytes()),catalogDigest:String(repeating:"a",count:64),scope:raw.scope,cloud:raw.cloud,local:raw.local,health:raw.health,healthConfirmed:raw.healthConfirmed)
+  }
+  private func backend(_ h:HealthHarness) async throws -> DeletionSagaV4 {
+    let body:[String:Any]=["version":1,"environment":"development","keyID":"health-fixture","receiptID":"parent-delete-receipt","requestID":h.saga.intent.requestID,"requestDigest":h.saga.intent.digest,"operation":"deleteAccount","accountID":h.saga.accountID,"activationEpoch":1,"matchID":"","lockID":"","recordingDeviceID":"","result":"deleted","issuedAt":100,"deletion":["backend":"backendDeleted","apple":"revoked","cloud":"clientManaged","local":"clientManaged","health":"separateConfirmation"]]
+    let raw=try JSONSerialization.data(withJSONObject:body,options:[.sortedKeys,.withoutEscapingSlashes]),signature=try h.key.signature(for:AuthorityWire.signedInput("football-record.authority.receipt.v1",body:raw))
+    let envelope=try JSONSerialization.data(withJSONObject:["body":body,"signature":AuthorityWire.base64URL(signature)],options:[.sortedKeys,.withoutEscapingSlashes])
+    let trust=try AuthorityTrustConfiguration(environment:.development,publicKeys:["health-fixture":AuthorityWire.base64URL(h.key.publicKey.rawRepresentation)])
+    let verified=try VerifiedAuthorityReceiptV1.verify(envelope,expected:AuthorityExpectedIntent(h.saga.intent,accountID:h.saga.accountID,epoch:1),trust:trust)
+    return try await h.repo.acceptDeletionV4(requestID:h.saga.intent.requestID,receipt:verified,expectedRevision:0)
+  }
+  private func waitHealth(_ ledger:SQLiteHealthDeletionLedger,_ id:UUID,phase:HealthDeletionPhase) async throws {
+    let deadline=ContinuousClock.now.advanced(by:.seconds(3))
+    while ContinuousClock.now<deadline {if try await ledger.entry(id).phase == phase {return};await Task.yield()};XCTFail("Health callback never committed")
+  }
+}
+private final class HealthControlledDeletionDriver:HealthDeletionDriver,@unchecked Sendable {
+  private let lock=NSLock()
+  private var outcome:HealthDeletionDriverOutcome?
+  private var recorded:[HealthDeletionDriverAttempt]=[]
+  private var completions:[@Sendable (HealthDeletionDriverOutcome)->Void]=[]
+  init(outcome:HealthDeletionDriverOutcome?=nil){self.outcome=outcome}
+  var calls:Int {lock.withLock {recorded.count}}
+  var attempts:[HealthDeletionDriverAttempt] {lock.withLock {recorded}}
+  func configure(_ value:HealthDeletionDriverOutcome?){lock.withLock {outcome=value}}
+  func delete(_ attempt:HealthDeletionDriverAttempt,completion:@escaping @Sendable(HealthDeletionDriverOutcome)->Void) {
+    let value=lock.withLock {recorded.append(attempt);completions.append(completion);return outcome};if let value {completion(value)}
+  }
+  func finish(_ index:Int,_ value:HealthDeletionDriverOutcome){let callback=lock.withLock {completions.indices.contains(index) ? completions[index]:nil};callback?(value)}
 }

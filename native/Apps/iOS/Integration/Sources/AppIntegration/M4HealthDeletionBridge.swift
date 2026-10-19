@@ -180,9 +180,11 @@ actor M4HealthDeletionBridge: AppWorkoutDeletionDriver {
   private let service:HealthDeletionService
   private let allowedSourceOrigin:M4HealthSourceEvidence.Origin
   private let clock:@Sendable () -> Int64
+  private let timeout:Duration
+  private var executingParents=Set<Data>()
   private var closed=false
-  init(mapping:any M4HealthMappingStore=M4UnavailableHealthMappingStore(),parents:any LifecycleStateRepository,ledger:any HealthDeletionLedger,driver:any HealthDeletionDriver=UnavailableHealthDeletionDriver(),allowedSourceOrigin:M4HealthSourceEvidence.Origin = .platformObservation,clock:@escaping @Sendable () -> Int64 = {Int64(Date().timeIntervalSince1970)}) {
-    self.mapping=mapping;self.parents=parents;self.ledger=ledger;self.allowedSourceOrigin=allowedSourceOrigin;self.clock=clock
+  init(mapping:any M4HealthMappingStore=M4UnavailableHealthMappingStore(),parents:any LifecycleStateRepository,ledger:any HealthDeletionLedger,driver:any HealthDeletionDriver=UnavailableHealthDeletionDriver(),allowedSourceOrigin:M4HealthSourceEvidence.Origin = .platformObservation,clock:@escaping @Sendable () -> Int64 = {Int64(Date().timeIntervalSince1970)},timeout:Duration = .seconds(5)) {
+    self.mapping=mapping;self.parents=parents;self.ledger=ledger;self.allowedSourceOrigin=allowedSourceOrigin;self.clock=clock;self.timeout=timeout
     service=HealthDeletionService(ledger:ledger,driver:driver,clock:clock)
   }
   private func open() throws {guard !closed else {throw M4HealthBridgeError.closed}}
@@ -232,6 +234,43 @@ actor M4HealthDeletionBridge: AppWorkoutDeletionDriver {
     let entry=try await ledger.entry(prepared.request.requestID);try open();try checked(entry,prepared:prepared,confirmed:true)
     return prepared
   }
-  func deleteAppCreatedWorkouts(confirmationID:String) async throws {throw M4HealthBridgeError.unsealed}
+  private func sealed(_ raw:M4HealthRawReservation,_ prepared:M4HealthPreparedMapping,_ saga:DeletionSagaV4) async throws {
+    guard let seal=try await mapping.readFullSeal(parentID:raw.parentID) else {throw M4HealthBridgeError.unsealed};try open()
+    guard seal.version == 1, M4HealthBytes.same(seal.parentID,raw.parentID),
+          M4HealthBytes.same(seal.parentDigest,saga.intent.digest),
+          M4HealthBytes.same(seal.reservationDigest,try raw.digest()),
+          M4HealthBytes.same(seal.preparedDigest,try M4HealthBytes.hash(prepared.canonicalBytes())),
+          M4HealthBytes.digest(seal.catalogDigest), M4HealthBytes.scope(seal.scope,raw.scope),
+          seal.cloud == raw.cloud, seal.local == raw.local, seal.health == raw.health,
+          seal.health == .delete, seal.healthConfirmed, seal.healthConfirmed == raw.healthConfirmed else {throw M4HealthBridgeError.identityConflict}
+  }
+  private func receipt(_ entry:HealthDeletionEntry,_ prepared:M4HealthPreparedMapping) throws {
+    try checked(entry,prepared:prepared,confirmed:true)
+    guard entry.phase == .succeededLocally, let receipt=entry.receipt,
+          receipt.requestID == prepared.request.requestID,
+          receipt.selectionDigest == prepared.confirmation.selectionDigest,
+          receipt.attemptID == entry.attemptID,receipt.deletedObjectCount >= 0,
+          receipt.deletedObjectCount <= prepared.request.targets.count else {throw M4HealthBridgeError.deletionFailed}
+  }
+  /// The legacy AccountKit parameter is the original parent saga ID, never the028 confirmation UUID.
+  func deleteAppCreatedWorkouts(confirmationID:String) async throws {
+    try open();let parentKey=Data(confirmationID.utf8)
+    guard executingParents.insert(parentKey).inserted else {throw M4HealthBridgeError.outcomeUnknown}
+    defer {executingParents.remove(parentKey)}
+    guard let raw=try await mapping.readReservation(parentID:confirmationID), M4HealthBytes.same(raw.parentID,confirmationID),
+          let prepared=try await mapping.readPrepared(parentID:confirmationID) else {throw M4HealthBridgeError.missingMapping}
+    try open();try checkSource(raw)
+    let saga=try await parent(raw,execution:true);try checked(prepared,raw:raw,saga:saga);try await sealed(raw,prepared,saga)
+    let prior=try await ledger.entry(prepared.request.requestID);try open();try checked(prior,prepared:prepared,confirmed:true)
+    if prior.phase == .succeededLocally {try receipt(prior,prepared);return}
+    //028 permits explicit interrupted retry; this integration deliberately preserves unknown outcomes.
+    if [.executing,.awaitingOutcome,.interrupted].contains(prior.phase) || prior.issue == .outcomeUnknown {throw M4HealthBridgeError.outcomeUnknown}
+    guard [.pending,.failed].contains(prior.phase) else {throw M4HealthBridgeError.unsealed}
+    let actual=try await parent(raw,execution:true);try await sealed(raw,prepared,actual);try open()
+    let result=try await service.resume(prepared.request.requestID,timeout:timeout);try open()
+    let after=try await parent(raw,execution:true);try await sealed(raw,prepared,after)
+    if [.executing,.awaitingOutcome,.interrupted].contains(result.phase) || result.issue == .outcomeUnknown {throw M4HealthBridgeError.outcomeUnknown}
+    try receipt(result,prepared)
+  }
   func close() async throws {closed=true;try await service.close()}
 }

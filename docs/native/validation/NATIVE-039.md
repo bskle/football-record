@@ -11,3 +11,5 @@
 第一 slice 实际可执行红为7项/14失败（5 unexpected），修后7/0；追加真实 Core recover→restart→finish 1项/1失败后，最终同轮8/0。原日志独立保留。恢复 gap/nil window 不推断新 Workout，同原 token 的 linked proof 覆盖旧 sibling；未被 linked 覆盖的 pending/unknown 仍失败。
 
 第二 slice 实际新增8项，同轮16项/7失败（6 unexpected）红，修后同轮16/0。真实 SQLiteSessionRepository 保留 parent saga，test-only SQLite mapping 覆盖 prepared 写前回滚/COMMIT丢响应，真实028 submit/confirm提交丢响应、首次 bytes/confirmation及双 ledger重开均通过。prepare不等待full seal，callback门禁仍待第三slice。
+
+第三 slice 实际23项/21失败（3 unexpected）红，修后23/0；追加同parent并发调用与精确本地count0 receipt隔离后同轮25/0。首次red的受控completion helper在未派发时越界导致signal5，已保留原log并修helper取得完整runtime red；该失败不算产品通过证据。真实028 timeout→awaitingOutcome、close→reopen interrupted、旧callback不改新owner、failed+outcomeUnknown不重派和已知authorizationDenied沿原request重试已通过。全host/四SDK仍待最终运行。
