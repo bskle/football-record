@@ -83,6 +83,63 @@ struct M4CatalogIndex: Codable, Sendable {
 struct M4CatalogChild: Codable, Sendable {
   let componentID, capsuleDigest, requestID: String
 }
+/// Routing and exact first bytes only; a cached receipt never replaces replay
+/// of each real leaf's current inventory/zero checks by the aggregate driver.
+struct M4StoreCompletionEvidence: Codable, Sendable {
+  let requestID, parentIntentDigest, backendReceiptDigest: String
+  let scope: CloudScope
+  let database: M4CatalogPath
+  let localProgress: ClientDeletionProgressV4
+}
+struct M4StagingCompletionEvidence: Codable, Sendable {
+  let requestID, requestDigest, stableZoneKey: String
+  init(_ receipt: CloudStagingEraseReceipt) { requestID = receipt.requestID; requestDigest = receipt.requestDigest; stableZoneKey = receipt.stableZoneKey }
+}
+struct M4RetainedLeafReceipt: Codable, Sendable {
+  let version: Int
+  let parentID, parentIntentDigest, catalogDigest: String
+  let componentID, capsuleDigest, childRequestID: String
+  let kind: M4OwnedLeafKind
+  let leafDigest, receiptDigest: String
+  let canonicalReceipt: Data
+  static func capture(plan: M4FrozenDeletionPlan, componentID: String, leafDigest: String, canonicalReceipt: Data) throws -> Self {
+    guard canonicalReceipt.count <= 16_384 else { throw M4CatalogError.budgetExceeded }
+    guard let parent = plan.parentIntentDigest, let entry = plan.entries.first(where: { M4CatalogIO.raw($0.capsule.componentID, componentID) }), let child = plan.children.first(where: { M4CatalogIO.raw($0.componentID, componentID) }) else { throw M4CatalogError.intentMismatch }
+    let value = Self(version: 1, parentID: plan.requestID, parentIntentDigest: parent, catalogDigest: plan.catalogDigest, componentID: componentID, capsuleDigest: try entry.capsule.digest(), childRequestID: child.requestID, kind: entry.capsule.kind, leafDigest: leafDigest, receiptDigest: M4CatalogIO.hash(canonicalReceipt), canonicalReceipt: canonicalReceipt)
+    try value.validate(plan: plan); return value
+  }
+  func validate(plan: M4FrozenDeletionPlan) throws {
+    guard version == 1 else { throw M4CatalogError.unsupportedSchema }
+    guard canonicalReceipt.count <= 16_384 else { throw M4CatalogError.budgetExceeded }
+    guard plan.choices.local == .delete, M4CatalogIO.raw(parentID, plan.requestID), parentIntentDigest == plan.parentIntentDigest, catalogDigest == plan.catalogDigest,
+          let entry = plan.entries.first(where: { M4CatalogIO.raw($0.capsule.componentID, componentID) }),
+          let child = plan.children.first(where: { M4CatalogIO.raw($0.componentID, componentID) }),
+          kind == entry.capsule.kind, capsuleDigest == (try entry.capsule.digest()), capsuleDigest == child.capsuleDigest,
+          M4CatalogIO.raw(childRequestID, child.requestID), M4CatalogIO.isDigest(leafDigest), receiptDigest == M4CatalogIO.hash(canonicalReceipt) else { throw M4CatalogError.intentMismatch }
+    let capsule = entry.capsule
+    switch kind {
+    case .businessStore:
+      let proof: M4StoreCompletionEvidence = try M4CatalogIO.decode(canonicalReceipt)
+      guard M4CatalogIO.raw(proof.requestID, parentID), proof.parentIntentDigest == parentIntentDigest,
+            M4CatalogIO.isDigest(proof.backendReceiptDigest), proof.scope == plan.scope,
+            try M4CatalogIO.encode(proof.database) == M4CatalogIO.encode(capsule.root), proof.localProgress == .completed,
+            leafDigest == receiptDigest else { throw M4CatalogError.intentMismatch }
+    case .cloudLedger:
+      let proof: CloudLocalTransportEraseReceipt = try M4CatalogIO.decode(canonicalReceipt)
+      guard M4CatalogIO.raw(proof.requestID, childRequestID), proof.stableZoneKey == capsule.scope.stableZoneKey,
+            M4CatalogIO.isDigest(proof.requestDigest), leafDigest == proof.requestDigest else { throw M4CatalogError.intentMismatch }
+    case .cloudStaging:
+      let proof: M4StagingCompletionEvidence = try M4CatalogIO.decode(canonicalReceipt)
+      guard M4CatalogIO.raw(proof.requestID, childRequestID), proof.stableZoneKey == capsule.scope.stableZoneKey,
+            proof.requestDigest == parentIntentDigest, leafDigest == proof.requestDigest else { throw M4CatalogError.intentMismatch }
+    case .deviceSync:
+      let proof: DeviceSyncLocalEraseReceipt = try M4CatalogIO.decode(canonicalReceipt)
+      let expected = try DeviceSyncLocalEraseRequest(binding: capsule.deviceBinding(), requestID: parentID, requestDigest: parentIntentDigest)
+      guard proof.request == expected, proof.intentDigest == (try expected.intentDigest), proof.fenceGeneration > 0,
+            leafDigest == proof.intentDigest else { throw M4CatalogError.intentMismatch }
+    }
+  }
+}
 struct M4FrozenDeletionPlan: Codable, Sendable {
   let version: Int
   let requestID: String
@@ -94,6 +151,7 @@ struct M4FrozenDeletionPlan: Codable, Sendable {
   let entries: [M4CatalogEntry]
   var parentIntentDigest: String?
   var children: [M4CatalogChild]
+  var receipts: [M4RetainedLeafReceipt]? = nil
   func canonicalBytes() throws -> Data { try M4CatalogIO.encode(self) }
   func expectedChildren(_ digest: String) throws -> [M4CatalogChild] {
     try entries.map { entry in
@@ -124,6 +182,12 @@ struct M4FrozenDeletionPlan: Codable, Sendable {
     if let digest = parentIntentDigest {
       guard M4CatalogIO.isDigest(digest), try M4CatalogIO.encode(children) == M4CatalogIO.encode(expectedChildren(digest)) else { throw M4CatalogError.intentMismatch }
     } else { guard children.isEmpty else { throw M4CatalogError.intentMismatch } }
+    if let receipts {
+      guard !receipts.isEmpty, receipts.count <= entries.count,
+            Set(receipts.map { Data($0.componentID.utf8) }).count == receipts.count,
+            try M4CatalogIO.encode(receipts) == M4CatalogIO.encode(receipts.sorted { Data($0.componentID.utf8).lexicographicallyPrecedes(Data($1.componentID.utf8)) }) else { throw M4CatalogError.intentMismatch }
+      for receipt in receipts { try receipt.validate(plan: self) }
+    }
   }
 }
 struct M4CatalogState: Codable {
@@ -131,16 +195,19 @@ struct M4CatalogState: Codable {
   var revision: UInt64
   var entries: [M4CatalogEntry]
   var plans: [M4FrozenDeletionPlan]
+  var membershipRevision: UInt64? = nil
+  var ownedRevision: UInt64 { membershipRevision ?? plans.first?.catalogRevision ?? revision }
   static let empty = Self(version: 1, revision: 0, entries: [], plans: [])
   func validate() throws {
     guard version == 1 else { throw M4CatalogError.unsupportedSchema }
+    guard ownedRevision <= revision else { throw M4CatalogError.intentMismatch }
     guard entries.count <= 256, plans.count <= 1 else { throw M4CatalogError.budgetExceeded }
     guard Set(entries.map { Data($0.capsule.componentID.utf8) }).count == entries.count,
           try M4CatalogIO.encode(entries) == M4CatalogIO.encode(entries.sorted { Data($0.capsule.componentID.utf8).lexicographicallyPrecedes(Data($1.capsule.componentID.utf8)) }) else { throw M4CatalogError.intentMismatch }
     for entry in entries { try entry.capsule.validate() }
     for plan in plans {
       try plan.validate()
-      guard plan.catalogRevision <= revision, try M4CatalogIO.encode(plan.entries) == M4CatalogIO.encode(entries) else { throw M4CatalogError.intentMismatch }
+      guard plan.catalogRevision == ownedRevision, plan.catalogRevision <= revision, try M4CatalogIO.encode(plan.entries) == M4CatalogIO.encode(entries) else { throw M4CatalogError.intentMismatch }
     }
   }
 }
@@ -164,6 +231,8 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
           !(capsule.root.directory && prior.ancestors.contains(where: { M4CatalogIO.sameInode($0, capsule.root) })) else { throw M4CatalogError.intentMismatch }
       }
       guard state.entries.count < 256 else { throw M4CatalogError.budgetExceeded }
+      guard state.ownedRevision < UInt64.max else { throw M4CatalogError.budgetExceeded }
+      state.membershipRevision = state.ownedRevision + 1
       state.entries.append(M4CatalogEntry(capsule: capsule, retired: false))
       state.entries.sort { Data($0.capsule.componentID.utf8).lexicographicallyPrecedes(Data($1.capsule.componentID.utf8)) }
     }
@@ -173,11 +242,13 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
       guard let index = state.entries.firstIndex(where: { M4CatalogIO.raw($0.capsule.componentID, componentID) }) else { throw M4CatalogError.intentMismatch }
       if state.entries[index].retired { return }
       guard state.plans.isEmpty else { throw M4CatalogError.intentMismatch }
+      guard state.ownedRevision < UInt64.max else { throw M4CatalogError.budgetExceeded }
+      state.membershipRevision = state.ownedRevision + 1
       state.entries[index].retired = true
     }
   }
   func index() throws -> M4CatalogIndex {
-    let state = try journal.read(); return M4CatalogIndex(revision: state.revision, entries: state.entries)
+    let state = try journal.read(); return M4CatalogIndex(revision: state.ownedRevision, entries: state.entries)
   }
   func reserve(requestID: String, scope: CloudScope, choices: M4DeletionChoices, health: M4HealthReservation) throws -> M4FrozenDeletionPlan {
     try journal.transaction { state in
@@ -187,10 +258,10 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
               try M4CatalogIO.encode(prior.health) == M4CatalogIO.encode(health) else { throw M4CatalogError.intentMismatch }
         return
       }
-      let index = M4CatalogIndex(revision: state.revision, entries: state.entries)
+      let index = M4CatalogIndex(revision: state.ownedRevision, entries: state.entries)
       let plan = try M4FrozenDeletionPlan(version: 1, requestID: requestID, scope: scope, choices: choices, health: health,
         catalogRevision: index.revision, catalogDigest: index.digest(), entries: index.entries, parentIntentDigest: nil, children: [])
-      try plan.validate(); state.plans.append(plan)
+      try plan.validate(); state.membershipRevision = state.ownedRevision; state.plans.append(plan)
     }
     return try requiredPlan(requestID)
   }
@@ -210,6 +281,20 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
   private func requiredPlan(_ requestID: String) throws -> M4FrozenDeletionPlan {
     guard let plan = try plan(requestID: requestID) else { throw M4CatalogError.intentMismatch }; return plan
   }
+  func saveReceipt(_ receipt: M4RetainedLeafReceipt) throws {
+    try journal.transaction { state in
+      guard let index = state.plans.firstIndex(where: { M4CatalogIO.raw($0.requestID, receipt.parentID) }) else { throw M4CatalogError.intentMismatch }
+      try receipt.validate(plan: state.plans[index])
+      if let prior = state.plans[index].receipts?.first(where: { M4CatalogIO.raw($0.componentID, receipt.componentID) }) {
+        guard try M4CatalogIO.encode(prior) == M4CatalogIO.encode(receipt) else { throw M4CatalogError.intentMismatch }; return
+      }
+      state.membershipRevision = state.ownedRevision
+      var receipts = state.plans[index].receipts ?? []; receipts.append(receipt)
+      receipts.sort { Data($0.componentID.utf8).lexicographicallyPrecedes(Data($1.componentID.utf8)) }
+      state.plans[index].receipts = receipts
+    }
+  }
+  func receipts(requestID: String) throws -> [M4RetainedLeafReceipt] { try plan(requestID: requestID)?.receipts ?? [] }
   func injectNextFailure(_ fault: M4CatalogFault) { journal.injectNextFailure(fault) }
   func injectNextSynchronizationFailure(_ boundary: M4CatalogSyncBoundary) { journal.injectNextSynchronizationFailure(boundary) }
   func close() throws { try journal.close() }

@@ -331,6 +331,146 @@ final class M4OwnedDataCatalogTests: XCTestCase {
     XCTAssertEqual(Set(try fixtureBytes(control).keys), Set(before.keys))
     for (path, expected) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), expected) }
   }
+  @MainActor func testTypedReceiptsFromActualLocalLeavesKeepIndependentDigests() async throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control), scope = try scope()
+    let ledgerURL = dir.appendingPathComponent("cloud-ledger.sqlite"), ledger = try SQLiteCloudLedger(url: ledgerURL)
+    let stagingURL = dir.appendingPathComponent("assets"), stagingControl = dir.appendingPathComponent("staging-control.sqlite"), staging = try CloudOwnedStaging(rootURL: stagingURL, controlURL: stagingControl)
+    let deviceURL = dir.appendingPathComponent("DeviceSync"), device = try DeviceSyncStorageContext(root: deviceURL)
+    let ledgerCapsule = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "actual-ledger", kind: .cloudLedger, scope: scope, root: ledgerURL, retainedControls: [])
+    let stagingCapsule = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "actual-staging", kind: .cloudStaging, scope: scope, root: stagingURL, retainedControls: [stagingControl, URL(fileURLWithPath: stagingControl.path + ".owner"), URL(fileURLWithPath: stagingURL.path + ".owner")])
+    let deviceCapsule = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "actual-device", kind: .deviceSync, scope: scope, root: deviceURL, retainedControls: [deviceURL.appendingPathComponent(".control/.owner"), deviceURL.appendingPathComponent(".control/control.sqlite")])
+    try device.bind(deviceCapsule.deviceBinding())
+    for capsule in [ledgerCapsule, stagingCapsule, deviceCapsule] { try catalog.record(capsule) }
+    _ = try catalog.reserve(requestID: "actual-leaves-parent", scope: scope, choices: choices, health: .empty)
+    let plan = try catalog.seal(requestID: "actual-leaves-parent", parentIntentDigest: String(repeating: "c", count: 64))
+    func child(_ id: String) throws -> String { try XCTUnwrap(plan.children.first { $0.componentID == id }).requestID }
+    let cloud = try await ledger.eraseLocalTransport(CloudLocalTransportEraseRequest(requestID: child(ledgerCapsule.componentID), scope: scope))
+    XCTAssertNotEqual(cloud.requestDigest, plan.parentIntentDigest, "033 retains its own leaf digest")
+    try catalog.saveReceipt(M4RetainedLeafReceipt.capture(plan: plan, componentID: ledgerCapsule.componentID, leafDigest: cloud.requestDigest, canonicalReceipt: M4CatalogIO.encode(cloud)))
+    let files = try staging.erase(CloudStagingEraseRequest(requestID: child(stagingCapsule.componentID), requestDigest: try XCTUnwrap(plan.parentIntentDigest), scope: scope))
+    try catalog.saveReceipt(M4RetainedLeafReceipt.capture(plan: plan, componentID: stagingCapsule.componentID, leafDigest: files.requestDigest, canonicalReceipt: M4CatalogIO.encode(M4StagingCompletionEvidence(files))))
+    let request = try DeviceSyncLocalEraseRequest(binding: deviceCapsule.deviceBinding(), requestID: plan.requestID, requestDigest: try XCTUnwrap(plan.parentIntentDigest))
+    let unavailable = try await DeviceSyncErasureService(context: device).erase(request)
+    XCTAssertEqual(unavailable, .pending(.unresolved), "default native driver cannot supply a completion receipt")
+    // Explicit controlled protocol fixture, not WC/native driver evidence.
+    guard case .completed(let native) = try await DeviceSyncErasureService(context: device, driver: CatalogControlledDrain()).erase(request) else { return XCTFail("controlled empty root should drain") }
+    XCTAssertNotEqual(native.intentDigest, plan.parentIntentDigest)
+    try catalog.saveReceipt(M4RetainedLeafReceipt.capture(plan: plan, componentID: deviceCapsule.componentID, leafDigest: native.intentDigest, canonicalReceipt: M4CatalogIO.encode(native)))
+    let saved = try catalog.receipts(requestID: plan.requestID); XCTAssertEqual(saved.count, 3)
+    XCTAssertEqual(saved.first { $0.kind == .cloudLedger }?.leafDigest, cloud.requestDigest)
+    XCTAssertEqual(saved.first { $0.kind == .deviceSync }?.canonicalReceipt, try M4CatalogIO.encode(native))
+    try catalog.close()
+    let reopened = try M4OwnedDataCatalog(directory: control)
+    XCTAssertEqual(try M4CatalogIO.encode(reopened.receipts(requestID: plan.requestID)), try M4CatalogIO.encode(saved))
+    try reopened.close(); try staging.close(); try await ledger.close()
+  }
+  func testFirstReceiptReopensExactBytesWithoutChangingMembershipOrDeviceBinding() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    let ledger = try capsule(dir, "ledger"), device = try capsule(dir, "device", kind: .deviceSync)
+    try catalog.record(ledger); try catalog.record(device)
+    let original = try catalog.index(), binding = try device.deviceBinding()
+    let plan = try catalog.reserve(requestID: "receipt-parent", scope: scope(), choices: choices, health: .empty)
+    let sealed = try catalog.seal(requestID: plan.requestID, parentIntentDigest: String(repeating: "c", count: 64))
+    let receipt = try ledgerReceipt(sealed, ledger.componentID)
+    catalog.injectNextFailure(.afterCommitResponseLost)
+    XCTAssertThrowsError(try catalog.saveReceipt(receipt))
+    try catalog.close()
+    let reopened = try M4OwnedDataCatalog(directory: control)
+    let saved = try reopened.receipts(requestID: plan.requestID)
+    XCTAssertEqual(saved.count, 1)
+    XCTAssertEqual(try M4CatalogIO.encode(saved.first), try M4CatalogIO.encode(Optional(receipt)))
+    XCTAssertEqual(try reopened.index().revision, original.revision)
+    XCTAssertEqual(try reopened.index().digest(), try original.digest())
+    XCTAssertEqual(try reopened.index().entries.first(where: { $0.capsule.kind == .deviceSync })?.capsule.deviceBinding(), binding)
+    let before = try Data(contentsOf: control.appendingPathComponent("catalog.json"))
+    try reopened.saveReceipt(receipt)
+    XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("catalog.json")), before)
+    try reopened.close()
+  }
+  func testChangedFirstReceiptAndForeignParentCannotOverwriteRetainedBytes() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    let ledger = try capsule(dir, "ledger"); try catalog.record(ledger)
+    _ = try catalog.reserve(requestID: "receipt-parent", scope: scope(), choices: choices, health: .empty)
+    let plan = try catalog.seal(requestID: "receipt-parent", parentIntentDigest: String(repeating: "c", count: 64))
+    let receipt = try ledgerReceipt(plan, ledger.componentID); try catalog.saveReceipt(receipt)
+    let before = try Data(contentsOf: control.appendingPathComponent("catalog.json"))
+    let changed = try ledgerReceipt(plan, ledger.componentID, leafDigest: String(repeating: "b", count: 64))
+    XCTAssertThrowsError(try catalog.saveReceipt(changed))
+    for key in ["parentID", "parentIntentDigest", "catalogDigest", "componentID", "capsuleDigest", "childRequestID", "leafDigest", "receiptDigest"] {
+      var raw = try XCTUnwrap(JSONSerialization.jsonObject(with: M4CatalogIO.encode(receipt)) as? [String: Any])
+      raw[key] = key.hasSuffix("Digest") || key == "leafDigest" ? String(repeating: "f", count: 64) : "foreign"
+      let altered = try JSONDecoder().decode(M4RetainedLeafReceipt.self, from: JSONSerialization.data(withJSONObject: raw))
+      XCTAssertThrowsError(try catalog.saveReceipt(altered), key)
+      XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("catalog.json")), before)
+    }
+    try catalog.close()
+  }
+  func testReceiptBeforeCommitAndOversizeCannotAdvanceProgress() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    let ledger = try capsule(dir, "ledger"); try catalog.record(ledger)
+    let reserved = try catalog.reserve(requestID: "receipt-parent", scope: scope(), choices: choices, health: .empty)
+    XCTAssertThrowsError(try M4RetainedLeafReceipt.capture(plan: reserved, componentID: ledger.componentID, leafDigest: String(repeating: "a", count: 64), canonicalReceipt: Data()))
+    let plan = try catalog.seal(requestID: reserved.requestID, parentIntentDigest: String(repeating: "c", count: 64))
+    let before = try Data(contentsOf: control.appendingPathComponent("catalog.json")), receipt = try ledgerReceipt(plan, ledger.componentID)
+    catalog.injectNextFailure(.beforeCommit); XCTAssertThrowsError(try catalog.saveReceipt(receipt))
+    XCTAssertTrue(try catalog.receipts(requestID: plan.requestID).isEmpty)
+    XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("catalog.json")), before)
+    XCTAssertThrowsError(try M4RetainedLeafReceipt.capture(plan: plan, componentID: ledger.componentID, leafDigest: receipt.leafDigest, canonicalReceipt: Data(repeating: 1, count: 16_385))) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("catalog.json")), before)
+    try catalog.close()
+  }
+  private func ledgerReceipt(_ plan: M4FrozenDeletionPlan, _ component: String, leafDigest: String = String(repeating: "a", count: 64)) throws -> M4RetainedLeafReceipt {
+    let child = try XCTUnwrap(plan.children.first { $0.componentID == component })
+    let scope = try XCTUnwrap(plan.entries.first { $0.capsule.componentID == component }).capsule.scope
+    let bytes = try JSONSerialization.data(withJSONObject: ["requestID": child.requestID, "requestDigest": leafDigest, "stableZoneKey": scope.stableZoneKey], options: [.sortedKeys, .withoutEscapingSlashes])
+    return try M4RetainedLeafReceipt.capture(plan: plan, componentID: component, leafDigest: leafDigest, canonicalReceipt: bytes)
+  }
+  func testLegacyReservedPlanKeepsOriginalMembershipOnReopen() throws {
+    let external = ProcessInfo.processInfo.environment["M4_LEGACY_CATALOG_ROOT"]
+    let mode = ProcessInfo.processInfo.environment["M4_LEGACY_CATALOG_MODE"]
+    let dir = try external.map { URL(fileURLWithPath: $0) } ?? root(), control = dir.appendingPathComponent("retained")
+    let expected = dir.appendingPathComponent("expected-plan.json")
+    if mode != "read" {
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let catalog = try M4OwnedDataCatalog(directory: control)
+      try catalog.record(capsule(dir, "legacy-device", kind: .deviceSync))
+      let plan = try catalog.reserve(requestID: "legacy-original-parent", scope: scope(), choices: choices, health: .empty)
+      let sealed = try catalog.seal(requestID: plan.requestID, parentIntentDigest: String(repeating: "d", count: 64))
+      try sealed.canonicalBytes().write(to: expected, options: .withoutOverwriting); try catalog.close()
+      // The ordinary suite also verifies the exact prior v1 canonical shape.
+      // The separately preserved capture/read run executes the actual old writer.
+      let journal = control.appendingPathComponent("catalog.json")
+      var value = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: journal)) as? [String: Any])
+      if value.removeValue(forKey: "membershipRevision") != nil {
+        let bytes = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])
+        let file = try FileHandle(forWritingTo: journal); try file.truncate(atOffset: 0); try file.write(contentsOf: bytes); try file.synchronize(); try file.close()
+      }
+    }
+    let bytes = try Data(contentsOf: expected), original = try JSONDecoder().decode(M4FrozenDeletionPlan.self, from: bytes)
+    let before = try Data(contentsOf: control.appendingPathComponent("catalog.json"))
+    let reopened = try M4OwnedDataCatalog(directory: control), current = try XCTUnwrap(reopened.plan(requestID: original.requestID))
+    XCTAssertEqual(try current.canonicalBytes(), bytes)
+    XCTAssertEqual(try reopened.index().revision, original.catalogRevision)
+    XCTAssertEqual(try reopened.index().digest(), original.catalogDigest)
+    XCTAssertEqual(try reopened.seal(requestID: original.requestID, parentIntentDigest: try XCTUnwrap(original.parentIntentDigest)).canonicalBytes(), bytes)
+    XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("catalog.json")), before)
+    try reopened.close()
+  }
+  func testReserveAndSealProgressDoNotChangeOwnedMembershipRevisionOrDigest() throws {
+    let dir = try root(), catalog = try M4OwnedDataCatalog(directory: dir.appendingPathComponent("retained"))
+    let original = try capsule(dir, "device", kind: .deviceSync)
+    try catalog.record(original)
+    let before = try catalog.index(), binding = try original.deviceBinding()
+    let plan = try catalog.reserve(requestID: "membership-stable-parent", scope: scope(), choices: choices, health: .empty)
+    XCTAssertEqual(plan.catalogRevision, before.revision)
+    XCTAssertEqual(try catalog.index().revision, before.revision)
+    XCTAssertEqual(try catalog.index().digest(), try before.digest())
+    _ = try catalog.seal(requestID: plan.requestID, parentIntentDigest: String(repeating: "e", count: 64))
+    XCTAssertEqual(try catalog.index().revision, before.revision)
+    XCTAssertEqual(try catalog.index().digest(), try before.digest())
+    XCTAssertEqual(try catalog.index().entries[0].capsule.deviceBinding(), binding)
+    try catalog.close()
+  }
   func testRetainedControlsCannotLiveInsideBusinessRoot() throws {
     let dir = try root(), control = dir.appendingPathComponent("business/owned/retained")
     let catalog = try M4OwnedDataCatalog(directory: control)
@@ -346,4 +486,8 @@ private final class CatalogSyncTrace: @unchecked Sendable {
   func append(_ point: M4CatalogCrashPoint) { lock.withLock { events.append(point) } }
   func values() -> [M4CatalogCrashPoint] { lock.withLock { events } }
   func clear() { lock.withLock { events.removeAll() } }
+}
+
+private struct CatalogControlledDrain: DeviceSyncErasureDriving {
+  func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus { .drained }
 }
