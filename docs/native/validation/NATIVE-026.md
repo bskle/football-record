@@ -99,3 +99,29 @@ Fresh initialization creates a private sibling candidate. Slots, complete owner 
 | `catalog-crash-full-green.log` | `fb65386fdfd23bcafd9f1e0485825525b8d0c8051d532dd9924091ea51d3b318` |
 
 This repairs only local catalog publication. Health remains upstream 039; typed Watch relay remains upstream 040. Neither WIP API is consumed here. Same-facade composition, every deletion resume entry, complete owned-leaf receipts and final combined App/UI/SDK verification remain incomplete. No real accounts, devices, signing, SDK factories or long-lived branch promotion was performed.
+
+## Catalog reopen stabilization (S26-catalog-3)
+
+Source checkpoint `21ada8f864d66599d36413b51f56834ac6d4b280` follows actual accepted-039 ordinary merge `27e83a50dcb0c08f7c5b3688e6fb86d5c9045b60`. This records author evidence; the new finding remains subject to exact independent source review.
+
+A process can terminate after directory or journal rename and before directory fsync. Reopen now validates the original owner, held root, slot and ancestor identities, opens and checks the original publication parent, then fsyncs the catalog directory and parent before returning durable state or reusing the inactive slot. It rechecks identities after synchronization. A synchronization error preserves all names and bytes and blocks the operation; a later healthy reopen can retry. Recovery after a pending descriptor rename passes the same barrier. The normal publisher cannot leave an extra descriptor linked to the current slot: it publishes a different inactive slot and atomic rename consumes the descriptor. That unsupported state is now preserved and rejected rather than cleaned up.
+
+- Reproducible old-logic RED: **four tests / 18 failures (one unexpected)**, with all **332 input bytes unchanged**. Exact old-logic writer/catalog/test snapshots are preserved. The test-only injected failure was not honored by the old reader; old slot reuse mutated retained bytes, and the old current-slot branch deleted the extra descriptor.
+- Minimal fix selected GREEN: **four tests / zero failures**, including **six actual child exits with status 86** after initial or normal publication rename. Completion tracing occurs after the real fsync calls; injected failure verifies refusal before mutation.
+- Final single complete AppIntegration run: **72 tests / zero failures** (28 original, 19 catalog, 25 accepted Health bridge tests), **19 actual child exits with status 86**, and **332 inputs unchanged before/after and matching the committed source byte for byte**. Existing catalog capacity, ownership, interrupted initialization, unknown/control and negative descriptor coverage remains included. `git diff --check` passed. The run took 103 seconds.
+- Raw host output retains **104 CoreData/Contacts helper diagnostic lines** without XCTest failure. This establishes local process-interruption and synchronization-order behavior; it does not demonstrate a real power cut or whole-machine durability.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `catalog-sync-frozen-red.log` | `2fdf8aa2561016629eced9ff85810a7166579a249481bb2995232f8f473918ec` |
+| `catalog-sync-red-inputs.json` | `efc64e7851087ef80a4e527bfed4759f94edca32b635b0fc3dd51b428e72f624` |
+| `catalog-sync-red-post.json` | `f7a6f59b40d90d0ed4ab4603d2241522a58b29e838d9fee1160a28af5abbc5fa` |
+| `catalog-sync-red-M4CatalogJournal.swift` | `13836ed915df48a763c88a10aace619ba9639b7bb6f8af4c38d63dc9d84ffa75` |
+| `catalog-sync-red-M4OwnedDataCatalog.swift` | `c1d5a3b4e55c6b2ce40ec77a4b93a1ab813c7126e4028638685c32683442b842` |
+| `catalog-sync-red-tests.swift` | `18fa837cbfb9cbb6afebe203a2dd568d391d9123fbea7a884a7c02147535f1da` |
+| `catalog-sync-selected-green.log` | `bf2a2ad0fbf247ab6850f68ab07e0a15d5c2d44a97b6092d5217bf6f4f0c16fb` |
+| `catalog-sync-checkpoint-inputs.json` | `a2b28be2292deb1f955c0deccadbf445c9117975b3fa4749edc0a7153fff8a99` |
+| `catalog-sync-checkpoint-post.json` | `f3aa1ee0b79f25cea5c77c773d78a0530e5a7b97ca4b5212b6241dbf3ba95b83` |
+| `catalog-sync-full-green.log` | `b70e404c67aafbeab1779a7e5189cf80c5b88f1f6c07a3cada7bb8f966b0adb2` |
+
+The separate dependency-039 root run was 68/0 with 332 unchanged inputs, not added to these 72. Default/Release provider gates remain unavailable. No real SDK factories, account/device setup, signing, App/UI execution or long-lived branch promotion was performed. The clean handoff pauses author writes for root's accepted-040 ordinary merge; it is not whole-026 source/final acceptance.
