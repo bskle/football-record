@@ -54,6 +54,12 @@ import DeviceSync
   }
   private func transport(root: URL, driver: PairDriver) throws -> WCSessionTransport {
     let files = directory(root).appendingPathComponent("DeviceSync")
+    // These fresh roots are explicitly owned by this two-installation fixture.
+    // This binding precedes inbox/outbox creation; it is not a production catalog.
+    let storage = try DeviceSyncStorageContext(root: files)
+    try storage.bind(DeviceSyncNamespaceBinding(namespaceID: UUID().uuidString,
+      accountID: "development-account", cloudSpaceID: "two-installations-fixture", zoneID: "matches",
+      activationEpoch: 1, catalogRevision: 1, catalogDigest: String(repeating: "1", count: 64), rootIdentity: storage.rootIdentity))
     return try WCSessionTransport(driver: driver, inbox: DurableFileInbox(directory: files.appendingPathComponent("inbox")), outboxDirectory: files.appendingPathComponent("outbox"))
   }
   private func settle(_ predicate: () async throws -> Bool) async throws {

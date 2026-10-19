@@ -33,6 +33,16 @@ import WorkoutCapture
     let request = try await session.prepareStart(starter: true)
     _ = try await session.execute(request)
     let activeSafe = try await gate.isSafeToLeave(activeRepository: repo); XCTAssertFalse(activeSafe)
+    // This fixture tests the held-lock environment gate. Observe the initial
+    // unavailable capture result before preparing a versioned end command.
+    // A concurrent capture commit must still produce staleGeneration in Session.
+    let deadline = ContinuousClock.now.advanced(by: .seconds(3)); var observed = false
+    while ContinuousClock.now < deadline {
+      let snapshot = try await repo.snapshotV2(matchID: request.matchID)
+      if snapshot.captureOperations.contains(where: { $0.operation.action == .start && $0.state == .failed && $0.observation?.outcome == .notCreated(.unavailable) }) { observed = true; break }
+      await Task.yield()
+    }
+    _ = try XCTUnwrap(observed ? true : nil, "initial unavailable capture observation did not commit")
     let end = try await session.prepare(.end, matchID: request.matchID)
     _ = try await session.execute(end)
     let endedSafe = try await gate.isSafeToLeave(activeRepository: repo); XCTAssertFalse(endedSafe, "Ended with held backend lock is not safe to abandon")
