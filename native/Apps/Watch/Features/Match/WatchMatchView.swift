@@ -92,7 +92,7 @@ struct WatchMatchView: View {
       if model.issue != nil { RecordingIssueView(model: model) }
       if model.readOnly { Text("另一台设备记录 · 仅可查看").font(.caption2) }
       #if DEBUG
-      Button("开发环境", action: openEnvironment).font(.caption2).frame(minHeight: 44).accessibilityIdentifier("open-environment")
+      if let openEnvironment { Button("开发环境", action: openEnvironment).font(.caption2).frame(minHeight: 44).accessibilityIdentifier("open-environment") }
       #endif
     }.padding(.bottom, 2)
   }
