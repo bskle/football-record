@@ -1,4 +1,6 @@
 import Foundation
+import CryptoKit
+import SQLite3
 import XCTest
 import MatchCore
 import MatchStore
@@ -141,4 +143,175 @@ private struct HealthRecoveryGateway: WorkoutGateway {
     return try! WorkoutObservation(operationID:operation.id,binding:operation.binding,externalToken:operation.externalToken,observedAt:date,outcome:outcome,window:CaptureWindow(start:nil,end:nil),failure:operation.action == .recover ? .recoveryUnavailable:nil)
   }
   func reconcile(_ operation:CaptureOperation) async -> WorkoutObservation { await perform(operation) }
+}
+
+extension M4HealthDeletionBridgeTests {
+  func testPrepareReadsPersistedParentAndOriginal028SelectionBeforeSeal() async throws {
+    let h=try await healthHarness(), raw=try reservation(facts:[capture(token:"parent/capture/start")])
+    try await h.bridge.reserve(raw)
+    let value=try await h.bridge.prepare(parentID:raw.parentID), entry=try await h.ledger.entry(value.request.requestID)
+    XCTAssertEqual(value.parentDigest,h.saga.intent.digest); XCTAssertFalse(h.saga.backendDeleted)
+    XCTAssertEqual(try entry.request.canonicalBytes(),try value.request.canonicalBytes())
+    XCTAssertEqual(entry.confirmation,value.confirmation); XCTAssertEqual(entry.phase,.pending)
+    XCTAssertEqual(entry.attemptCount,0)
+    let seal=try await h.mapping.readFullSeal(parentID:raw.parentID); XCTAssertNil(seal)
+    try await h.bridge.close(); try await h.mapping.close(); try await h.repo.close()
+  }
+  func testPreparedUUIDAndOriginalCanonicalBytesSurviveBothLedgersReopen() async throws {
+    let h=try await healthHarness(), raw=try reservation(facts:[capture(token:"parent/capture/start")])
+    try await h.bridge.reserve(raw); let first=try await h.bridge.prepare(parentID:raw.parentID)
+    let bytes=try first.canonicalBytes(), selection=try first.request.canonicalBytes(), confirmation=first.confirmation
+    XCTAssertEqual(first.request.requestID.uuidString.lowercased().split(separator:"-")[2].first,"8")
+    XCTAssertTrue(["8","9","a","b"].contains(String(first.request.requestID.uuidString.lowercased().split(separator:"-")[3].first!)))
+    try await h.bridge.close(); try await h.mapping.close()
+    let reopened=try healthStores(root:h.root,repo:h.repo)
+    let again=try await reopened.bridge.prepare(parentID:raw.parentID)
+    XCTAssertEqual(try again.canonicalBytes(),bytes); XCTAssertEqual(try again.request.canonicalBytes(),selection)
+    XCTAssertEqual(again.confirmation,confirmation)
+    XCTAssertNotEqual(again.request.requestID,again.confirmation.confirmationID)
+    try await reopened.bridge.close(); try await reopened.mapping.close(); try await h.repo.close()
+  }
+  func testPreparedBeforeCommitFailureLeavesOriginalReservationAndNo028Request() async throws {
+    let h=try await healthHarness(), raw=try reservation(facts:[capture(token:"start")])
+    try await h.bridge.reserve(raw); await h.mapping.setFault(.beforePrepared)
+    do {_=try await h.bridge.prepare(parentID:raw.parentID);XCTFail()}catch{}
+    let pending=try await h.ledger.pendingRequests(), prepared=try await h.mapping.readPrepared(parentID:raw.parentID)
+    XCTAssertTrue(pending.isEmpty); XCTAssertNil(prepared)
+    let saved=try await h.mapping.readReservation(parentID:raw.parentID); XCTAssertEqual(try saved?.canonicalBytes(),try raw.canonicalBytes())
+    try await h.bridge.close();try await h.mapping.close()
+    let next=try healthStores(root:h.root,repo:h.repo), value=try await next.bridge.prepare(parentID:raw.parentID)
+    XCTAssertEqual(value.request.createdAt,raw.createdAt);XCTAssertEqual(value.confirmation.confirmedAt,raw.confirmedAt)
+    try await next.bridge.close();try await next.mapping.close();try await h.repo.close()
+  }
+  func testPreparedCommitLostResponseReopensOriginalMappingWithoutRegeneratingIDs() async throws {
+    let h=try await healthHarness(), raw=try reservation(facts:[capture(token:"start")])
+    try await h.bridge.reserve(raw);await h.mapping.setFault(.afterPrepared)
+    do {_=try await h.bridge.prepare(parentID:raw.parentID);XCTFail()}catch{}
+    let value=try await h.mapping.readPrepared(parentID:raw.parentID), first=try XCTUnwrap(value)
+    let count=try await h.ledger.pendingRequests().count;XCTAssertEqual(count,0)
+    try await h.bridge.close();try await h.mapping.close()
+    let next=try healthStores(root:h.root,repo:h.repo), restored=try await next.bridge.prepare(parentID:raw.parentID)
+    XCTAssertEqual(try first.canonicalBytes(),try restored.canonicalBytes())
+    let entries=try await next.ledger.pendingRequests();XCTAssertEqual(entries.count,1)
+    try await next.bridge.close();try await next.mapping.close();try await h.repo.close()
+  }
+  func test028SubmitAndConfirmationLostResponsesKeepFirstSelectionOnRetry() async throws {
+    for fault in [HealthLedgerResponseLoss.Point.submit,.confirm] {
+      let h=try await healthHarness(), raw=try reservation(facts:[capture(token:"start")])
+      let losing=HealthLedgerResponseLoss(h.ledger,point:fault)
+      let bridge=M4HealthDeletionBridge(mapping:h.mapping,parents:h.repo,ledger:losing,allowedSourceOrigin:.controlledFixture,clock:{100})
+      try await bridge.reserve(raw)
+      do {_=try await bridge.prepare(parentID:raw.parentID);XCTFail()}catch{}
+      let value=try await h.mapping.readPrepared(parentID:raw.parentID), first=try XCTUnwrap(value)
+      let original=try await h.ledger.entry(first.request.requestID)
+      XCTAssertEqual(try original.request.canonicalBytes(),try first.request.canonicalBytes())
+      let restored=try await bridge.prepare(parentID:raw.parentID), entry=try await h.ledger.entry(first.request.requestID)
+      XCTAssertEqual(try restored.canonicalBytes(),try first.canonicalBytes());XCTAssertEqual(entry.confirmation,first.confirmation)
+      XCTAssertEqual(entry.attemptCount,0);try await bridge.close();try await h.mapping.close();try await h.repo.close()
+    }
+  }
+  func testSameParentDifferentRawReservationCannotReplaceDurableMapping() async throws {
+    let h=try await healthHarness(), raw=try reservation(facts:[capture(token:"start")])
+    try await h.bridge.reserve(raw);let first=try await h.bridge.prepare(parentID:raw.parentID)
+    let changed=try reservation(facts:[capture(token:"different/start")])
+    do {try await h.bridge.reserve(changed);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.identityConflict)}
+    let saved=try await h.mapping.readPrepared(parentID:raw.parentID);XCTAssertEqual(try saved?.canonicalBytes(),try first.canonicalBytes())
+    try await h.bridge.close();try await h.mapping.close();try await h.repo.close()
+  }
+  func testMissingPersistedParentWrongScopeAndDefaultFixtureAdmissionDoNotSubmit() async throws {
+    for mode in [0,1,2] {
+      let h=try await healthHarness(), facts=try [capture(token:"start")]
+      let wrong=try CloudScopeV1(accountID:"other-account",cloudSpaceID:"cloud-fixture",zoneID:"zone-fixture",activationEpoch:1)
+      let raw=try M4HealthRawReservation(parentID:mode == 0 ? "unknown-parent":"parent-delete",scope:mode == 1 ? wrong:scope(),cloud:.keep,local:.delete,health:.delete,healthConfirmed:true,createdAt:10,confirmedAt:11,facts:facts,sources:[source()])
+      let bridge=mode == 2 ? M4HealthDeletionBridge(mapping:h.mapping,parents:h.repo,ledger:h.ledger,clock:{100}):h.bridge
+      do {try await bridge.reserve(raw);_=try await bridge.prepare(parentID:raw.parentID);XCTFail()}catch{}
+      let entries=try await h.ledger.pendingRequests();XCTAssertTrue(entries.isEmpty)
+      try await bridge.close();try await h.mapping.close();try await h.repo.close()
+    }
+  }
+  func testInvalidDecodedReservationCannotBecomePreparedMapping() async throws {
+    let h=try await healthHarness(), raw=try reservation(facts:[capture(token:"start")])
+    var object=try XCTUnwrap(JSONSerialization.jsonObject(with:raw.canonicalBytes()) as? [String:Any]);object["version"]=2
+    let bad=try JSONDecoder().decode(M4HealthRawReservation.self,from:JSONSerialization.data(withJSONObject:object))
+    do {try await h.bridge.reserve(bad);XCTFail()}catch {XCTAssertEqual(error as? M4HealthBridgeError,.invalidReservation)}
+    let entries=try await h.ledger.pendingRequests();XCTAssertTrue(entries.isEmpty)
+    try await h.bridge.close();try await h.mapping.close();try await h.repo.close()
+  }
+
+  private struct HealthHarness {let root:URL;let repo:SQLiteSessionRepository;let saga:DeletionSagaV4;let mapping:HealthSQLiteMapping;let ledger:SQLiteHealthDeletionLedger;let bridge:M4HealthDeletionBridge}
+  private func healthHarness() async throws -> HealthHarness {
+    let root=location(), key=Curve25519.Signing.PrivateKey(), trust=try AuthorityTrustConfiguration(environment:.development,publicKeys:["health-fixture":AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
+    let repo=try SQLiteSessionRepository(rootDirectory:root.appendingPathComponent("business"),databaseNamespace:"health-fixture",authorityTrust:trust,cloudSavePolicy:.development(databaseNamespace:"health-fixture"))
+    let binding=try AccountBindingV4(accountID:"account-fixture",cloudSpaceID:"cloud-fixture",deviceID:"phone",activationEpoch:1,role:.phone,environment:.development);try await repo.bindAccountV4(binding)
+    let cap=AuthorityWire.base64URL(Data(repeating:41,count:32));var fields=AuthorityFields();fields.reauthenticationID="fresh-fixture";fields.recoveryCapabilityDigest=AuthorityWire.hash(Data(cap.utf8))
+    let saga=try DeletionSagaV4(intent:ControlIntentV1(requestID:"parent-delete",operation:.deleteAccount,fields:fields),accountID:binding.accountID,activationEpoch:1,recoveryCapability:cap,cloudChoice:.keep,localChoice:.delete,healthChoice:.delete,healthConfirmed:true,originalScope:scope())
+    try await repo.createDeletionSagaV4(saga)
+    let stores=try healthStores(root:root,repo:repo)
+    return HealthHarness(root:root,repo:repo,saga:saga,mapping:stores.mapping,ledger:stores.ledger,bridge:stores.bridge)
+  }
+  private func healthStores(root:URL,repo:SQLiteSessionRepository) throws -> (mapping:HealthSQLiteMapping,ledger:SQLiteHealthDeletionLedger,bridge:M4HealthDeletionBridge) {
+    let mapping=try HealthSQLiteMapping(url:root.appendingPathComponent("retained/mapping.sqlite"))
+    let ledger=try SQLiteHealthDeletionLedger(url:root.appendingPathComponent("retained/health.sqlite"),businessDataDirectory:root.appendingPathComponent("business"))
+    return (mapping,ledger,M4HealthDeletionBridge(mapping:mapping,parents:repo,ledger:ledger,allowedSourceOrigin:.controlledFixture,clock:{100}))
+  }
+}
+
+/// Test-only durable mapping adapter. It is not the production026 catalog.
+private actor HealthSQLiteMapping: M4HealthMappingStore {
+  enum Fault {case beforePrepared,afterPrepared}
+  private var db:OpaquePointer?
+  private var fault:Fault?
+  init(url:URL) throws {
+    try FileManager.default.createDirectory(at:url.deletingLastPathComponent(),withIntermediateDirectories:true)
+    guard sqlite3_open(url.path,&db)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable}
+    guard sqlite3_exec(db,"PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS mapping(kind TEXT NOT NULL,id BLOB NOT NULL,payload BLOB NOT NULL,digest BLOB NOT NULL,PRIMARY KEY(kind,id))",nil,nil,nil)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable}
+  }
+  func setFault(_ value:Fault) {fault=value}
+  func reserve(_ value:M4HealthRawReservation) throws {try put("raw",value.parentID,value.canonicalBytes())}
+  func readReservation(parentID:String) throws -> M4HealthRawReservation? {try read("raw",parentID,M4HealthRawReservation.self)}
+  func putPrepared(_ value:M4HealthPreparedMapping) throws {try put("prepared",value.parentID,value.canonicalBytes())}
+  func readPrepared(parentID:String) throws -> M4HealthPreparedMapping? {try read("prepared",parentID,M4HealthPreparedMapping.self)}
+  func readFullSeal(parentID:String) throws -> M4HealthFullSeal? {try read("seal",parentID,M4HealthFullSeal.self)}
+  func seal(_ value:M4HealthFullSeal) throws {try put("seal",value.parentID,M4HealthBytes.encode(value))}
+  func close() throws {guard let db else {return};guard sqlite3_close(db)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable};self.db=nil}
+  private func execute(_ sql:String) throws {guard db != nil,sqlite3_exec(db,sql,nil,nil,nil)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable}}
+  private func bytes(_ kind:String,_ id:String) throws -> Data? {
+    guard let db else {throw M4HealthBridgeError.mappingUnavailable};var statement:OpaquePointer?
+    guard sqlite3_prepare_v2(db,"SELECT payload,digest FROM mapping WHERE kind=? AND id=?",-1,&statement,nil)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable};defer {sqlite3_finalize(statement)}
+    let destructor=unsafeBitCast(-1,to:sqlite3_destructor_type.self)
+    sqlite3_bind_text(statement,1,kind,-1,destructor);let key=Data(id.utf8);_=key.withUnsafeBytes {sqlite3_bind_blob(statement,2,$0.baseAddress,Int32($0.count),destructor)}
+    let step=sqlite3_step(statement);if step==SQLITE_DONE {return nil};guard step==SQLITE_ROW else {throw M4HealthBridgeError.mappingUnavailable}
+    let data=Data(bytes:sqlite3_column_blob(statement,0)!,count:Int(sqlite3_column_bytes(statement,0))),digest=Data(bytes:sqlite3_column_blob(statement,1)!,count:Int(sqlite3_column_bytes(statement,1)))
+    guard data.count<=M4HealthBytes.maximumArtifactBytes,digest==Data(M4HealthBytes.hash(data).utf8) else {throw M4HealthBridgeError.identityConflict};return data
+  }
+  private func read<T:Decodable>(_ kind:String,_ id:String,_ type:T.Type) throws -> T? {guard let bytes=try bytes(kind,id) else {return nil};return try JSONDecoder().decode(type,from:bytes)}
+  private func put(_ kind:String,_ id:String,_ bytes:Data) throws {
+    guard bytes.count<=M4HealthBytes.maximumArtifactBytes else {throw M4HealthBridgeError.unsupportedSelection}
+    try execute("BEGIN IMMEDIATE");var committed=false
+    defer {if !committed {try? execute("ROLLBACK")}}
+    if let prior=try self.bytes(kind,id) {guard prior==bytes else {throw M4HealthBridgeError.identityConflict};try execute("COMMIT");committed=true;return}
+    let current=fault;if kind=="prepared" {fault=nil}
+    guard let db else {throw M4HealthBridgeError.mappingUnavailable};var statement:OpaquePointer?
+    guard sqlite3_prepare_v2(db,"INSERT INTO mapping VALUES(?,?,?,?)",-1,&statement,nil)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable};defer {sqlite3_finalize(statement)}
+    let destructor=unsafeBitCast(-1,to:sqlite3_destructor_type.self)
+    sqlite3_bind_text(statement,1,kind,-1,destructor)
+    for (index,data) in [Data(id.utf8),bytes,Data(M4HealthBytes.hash(bytes).utf8)].enumerated() {_=data.withUnsafeBytes {sqlite3_bind_blob(statement,Int32(index+2),$0.baseAddress,Int32($0.count),destructor)}}
+    guard sqlite3_step(statement)==SQLITE_DONE else {throw M4HealthBridgeError.mappingUnavailable}
+    if kind=="prepared",current == .beforePrepared {throw M4HealthBridgeError.mappingUnavailable}
+    try execute("COMMIT");committed=true
+    if kind=="prepared",current == .afterPrepared {throw M4HealthBridgeError.mappingUnavailable}
+  }
+}
+private actor HealthLedgerResponseLoss:HealthDeletionLedger {
+  enum Point {case submit,confirm}
+  let base:any HealthDeletionLedger;var point:Point?
+  init(_ base:any HealthDeletionLedger,point:Point){self.base=base;self.point=point}
+  func submit(_ value:WorkoutDeletionRequestV1) async throws -> HealthDeletionEntry {let entry=try await base.submit(value);if point == .submit {point=nil;throw HealthDeletionIssue.storageUnavailable};return entry}
+  func confirm(_ value:WorkoutDeletionConfirmationV1,now:Int64) async throws -> HealthDeletionEntry {let entry=try await base.confirm(value,now:now);if point == .confirm {point=nil;throw HealthDeletionIssue.storageUnavailable};return entry}
+  func entry(_ id:UUID) async throws -> HealthDeletionEntry {try await base.entry(id)}
+  func pendingRequests() async throws -> [HealthDeletionEntry] {try await base.pendingRequests()}
+  func beginAttempt(_ id:UUID,attemptID:UUID) async throws -> HealthDeletionEntry {try await base.beginAttempt(id,attemptID:attemptID)}
+  func markAwaitingOutcome(_ id:UUID,digest:String,attemptID:UUID) async throws {try await base.markAwaitingOutcome(id,digest:digest,attemptID:attemptID)}
+  func finish(_ id:UUID,digest:String,attemptID:UUID,outcome:HealthDeletionDriverOutcome,now:Int64) async throws {try await base.finish(id,digest:digest,attemptID:attemptID,outcome:outcome,now:now)}
+  func close() async throws {try await base.close()}
 }

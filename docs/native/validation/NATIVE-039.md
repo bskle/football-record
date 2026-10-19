@@ -9,3 +9,5 @@
 本任务不执行 HKHealthStore/授权/真实 source 查询或删除，不连接账号/设备。编译不是设备验证；独立桥及测试持久 mapping 不证明026 production catalog、full seal装配、全部本地/全设备完成。默认 provider/driver/mapping unavailable，真实门槛保留。
 
 第一 slice 实际可执行红为7项/14失败（5 unexpected），修后7/0；追加真实 Core recover→restart→finish 1项/1失败后，最终同轮8/0。原日志独立保留。恢复 gap/nil window 不推断新 Workout，同原 token 的 linked proof 覆盖旧 sibling；未被 linked 覆盖的 pending/unknown 仍失败。
+
+第二 slice 实际新增8项，同轮16项/7失败（6 unexpected）红，修后同轮16/0。真实 SQLiteSessionRepository 保留 parent saga，test-only SQLite mapping 覆盖 prepared 写前回滚/COMMIT丢响应，真实028 submit/confirm提交丢响应、首次 bytes/confirmation及双 ledger重开均通过。prepare不等待full seal，callback门禁仍待第三slice。
