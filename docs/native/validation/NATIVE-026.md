@@ -221,3 +221,23 @@ The fixed reader uses the same original path with `M4_EVIDENCE_BUDGET_MODE=read`
 | `catalog-evidence-checkpoint-post.json` | `cc8a7cb011eb9691c236935b75de75759d44d799abe54558fb9bf7071bcc2a76` |
 | `catalog-evidence-checkpoint-commit-match.json` | `3e32807697094d3bf0e7b4e33a59ce907ef7e5071d104c23416028d7724f6bb6` |
 | `catalog-evidence-full-host.log` | `afa8235f1aff6da8796f6bb2ff36fd1d4be2526f59ac14bd1104146a1ee2f217` |
+
+## Concrete staging and DeviceSync receipt replay
+
+Source `977cfeb8324d9e37c03ca6c43dc35ee6a4f54ce3` adds only the owned leaf executor and its standalone recovery tests. The internal executor is component-scoped; Store and cloud-ledger cases throw unsupported. It is not a conforming whole-aggregate driver and does not establish fullseal or actor quiescence. Before and after the actual operation it checks the original plan parent/digest, stable child, capsule, original paths/inodes/ancestors and capacity preflight. Explicit staging control routing must match all three retained coordination files before any constructor. DeviceSync reopen never calls bind or creates a new ownership provenance. Existing cached receipts do not skip the real leaf API; first bytes are retained and read back unchanged.
+
+- Actual minimal-boundary RED: **four tests / six failures (two unexpected)**. The exact source and tests are preserved.
+- First green attempt retained one wrong-error failure for an unregistered control; membership is now checked before opening it. The next attempt found the supported `/var` system alias needed existing canonical normalization; both logs remain preserved. Assertions were retained.
+- Final scoped **seven tests / zero failures** cover original staging receipt across reopen, restored staging directory refusal, default DeviceSync unresolved drain, explicit controlled drain followed by restored-frame refusal, unregistered control no-file creation, wrong original parent/digest, retired membership, replaced retained owner, and unknown device inventory preserved without invoking drain. The controlled drain is a protocol fixture and supplies no native WC proof.
+- Frozen complete AppIntegration: **142 tests / three failures**, 134 seconds. All seven leaf tests pass. Only the two unchanged NATIVE-042 retirement cases fail (three business assertions); none are removed or skipped. **341 conservative inputs** have zero before/post differences and match the exact committed source. `git diff --check` passed.
+- 033's accepted replay currently verifies receipt/fence but exposes no all-epoch current-zero readback. This concrete leaf executor leaves cloud-ledger unsupported and reports the exact upstream gap rather than inventing an inventory or claiming cached-receipt success. Store actual saga proof, aggregate/fullseal/resume gates and App wiring remain pending. No real SDK/account/device/App/UI execution, power-loss or whole-candidate acceptance is claimed.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `local-leaves-red.log` | `d1a4e4499512cb26f82873d2935a0d581c65d7017c93fe349f2ee18b7171c862` |
+| `local-leaves-red-source.swift` | `99f9d36a4bbc5b269403b377580f95cea050d3e667f942a1010a890f05bdc01e` |
+| `local-leaves-red-tests.swift` | `0afc0483b710176ce73af7d2a30fb82d30ae8db47d05a4049187e2adbb3892f9` |
+| `local-leaves-seven-green.log` | `9494190a89682270925d7d7723f5f01167d617900dbba2831e688df521f6700c` |
+| `local-leaves-checkpoint-inputs.json` | `a7d02a8673a11db73c070fcc3f53d55ff2568714a77b726fa57a015f0ac60726` |
+| `local-leaves-checkpoint-post.json` | `5e0c2674f925cb3df4d386f96bb2f0930f58ee164e6b825fdc5486b5d876da5b` |
+| `local-leaves-full-host.log` | `c80850895fd7f5c822bff7f0cb65cbb0b5ffbb370c4075e77ad6daaa9ee5e250` |
