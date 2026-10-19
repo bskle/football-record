@@ -18,6 +18,18 @@ public struct DeletionStatusRow: Sendable {
     switch progress { case .pending: "待处理"; case .running: "正在处理"; case .failed: "尚未完成，可重试"; case .completed: "此项已完成"; case .retained: "已按选择保留" }
   }
 }
+struct PresentationScopeRead: Sendable {
+  let binding: AccountBindingV4?
+  let deletions: [DeletionSagaV4]
+  let identityGeneration: Int64
+  static func read(_ repository: SQLiteSessionRepository) async throws -> Self {
+    let before = try await repository.identityGenerationV4()
+    let binding = try await repository.accountBindingV4(), deletions = try await repository.deletionSagasV4()
+    guard try await repository.identityGenerationV4() == before else { throw AuthorityError.identityChanged }
+    return Self(binding: binding, deletions: deletions, identityGeneration: before)
+  }
+}
+
 @MainActor @Observable public final class LifecycleStatusModel {
   public private(set) var matchID: String?
   public private(set) var migration: AuthorityMigrationV1?
@@ -109,6 +121,31 @@ public struct DeletionStatusRow: Sendable {
     guard !stopped, generation == refresh else { return }
     if let failure { issue = failure }
   }
-  func setCloudScope(_ value: CloudScope) { scope = value; generation = UUID(); cloudSaved = nil; backendStatus = nil }
+  /// Projects a scope already owned by this facade; it never admits identity or writes facts.
+  public func projectCloudScope(_ value: CloudScope, expectedIdentityGeneration: Int64) async throws {
+    try await projectCloudScope(value, expectedIdentityGeneration: expectedIdentityGeneration, read: { try await PresentationScopeRead.read(self.repository) })
+  }
+  func projectCloudScope(_ value: CloudScope, expectedIdentityGeneration: Int64, read: @MainActor () async throws -> PresentationScopeRead) async throws {
+    guard !stopped else { throw AuthorityError.identityChanged }
+    let token = UUID(); generation = token
+    cloudSaved = nil; backendStatus = nil; cloudIssue = nil
+    let current = try await read()
+    let durableGeneration = try await repository.identityGenerationV4()
+    guard !stopped, generation == token, expectedIdentityGeneration >= 0,
+          current.identityGeneration == expectedIdentityGeneration, durableGeneration == expectedIdentityGeneration else { throw AuthorityError.identityChanged }
+    let bindingMatches = current.binding.map {
+      !$0.suspended && Data($0.accountID.utf8) == Data(value.accountID.utf8)
+        && Data($0.cloudSpaceID.utf8) == Data(value.cloudSpaceID.utf8) && $0.activationEpoch == value.activationEpoch
+    } == true
+    let retainedMatches = current.deletions.contains { saga in
+      guard saga.intent.operation == .deleteAccount, let original = saga.originalScope else { return false }
+      return Data(saga.accountID.utf8) == Data(original.accountID.utf8) && saga.activationEpoch == original.activationEpoch
+        && Data(original.accountID.utf8) == Data(value.accountID.utf8) && Data(original.cloudSpaceID.utf8) == Data(value.cloudSpaceID.utf8)
+        && Data(original.zoneID.utf8) == Data(value.zoneID.utf8) && original.activationEpoch == value.activationEpoch
+    }
+    guard bindingMatches || retainedMatches else { throw AuthorityError.identityChanged }
+    scope = value
+  }
+  func setCloudScope(_ value: CloudScope) { scope = value; generation = UUID(); cloudSaved = nil; backendStatus = nil; cloudIssue = nil }
   public func stop() { stopped = true; generation = UUID(); cloudSaved = nil; backendStatus = nil; analyticsEnabled = nil }
 }

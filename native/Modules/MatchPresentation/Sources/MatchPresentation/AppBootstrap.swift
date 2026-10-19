@@ -124,6 +124,14 @@ private actor DebugFailureRepository: SessionRepository {
   }
 }
 public extension AppBootstrap {
+  @MainActor static func accountContext(repository: SQLiteSessionRepository, session: MatchSession, recording: RecordingModel, account: AccountStatusModel, lifecycle: LifecycleStatusModel, close: @escaping @MainActor () async -> Void) async throws -> AccountAppContext {
+    let identity = await repository.syncRepositoryIdentity()
+    guard account.repository === repository, lifecycle.repository === repository,
+          let originalSession = recording.session as? MatchSession, originalSession === session,
+          await session.syncRepositoryIdentity() == identity,
+          await recording.repository.syncRepositoryIdentity() == identity else { throw AuthorityError.identityChanged }
+    return AccountAppContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, close: close)
+  }
   @MainActor static func accountContext(rootDirectory: URL? = nil) throws -> AccountAppContext {
     let c = try composition(rootDirectory: rootDirectory)
     return AccountAppContext(repository: c.repository, session: c.session, recording: c.model, account: AccountStatusModel(repository: c.repository), lifecycle: LifecycleStatusModel(repository: c.repository), close: { try? await c.repository.close() })

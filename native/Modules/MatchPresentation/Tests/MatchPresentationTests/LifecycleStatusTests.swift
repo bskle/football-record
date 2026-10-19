@@ -119,3 +119,88 @@ private actor LifecycleReadGate: CloudLedger {
   func confirmUpload(_ evidence: DevelopmentCloudSaveEvidence) async throws { try await base.confirmUpload(evidence) }
   func saveEvidence(scope: CloudScope) async throws -> [DevelopmentCloudSaveEvidence] { try await base.saveEvidence(scope: scope) }
 }
+
+
+extension LifecycleStatusTests {
+  func testCheckedScopeProjectsCurrentBindingWithoutAdmittingIdentityAndClearsOldProof() async throws {
+    let (repo,binding) = try await scopeRepository("scope-current")
+    let ledger = try SQLiteCloudLedger(url:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".sqlite"))
+    let first = try CloudScope(accountID:binding.accountID,cloudSpaceID:binding.cloudSpaceID,zoneID:"first",activationEpoch:1)
+    let second = try CloudScope(accountID:binding.accountID,cloudSpaceID:binding.cloudSpaceID,zoneID:"second",activationEpoch:1)
+    try await ledger.recordScopeIssue(scope:first,issue:.quotaExceeded,at:Date(),nextAttemptAt:nil)
+    try await ledger.recordScopeIssue(scope:second,issue:.networkUnavailable,at:Date(),nextAttemptAt:nil)
+    let model = LifecycleStatusModel(repository:repo,ledger:ledger), account = AccountStatusModel(repository:repo,development:true,action:{ _ in })
+    try await model.projectCloudScope(first,expectedIdentityGeneration:0); await model.refresh()
+    XCTAssertEqual(model.cloudIssue,.quotaExceeded)
+    try await model.projectCloudScope(second,expectedIdentityGeneration:0)
+    XCTAssertNil(model.cloudIssue); XCTAssertNil(model.cloudSaved); XCTAssertNil(model.backendStatus)
+    await model.refresh(); XCTAssertEqual(model.cloudIssue,.networkUnavailable)
+    await account.refresh(); XCTAssertFalse(account.canEnterRecording); XCTAssertEqual(account.phase,.suspended)
+    try await repo.close(); try await ledger.close()
+  }
+  func testCheckedScopeRejectsOtherIdentityAndRequiresExactRetainedDeletionScopeWhenSuspended() async throws {
+    let (repo,b) = try await scopeRepository("scope-retained")
+    let original = try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"zone-é",activationEpoch:1)
+    let model = LifecycleStatusModel(repository:repo)
+    for wrong in [try CloudScope(accountID:"other",cloudSpaceID:b.cloudSpaceID,zoneID:"z",activationEpoch:1),try CloudScope(accountID:b.accountID,cloudSpaceID:"other",zoneID:"z",activationEpoch:1),try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"z",activationEpoch:2)] {
+      do { try await model.projectCloudScope(wrong,expectedIdentityGeneration:0); XCTFail("foreign scope") } catch { XCTAssertEqual(error as? AuthorityError,.identityChanged) }
+    }
+    let capability = AuthorityWire.base64URL(Data(repeating:7,count:32))
+    var fields = AuthorityFields(); fields.reauthenticationID = "reauth"; fields.recoveryCapabilityDigest = AuthorityWire.hash(Data(capability.utf8))
+    let saga = try DeletionSagaV4(intent:ControlIntentV1(requestID:"original-saga",operation:.deleteAccount,fields:fields),accountID:b.accountID,activationEpoch:1,recoveryCapability:capability,cloudChoice:.keep,localChoice:.keep,healthChoice:.keep,healthConfirmed:false,originalScope:CloudScopeV1(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:original.zoneID,activationEpoch:1))
+    try await repo.createDeletionSagaV4(saga); try await repo.suspendAccountV4()
+    do { try await model.projectCloudScope(original,expectedIdentityGeneration:0); XCTFail("old generation") } catch { XCTAssertEqual(error as? AuthorityError,.identityChanged) }
+    try await model.projectCloudScope(original,expectedIdentityGeneration:1)
+    let aliases = [try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"zone-e\u{301}",activationEpoch:1),try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"other-zone",activationEpoch:1)]
+    for alias in aliases {
+      do { try await model.projectCloudScope(alias,expectedIdentityGeneration:1); XCTFail("retained zone raw bytes") } catch { XCTAssertEqual(error as? AuthorityError,.identityChanged) }
+    }
+    await model.refresh(); XCTAssertEqual(model.deletions.map(\.intent.requestID),[saga.intent.requestID])
+    try await repo.close()
+    let empty = try accountRepository("scope-empty"), missing = LifecycleStatusModel(repository:empty)
+    do { try await missing.projectCloudScope(original,expectedIdentityGeneration:0); XCTFail("no original scope") } catch { XCTAssertEqual(error as? AuthorityError,.identityChanged) }; try await empty.close()
+  }
+  func testOldScopeProjectionCannotOverwriteNewScopeOrReturnAfterStopRefreshOrDurableChange() async throws {
+    for change in ["newer","stop","refresh","durable"] {
+      let (repo,b) = try await scopeRepository("scope-late")
+      let ledger = try SQLiteCloudLedger(url:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".sqlite"))
+      let first = try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"old",activationEpoch:1), second = try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"new",activationEpoch:1)
+      try await ledger.recordScopeIssue(scope:first,issue:.quotaExceeded,at:Date(),nextAttemptAt:nil)
+      try await ledger.recordScopeIssue(scope:second,issue:.networkUnavailable,at:Date(),nextAttemptAt:nil)
+      let model = LifecycleStatusModel(repository:repo,ledger:ledger,action:{ _ in })
+      let entered = expectation(description:"old projection read"), gate = LifecycleActionGate(entered)
+      let old = Task { () -> Bool in
+        do { try await model.projectCloudScope(first,expectedIdentityGeneration:0,read:{ let value = try await PresentationScopeRead.read(repo); await gate.hold(); return value }); return true }
+        catch { return false }
+      }
+      await fulfillment(of:[entered],timeout:2)
+      switch change {
+      case "newer":try await model.projectCloudScope(second,expectedIdentityGeneration:0); await model.refresh()
+      case "stop":model.stop()
+      case "refresh":await model.refresh()
+      default:try await repo.suspendAccountV4()
+      }
+      await gate.release(); let accepted = await old.value; XCTAssertFalse(accepted,change)
+      if change == "newer" { await model.refresh(); XCTAssertEqual(model.cloudIssue,.networkUnavailable) }
+      if change == "stop" { XCTAssertFalse(model.available) }
+      try await repo.close(); try await ledger.close()
+    }
+  }
+  func testCheckedScopeChangeInvalidatesAlreadyAwaitingOldCloudRefresh() async throws {
+    let (repo,b) = try await scopeRepository("scope-refresh")
+    let real = try SQLiteCloudLedger(url:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".sqlite"))
+    let first = try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"old",activationEpoch:1), second = try CloudScope(accountID:b.accountID,cloudSpaceID:b.cloudSpaceID,zoneID:"new",activationEpoch:1)
+    try await real.recordScopeIssue(scope:first,issue:.quotaExceeded,at:Date(),nextAttemptAt:nil); try await real.recordScopeIssue(scope:second,issue:.networkUnavailable,at:Date(),nextAttemptAt:nil)
+    let entered = expectation(description:"old ledger read"), ledger = LifecycleReadGate(real,entered), model = LifecycleStatusModel(repository:repo,ledger:ledger)
+    try await model.projectCloudScope(first,expectedIdentityGeneration:0); await ledger.holdNext()
+    let old = Task { await model.refresh() }; await fulfillment(of:[entered],timeout:2)
+    try await model.projectCloudScope(second,expectedIdentityGeneration:0); XCTAssertNil(model.cloudIssue)
+    await model.refresh(); await ledger.release(); await old.value
+    XCTAssertEqual(model.cloudIssue,.networkUnavailable)
+    try await repo.close(); try await real.close()
+  }
+  private func scopeRepository(_ namespace:String) async throws -> (SQLiteSessionRepository,AccountBindingV4) {
+    let repo = try accountRepository(namespace), binding = try AccountBindingV4(accountID:"account",cloudSpaceID:"cloud",deviceID:"phone",activationEpoch:1,role:.phone,environment:.development)
+    try await repo.bindAccountV4(binding); return (repo,binding)
+  }
+}
