@@ -16,3 +16,5 @@ Proceed with026-1 identity/vault-beforeDB and026-3 retainedcatalog independently
 Freeze completecatalog, stablechildIDs and028selection beforeStoreerase; retain saga/capability/controlinodes/parents. Allrequiredleaves plusStore are neededforlocalcompletion; unknown/mixed/corrupt data remainsblocked. Quiesce businessworkers withoutclosing theoriginalcontrolfacade. Finalclose isseparate.
 
 No026whole source/final acceptance yet. Candidate remainsheld; author doesnot promote long-livedbranches,push orarchive. M4 isnotcomplete.
+
+First source checkpoint: `11a0d4d8c8bd6841a2f8edc29abc9bcc076cd12b` (fixture predecessor `6c606a7905abea4c260749a8ad83a2a3f23d6291`). Original identity/vault-before-DB, retained namespace ownership and actual inode isolation have local host coverage: one complete AppIntegration run 28/0, 233 input bytes unchanged and matched to committed source. Root+m2 review is pending; this is not whole-task acceptance. Continue independent 026-3 catalog work; do not assume future 038 interfaces. See validation for the preserved RED layers and limits.
