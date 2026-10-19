@@ -148,7 +148,7 @@ struct M4CatalogState: Codable {
 /// composition barrier must quiesce actors before reserve/seal/resume admission.
 final class M4OwnedDataCatalog: @unchecked Sendable {
   private let journal: M4CatalogJournal
-  init(directory: URL) throws { journal = try M4CatalogJournal(directory: directory) }
+  init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil) throws { journal = try M4CatalogJournal(directory: directory, crashHook: crashHook) }
   func record(_ capsule: M4OwnershipCapsule) throws {
     try capsule.verifyCurrent()
     try journal.transaction { state in

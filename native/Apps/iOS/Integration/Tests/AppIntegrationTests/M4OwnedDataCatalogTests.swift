@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 import CloudSync
 import DeviceSync
@@ -138,6 +139,130 @@ final class M4OwnedDataCatalogTests: XCTestCase {
     XCTAssertEqual(try catalog.index().entries.count, admitted)
     for file in controls { XCTAssertEqual(try Data(contentsOf: file), Data([7])) }
     try catalog.close()
+  }
+  private func crashChild(root: URL, method: String, phase: String) throws {
+    let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    process.arguments = ["xctest", "-XCTest", "AppIntegrationTests.M4OwnedDataCatalogTests/" + method, Bundle(for: Self.self).bundleURL.path]
+    var environment = ProcessInfo.processInfo.environment
+    environment["M4_CATALOG_CHILD_ROOT"] = root.path; environment["M4_CATALOG_CHILD_PHASE"] = phase
+    process.environment = environment
+    let log = root.appendingPathComponent("child-" + phase + ".log")
+    XCTAssertTrue(FileManager.default.createFile(atPath: log.path, contents: nil))
+    let handle = try FileHandle(forWritingTo: log); defer { try? handle.close() }
+    process.standardOutput = handle; process.standardError = handle
+    try process.run(); process.waitUntilExit()
+    print("catalog-crash-phase=\(phase) termination=\(process.terminationReason) status=\(process.terminationStatus)")
+    XCTAssertEqual(process.terminationReason, .exit); XCTAssertEqual(process.terminationStatus, 86, "child must terminate at the real durable crash window")
+  }
+  private func fixtureBytes(_ root: URL) throws -> [String: Data] {
+    let paths = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey])!
+    var bytes: [String: Data] = [:]
+    for case let file as URL in paths where try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true { bytes[file.path] = try Data(contentsOf: file) }
+    return bytes
+  }
+  func testFsyncedPendingCrashBeforeRenameRecoversExactFrozenParent() throws {
+    let env = ProcessInfo.processInfo.environment
+    if let path = env["M4_CATALOG_CHILD_ROOT"], let phase = env["M4_CATALOG_CHILD_PHASE"] {
+      let catalog = try M4OwnedDataCatalog(directory: URL(fileURLWithPath: path).appendingPathComponent("retained"), crashHook: { point in if point.rawValue == phase { _exit(86) } })
+      _ = try catalog.reserve(requestID: "crash-original-parent", scope: scope(), choices: choices, health: .empty)
+      XCTFail("durable pending crash hook did not run"); return
+    }
+    for phase in ["afterPendingSync", "afterPublicationRename", "afterPublicationSync"] {
+      let dir = try root(), control = dir.appendingPathComponent("retained")
+      let catalog = try M4OwnedDataCatalog(directory: control); try catalog.record(capsule(dir, "ledger")); try catalog.close()
+      let owner = try Data(contentsOf: control.appendingPathComponent("catalog.owner"))
+      try crashChild(root: dir, method: #function.replacingOccurrences(of: "()", with: ""), phase: phase)
+      let reopened = try M4OwnedDataCatalog(directory: control)
+      let plan = try reopened.reserve(requestID: "crash-original-parent", scope: scope(), choices: choices, health: .empty)
+      XCTAssertEqual(plan.requestID, "crash-original-parent"); XCTAssertEqual(plan.entries.count, 1)
+      XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("catalog.owner")), owner)
+      let sealed = try reopened.seal(requestID: plan.requestID, parentIntentDigest: String(repeating: "e", count: 64))
+      try reopened.close(); let again = try M4OwnedDataCatalog(directory: control)
+      XCTAssertEqual(try again.plan(requestID: plan.requestID)?.canonicalBytes(), try sealed.canonicalBytes()); try again.close()
+    }
+  }
+  func testFreshInitializationCrashWindowsPublishOnlyCompleteDirectory() throws {
+    let env = ProcessInfo.processInfo.environment
+    if let path = env["M4_CATALOG_CHILD_ROOT"], let phase = env["M4_CATALOG_CHILD_PHASE"] {
+      let catalog = try M4OwnedDataCatalog(directory: URL(fileURLWithPath: path).appendingPathComponent("retained"), crashHook: { point in if point.rawValue == phase { _exit(86) } })
+      try catalog.close(); XCTFail("initialization crash hook did not run"); return
+    }
+    for phase in ["afterStageCreate", "afterSlotSync", "afterOwnerCreateBeforeWrite", "afterOwnerSync", "beforeInitializationPublish", "afterInitializationRename", "afterInitializationPublish"] {
+      let dir = try root(), control = dir.appendingPathComponent("retained")
+      try crashChild(root: dir, method: #function.replacingOccurrences(of: "()", with: ""), phase: phase)
+      let before = try fixtureBytes(dir)
+      let reopened = try M4OwnedDataCatalog(directory: control); XCTAssertTrue(try reopened.index().entries.isEmpty)
+      for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes, "unpublished candidates must be preserved") }
+      try reopened.close(); let next = try M4OwnedDataCatalog(directory: control); XCTAssertTrue(try next.index().entries.isEmpty); try next.close()
+    }
+  }
+  func testDeepOwnerBudgetRejectsBeforePermanentPublication() throws {
+    var deep = try root()
+    for _ in 0..<300 { deep.appendPathComponent("d") }
+    try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+    let control = deep.appendingPathComponent("retained")
+    XCTAssertLessThan(control.path.utf8.count, 1024)
+    XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control)) { error in XCTAssertEqual(error as? M4CatalogError, .budgetExceeded) }
+    print("deep-control-path-bytes=\(control.path.utf8.count) owner-bytes=\((try? Data(contentsOf: control.appendingPathComponent("catalog.owner")))?.count ?? 0)")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: control.appendingPathComponent("catalog.owner").path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: control.appendingPathComponent("catalog.json").path))
+  }
+  func testPublishedJournalLossNeverCreatesAnEmptyReplacement() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    try catalog.record(capsule(dir, "ledger")); try catalog.close()
+    let owner = try Data(contentsOf: control.appendingPathComponent("catalog.owner"))
+    try FileManager.default.removeItem(at: control.appendingPathComponent("catalog.json"))
+    XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control))
+    XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("catalog.owner")), owner)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: control.appendingPathComponent("catalog.json").path))
+  }
+  func testMalformedPublicationAndReplacedSlotPreserveEveryByte() throws {
+    for mutation in ["wrong-before-hash", "foreign-pending-inode", "replaced-slot"] {
+      let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+      try catalog.record(capsule(dir, "ledger")); try catalog.close()
+      try crashChild(root: dir, method: "testFsyncedPendingCrashBeforeRenameRecoversExactFrozenParent", phase: "afterPendingSync")
+      let names = try FileManager.default.contentsOfDirectory(atPath: control.path)
+      let pendingName = try XCTUnwrap(names.first(where: { $0.hasPrefix("catalog.pending.") }))
+      let pending = control.appendingPathComponent(pendingName), data = try Data(contentsOf: pending)
+      if mutation == "wrong-before-hash" {
+        var parts = pendingName.split(separator: ".").map(String.init); parts[4] = String(repeating: "0", count: 64)
+        try FileManager.default.moveItem(at: pending, to: control.appendingPathComponent(parts.joined(separator: ".")))
+      } else if mutation == "foreign-pending-inode" {
+        try FileManager.default.removeItem(at: pending); try data.write(to: pending)
+      } else {
+        var pendingStat = stat(); XCTAssertEqual(lstat(pending.path, &pendingStat), 0)
+        let slot = try XCTUnwrap(["catalog.slot0", "catalog.slot1"].first(where: { name in
+          var value = stat(); return lstat(control.appendingPathComponent(name).path, &value) == 0 && value.st_ino == pendingStat.st_ino && value.st_dev == pendingStat.st_dev
+        }))
+        let url = control.appendingPathComponent(slot); try FileManager.default.moveItem(at: url, to: dir.appendingPathComponent("original-slot")); try data.write(to: url)
+      }
+      let before = try fixtureBytes(dir)
+      XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control))
+      XCTAssertEqual(Set(try fixtureBytes(dir).keys), Set(before.keys))
+      for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    }
+  }
+  func testConcurrentUnknownFinalDirectoryCannotBeOverwritten() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), bytes = Data([0, 77, 255])
+    XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control, crashHook: { point in
+      if point == .beforeInitializationPublish {
+        try? FileManager.default.createDirectory(at: control, withIntermediateDirectories: false)
+        try? bytes.write(to: control.appendingPathComponent("foreign.bin"))
+      }
+    }))
+    XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("foreign.bin")), bytes)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: control.appendingPathComponent("catalog.owner").path))
+    XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control))
+    XCTAssertEqual(try Data(contentsOf: control.appendingPathComponent("foreign.bin")), bytes)
+  }
+  func testLegacyOwnerOnlyIsPreservedWithoutInitializationFallback() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained")
+    try FileManager.default.createDirectory(at: control, withIntermediateDirectories: true)
+    let owner = control.appendingPathComponent("catalog.owner")
+    let bytes = Data("{\"version\":1,\"unrecoverableLegacyOwner\":true}".utf8); try bytes.write(to: owner)
+    XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control)) { error in XCTAssertEqual(error as? M4CatalogError, .unsupportedSchema) }
+    XCTAssertEqual(try Data(contentsOf: owner), bytes)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: control.path), ["catalog.owner"])
   }
   func testRetainedControlsCannotLiveInsideBusinessRoot() throws {
     let dir = try root(), control = dir.appendingPathComponent("business/owned/retained")
