@@ -40,7 +40,8 @@ private struct M4CatalogPublication {
 /// publication of one slot; only the other proven slot may be overwritten.
 /// Every transaction is bounded and synchronous, with no await under either lock.
 final class M4CatalogJournal: @unchecked Sendable {
-  private static let ownerLimit = 65_536, journalLimit = 1_048_576
+  static let maximumJournalBytes = 1_048_576
+  private static let ownerLimit = 65_536, journalLimit = maximumJournalBytes
   private static let fixedNames: Set<String> = ["catalog.owner", "catalog.slot0", "catalog.slot1", "catalog.json"]
   private let lock = NSLock()
   private let directory, ownerURL, journalURL: URL

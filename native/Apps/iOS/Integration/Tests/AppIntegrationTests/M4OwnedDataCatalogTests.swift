@@ -331,6 +331,60 @@ final class M4OwnedDataCatalogTests: XCTestCase {
     XCTAssertEqual(Set(try fixtureBytes(control).keys), Set(before.keys))
     for (path, expected) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), expected) }
   }
+  func testRevisionBudgetBlocksErasureBeforeAnyProgressCounterCanOverflow() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    let ledger = try capsule(dir, "ledger"); try catalog.record(ledger)
+    _ = try catalog.reserve(requestID: "counter-parent", scope: scope(), choices: choices, health: .empty)
+    let plan = try catalog.seal(requestID: "counter-parent", parentIntentDigest: String(repeating: "c", count: 64)); try catalog.close()
+    let journal = control.appendingPathComponent("catalog.json")
+    var state = try JSONDecoder().decode(M4CatalogState.self, from: Data(contentsOf: journal)); state.revision = UInt64.max - 1
+    let file = try FileHandle(forWritingTo: journal); try file.truncate(atOffset: 0); try file.write(contentsOf: M4CatalogIO.encode(state)); try file.synchronize(); try file.close()
+    let before = try fixtureBytes(control), reopened = try M4OwnedDataCatalog(directory: control)
+    XCTAssertThrowsError(try reopened.preflightErasure(requestID: plan.requestID)) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertThrowsError(try reopened.reserve(requestID: plan.requestID, scope: plan.scope, choices: plan.choices, health: plan.health)) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertThrowsError(try reopened.seal(requestID: plan.requestID, parentIntentDigest: try XCTUnwrap(plan.parentIntentDigest))) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    try reopened.close()
+  }
+  func testEvidenceCapacityIsReservedBeforePublishingDeletionPlan() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    for number in 0..<48 { try catalog.record(capsule(dir, "capacity-" + String(format: "%03d", number))) }
+    let before = try fixtureBytes(control)
+    XCTAssertThrowsError(try catalog.reserve(requestID: "capacity-parent", scope: scope(), choices: choices, health: .empty)) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertNil(try catalog.plan(requestID: "capacity-parent"))
+    for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    XCTAssertEqual(try catalog.index().entries.count, 48)
+    try catalog.close()
+  }
+  func testLegacyPlanWithoutCompletionSpaceIsPreservedAndBlockedBeforeErasure() throws {
+    let external = ProcessInfo.processInfo.environment["M4_EVIDENCE_BUDGET_ROOT"], mode = ProcessInfo.processInfo.environment["M4_EVIDENCE_BUDGET_MODE"]
+    let dir = try external.map { URL(fileURLWithPath: $0) } ?? root(), control = dir.appendingPathComponent("retained")
+    if mode != "read" {
+      try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+      let catalog = try M4OwnedDataCatalog(directory: control)
+      for number in 0..<48 { try catalog.record(capsule(dir, "legacy-capacity-" + String(format: "%03d", number))) }
+      if mode == "capture" {
+        _ = try catalog.reserve(requestID: "legacy-capacity-parent", scope: scope(), choices: choices, health: .empty)
+        _ = try catalog.seal(requestID: "legacy-capacity-parent", parentIntentDigest: String(repeating: "f", count: 64)); try catalog.close()
+      } else {
+        // Ordinary coverage constructs the prior valid canonical state. A separate
+        // capture/read run preserves the actual preflight-less writer's directory.
+        let index = try catalog.index(); try catalog.close()
+        let journal = control.appendingPathComponent("catalog.json")
+        var state = try JSONDecoder().decode(M4CatalogState.self, from: Data(contentsOf: journal))
+        var plan = M4FrozenDeletionPlan(version: 1, requestID: "legacy-capacity-parent", scope: try scope(), choices: choices, health: .empty, catalogRevision: index.revision, catalogDigest: try index.digest(), entries: index.entries, parentIntentDigest: String(repeating: "f", count: 64), children: [])
+        plan.children = try plan.expectedChildren(try XCTUnwrap(plan.parentIntentDigest)); state.plans = [plan]; state.revision += 2
+        let file = try FileHandle(forWritingTo: journal); try file.truncate(atOffset: 0); try file.write(contentsOf: M4CatalogIO.encode(state)); try file.synchronize(); try file.close()
+      }
+    }
+    let before = try fixtureBytes(control), reopened = try M4OwnedDataCatalog(directory: control)
+    let original = try XCTUnwrap(reopened.plan(requestID: "legacy-capacity-parent"))
+    XCTAssertThrowsError(try reopened.preflightErasure(requestID: original.requestID)) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertThrowsError(try reopened.reserve(requestID: original.requestID, scope: original.scope, choices: original.choices, health: original.health)) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertEqual(try reopened.plan(requestID: original.requestID)?.canonicalBytes(), try original.canonicalBytes())
+    for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    try reopened.close()
+  }
   @MainActor func testTypedReceiptsFromActualLocalLeavesKeepIndependentDigests() async throws {
     let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control), scope = try scope()
     let ledgerURL = dir.appendingPathComponent("cloud-ledger.sqlite"), ledger = try SQLiteCloudLedger(url: ledgerURL)

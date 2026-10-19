@@ -96,6 +96,7 @@ struct M4StagingCompletionEvidence: Codable, Sendable {
   init(_ receipt: CloudStagingEraseReceipt) { requestID = receipt.requestID; requestDigest = receipt.requestDigest; stableZoneKey = receipt.stableZoneKey }
 }
 struct M4RetainedLeafReceipt: Codable, Sendable {
+  static let maximumPayloadBytes = 16_384
   let version: Int
   let parentID, parentIntentDigest, catalogDigest: String
   let componentID, capsuleDigest, childRequestID: String
@@ -103,14 +104,14 @@ struct M4RetainedLeafReceipt: Codable, Sendable {
   let leafDigest, receiptDigest: String
   let canonicalReceipt: Data
   static func capture(plan: M4FrozenDeletionPlan, componentID: String, leafDigest: String, canonicalReceipt: Data) throws -> Self {
-    guard canonicalReceipt.count <= 16_384 else { throw M4CatalogError.budgetExceeded }
+    guard canonicalReceipt.count <= Self.maximumPayloadBytes else { throw M4CatalogError.budgetExceeded }
     guard let parent = plan.parentIntentDigest, let entry = plan.entries.first(where: { M4CatalogIO.raw($0.capsule.componentID, componentID) }), let child = plan.children.first(where: { M4CatalogIO.raw($0.componentID, componentID) }) else { throw M4CatalogError.intentMismatch }
     let value = Self(version: 1, parentID: plan.requestID, parentIntentDigest: parent, catalogDigest: plan.catalogDigest, componentID: componentID, capsuleDigest: try entry.capsule.digest(), childRequestID: child.requestID, kind: entry.capsule.kind, leafDigest: leafDigest, receiptDigest: M4CatalogIO.hash(canonicalReceipt), canonicalReceipt: canonicalReceipt)
     try value.validate(plan: plan); return value
   }
   func validate(plan: M4FrozenDeletionPlan) throws {
     guard version == 1 else { throw M4CatalogError.unsupportedSchema }
-    guard canonicalReceipt.count <= 16_384 else { throw M4CatalogError.budgetExceeded }
+    guard canonicalReceipt.count <= Self.maximumPayloadBytes else { throw M4CatalogError.budgetExceeded }
     guard plan.choices.local == .delete, M4CatalogIO.raw(parentID, plan.requestID), parentIntentDigest == plan.parentIntentDigest, catalogDigest == plan.catalogDigest,
           let entry = plan.entries.first(where: { M4CatalogIO.raw($0.capsule.componentID, componentID) }),
           let child = plan.children.first(where: { M4CatalogIO.raw($0.componentID, componentID) }),
@@ -198,6 +199,35 @@ struct M4CatalogState: Codable {
   var membershipRevision: UInt64? = nil
   var ownedRevision: UInt64 { membershipRevision ?? plans.first?.catalogRevision ?? revision }
   static let empty = Self(version: 1, revision: 0, entries: [], plans: [])
+  /// Encode a private, deliberately invalid upper-bound shape only to measure
+  /// space. It is never validated as a receipt, returned, or written. Every
+  /// actual payload stays at most maximumPayloadBytes; hashes have fixed width.
+  /// Reserve additional bounded room for raw/prepared refs and the full seal.
+  func requireCompletionCapacity() throws {
+    guard let original = plans.first else { throw M4CatalogError.intentMismatch }
+    let missingReceipts = original.choices.local == .delete ? original.entries.count - (original.receipts?.count ?? 0) : 0
+    // One write per first receipt and sixteen bounded preparation/seal steps.
+    // Idempotent retries do not advance the journal. Refuse before any erase if
+    // even these control writes could exhaust the retained revision counter.
+    guard revision <= UInt64.max - UInt64(missingReceipts + 16) else { throw M4CatalogError.budgetExceeded }
+    var bound = self, plan = original
+    bound.revision = UInt64.max; bound.membershipRevision = UInt64.max
+    let digest = plan.parentIntentDigest ?? String(repeating: "f", count: 64)
+    plan.parentIntentDigest = digest; plan.children = try plan.expectedChildren(digest)
+    if plan.choices.local == .delete {
+      let payload = Data(repeating: 0, count: M4RetainedLeafReceipt.maximumPayloadBytes)
+      plan.receipts = try plan.entries.map { entry in
+        let capsule = entry.capsule
+        guard let child = plan.children.first(where: { M4CatalogIO.raw($0.componentID, capsule.componentID) }) else { throw M4CatalogError.intentMismatch }
+        return M4RetainedLeafReceipt(version: 1, parentID: plan.requestID, parentIntentDigest: digest, catalogDigest: plan.catalogDigest,
+          componentID: capsule.componentID, capsuleDigest: try capsule.digest(), childRequestID: child.requestID, kind: capsule.kind,
+          leafDigest: String(repeating: "f", count: 64), receiptDigest: String(repeating: "f", count: 64), canonicalReceipt: payload)
+      }
+    }
+    bound.plans = [plan]
+    let reservedControlBytes = 16_384
+    guard try M4CatalogIO.encode(bound).count <= M4CatalogJournal.maximumJournalBytes - reservedControlBytes else { throw M4CatalogError.budgetExceeded }
+  }
   func validate() throws {
     guard version == 1 else { throw M4CatalogError.unsupportedSchema }
     guard ownedRevision <= revision else { throw M4CatalogError.intentMismatch }
@@ -256,12 +286,12 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
         guard M4CatalogIO.raw(prior.requestID, requestID), prior.scope == scope,
               try M4CatalogIO.encode(prior.choices) == M4CatalogIO.encode(choices),
               try M4CatalogIO.encode(prior.health) == M4CatalogIO.encode(health) else { throw M4CatalogError.intentMismatch }
-        return
+        try state.requireCompletionCapacity(); return
       }
       let index = M4CatalogIndex(revision: state.ownedRevision, entries: state.entries)
       let plan = try M4FrozenDeletionPlan(version: 1, requestID: requestID, scope: scope, choices: choices, health: health,
         catalogRevision: index.revision, catalogDigest: index.digest(), entries: index.entries, parentIntentDigest: nil, children: [])
-      try plan.validate(); state.membershipRevision = state.ownedRevision; state.plans.append(plan)
+      try plan.validate(); state.membershipRevision = state.ownedRevision; state.plans.append(plan); try state.requireCompletionCapacity()
     }
     return try requiredPlan(requestID)
   }
@@ -269,6 +299,7 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
     guard M4CatalogIO.isDigest(parentIntentDigest) else { throw M4CatalogError.intentMismatch }
     try journal.transaction { state in
       guard let index = state.plans.firstIndex(where: { M4CatalogIO.raw($0.requestID, requestID) }) else { throw M4CatalogError.intentMismatch }
+      try state.requireCompletionCapacity()
       if let prior = state.plans[index].parentIntentDigest {
         guard prior == parentIntentDigest else { throw M4CatalogError.intentMismatch }; return
       }
@@ -281,9 +312,18 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
   private func requiredPlan(_ requestID: String) throws -> M4FrozenDeletionPlan {
     guard let plan = try plan(requestID: requestID) else { throw M4CatalogError.intentMismatch }; return plan
   }
+  /// Capacity only, not proof that identity/quiescence/full-seal admission passed.
+  /// Every aggregate erase entrance must call this before invoking any mutating leaf.
+  func preflightErasure(requestID: String) throws {
+    try journal.transaction { state in
+      guard state.plans.contains(where: { M4CatalogIO.raw($0.requestID, requestID) }) else { throw M4CatalogError.intentMismatch }
+      try state.requireCompletionCapacity()
+    }
+  }
   func saveReceipt(_ receipt: M4RetainedLeafReceipt) throws {
     try journal.transaction { state in
       guard let index = state.plans.firstIndex(where: { M4CatalogIO.raw($0.requestID, receipt.parentID) }) else { throw M4CatalogError.intentMismatch }
+      try state.requireCompletionCapacity()
       try receipt.validate(plan: state.plans[index])
       if let prior = state.plans[index].receipts?.first(where: { M4CatalogIO.raw($0.componentID, receipt.componentID) }) {
         guard try M4CatalogIO.encode(prior) == M4CatalogIO.encode(receipt) else { throw M4CatalogError.intentMismatch }; return
