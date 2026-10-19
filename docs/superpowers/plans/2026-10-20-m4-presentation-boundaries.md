@@ -36,9 +36,9 @@ Files: AccountStatusModel.swift and AccountStatusTests.swift.
 
 Files: LifecycleStatusModel.swift and LifecycleStatusTests.swift.
 
-- [ ] Test current binding scope, exact retained deletion scope after suspend, wrong raw account/space/epoch/zone, stale identity generation and old delayed result versus new scope/stop. Verify cloud proof clears and account admission stays closed.
-- [ ] Run focused tests to establish red. Add `public func projectCloudScope(_ scope: CloudScope, expectedIdentityGeneration: Int64) async throws` plus internal delayed-read overload shared with public checks. Read current binding/deletion sagas between identity generation checks. Current binding contains account/space/epoch (no zone); retained saga requires exact originalScope including zone. No new authentication or permission result is created.
-- [ ] Only the current local token can install scope. Clear old cloudSaved/backendStatus/cloudIssue proof; invalidate old read generation so prior refresh/action cannot overwrite current scope. Keep raw internal025 setCloudScope compatible.
+- [x] Test current binding scope, exact retained deletion scope after suspend, wrong raw account/space/epoch/zone, stale identity generation and old delayed result versus new scope/stop. Verify cloud proof clears and account admission stays closed.
+- [x] Run focused tests to establish red. Add `public func projectCloudScope(_ scope: CloudScope, expectedIdentityGeneration: Int64) async throws` plus internal delayed-read overload shared with public checks. Read current binding/deletion sagas between identity generation checks. Non-suspended current binding contains account/space/epoch (no zone); suspended projection requires an exact retained saga originalScope including zone. No new authentication or permission result is created.
+- [x] Only the current local token can install scope. Clear old cloudSaved/backendStatus/cloudIssue proof; invalidate old read generation so prior refresh/action cannot overwrite current scope. Keep raw internal025 setCloudScope compatible.
 - [ ] Run focused and complete MatchPresentation tests, commit source checkpoint, then fresh minimum iOS17/watch10 simulator product builds. All supported package/dependency source inputs get before/after hashes; no App/scheme/device execution.
 
 ## Final verification and handoff
