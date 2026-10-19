@@ -1,0 +1,13 @@
+# NATIVE-008 — WorkoutCapture
+
+- Author: `/root/m2_workout_capture`; reviewers `/root` and `/root/m2_review`.
+- Base: `0676727a6c1b1d25d37e39fbd2f68edbfc8c7905`; integration target `dev` after NATIVE-010 device gate.
+- Branch: `feat/workout-capture`; tree: `/Users/liam/.codex/worktrees/workout-capture/20260830_足球记录`.
+- Attachment: `01a14293-82af-73c2-a9a6-0f98404f6eee`; createdAt `1792118325`; initial HEAD verified equal base, clean.
+- Sole writable scope: `native/Modules/WorkoutCapture/**`, [child plan](../../superpowers/plans/2026-10-16-workout-capture.md), this card and [validation](../validation/NATIVE-008.md).
+- Depends on completed and verified NATIVE-007. NATIVE-009 is an independent concurrent writer; no engineering files touched here.
+- Source candidate: `754b28b18f44261b0bcd7869b098380a50a8100b`; production gateway source remains `6706092`, with subsequent task commits adding cross-layer tests only. Original base `0676727a6c1b1d25d37e39fbd2f68edbfc8c7905`; root synchronized verified NATIVE-011 dependency `f26d60de81fb5afa90e2f16044a09675d71ee834` by ordinary task merge `85c2cd72e2810b82a354a0a63237712cd50a28fc`.
+- State: compiled and automatically verified; source754b28b passed independent root quality and m2_review specification reviews. Final document head is delivered for handoff review; relevant real-device acceptance remains pending. Latest source has 40 module XCTest + 144 synchronized core XCTest (44 Core,64 Store,36 Session), all zero failures; explicit iOS17/watch10 simulator SDK and actual device SDK builds all passed unsigned without warnings. No App/device runtime acceptance or task merge is asserted.
+- Full terminal closure now verified with actual AppleWorkoutGateway + fake driver + real reopened SQLite: finish already needsReconciliation, then original start absence COMMIT and finish cancellation complete while authorization remains suspended; pending empties and phase is notRecorded, zero create/save/segment, endedPendingSync and held backend lock remain. Late permission creates nothing. Negative-observation failure/lost response and cancellation lost response preserve receipts; a new gateway without persisted absence stays unknown.
+- Evidence: [validation](../validation/NATIVE-008.md), source-inputs-754b28b.json (69 source/dependency/contract inputs), 63 persisted evidence files outside the tree. Historical 6706092 body’s six red assertions is corrected to four per the preserved log without rewriting history.
+- Lifecycle: retain this branch for reviewed NATIVE-010 temporary integration. Root later verifies all targets and archives before safe `git branch -d`; author never moves permanent branches.

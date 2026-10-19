@@ -1,6 +1,6 @@
 # AccountKit：账号、权威控制与同 Session 云桥
 
-NATIVE-023 的本机软件实现。生产 App Bootstrap 仍为 Unavailable；本模块没有接入真实 AuthenticationServices、Keychain、CloudKit、HealthKit 或 WatchConnectivity SDK。实际 Node loopback、文件 SQLite、受控云回读和原 Session 的证据见 [023验证卡](../../../docs/native/validation/NATIVE-023.md)。
+NATIVE-023 的本机软件与 NATIVE-024 默认关闭的 SDK 候选。生产 App Bootstrap 仍为 Unavailable；024 提供 AuthenticationServices、Keychain 与 CloudKit 身份代码，真实 SDK / 账号执行未验，HealthKit 与 WatchConnectivity 仍由后续装配。实际 Node loopback、文件 SQLite、受控云回读和原 Session 的证据见 [023验证卡](../../../docs/native/validation/NATIVE-023.md)。
 
 ## 一个 facade 与装配
 
@@ -73,3 +73,17 @@ Phone与Watch回包都固定请求入口generation；身份变化、错误key/ep
 | 026 | 真账号/签名/SDK/设备验收，WC原HTTP控制relay与独立peer transport，所有ownedledger/staging删除聚合，当前身份变化停止旧actors，保留云恢复时显式新namespace；不得自动unfence旧文件。 |
 
 `URLSessionAuthorityRelay.shutdown()` 取消网络；`SQLiteSessionRepository.close()` / `SQLiteCloudLedger.close()` 在调用方停止自己的任务后关闭文件。Session 不拥有独立后台轮询服务；UI取消订阅/调用方任务后再关闭资源。真实Apple、iCloud、Keychain、CloudKit、HealthKit、物理Workout/WC与签名安装仍未验，最低SDK编译不能替代这些门槛。
+
+## 024 SDK 候选：设备 Keychain（未装配）
+
+`KeychainDeviceCredentialStore(configuration:executionEnabled:)` 默认拒绝执行；显式开启时才访问 Security。配置固定 service/account、当前设备 installationID、businessDatabaseURL、独立 controlDirectory 和可选 accessGroup。第一次创建须在真实业务 DB 不存在时进行；已有 DB 缺原控制 item/key 拒绝，不重生身份。Phone/Watch 各自生成并保存本机 Ed25519 key，不能复制私钥或把算法换成 P256。
+
+同一 item 内版本化保存 key/installation、单调 generation 与可选 credential；只有 `replace(_:expectedIdentityGeneration:)`。所有同 item 实例共享同步 gate，读/核 generation/整 item update 没有 await；更高 generation 同次写清 credential，相同 generation 保留已安装新 credential，旧 generation 拒绝。控制 item 不在登出时 delete/re-add。私有 Keychain 编码不为 `DeviceCredential` 添加 Codable，不进入业务 SQLite/日志。
+
+025 配置须让同 item 所有进程共用稳定 controlDirectory；若使用共享 accessGroup，目录须在同一受控 App Group 供 exclusive owner lease 使用，不能让另进程选择另一目录绕过所有权。跨实例 gate 与文件 lease 共同串行化实际 Keychain read/update；不把 SecItemUpdate 称任意 CAS。item 使用非 synchronizable、AfterFirstUnlockThisDeviceOnly；实际锁屏/重启/Keychain 可用性待026。
+
+owner lease 的 controlDirectory、锁文件必须归025/026的保留控制 catalog，位于业务/asset staging 删除集合之外。活跃 owner 期间不得 unlink 或替换锁文件，也不能递归删除其父目录；否则文件名相同的新 inode 会破坏 flock 的排他含义。
+
+`AppleSignInAdapter(executionEnabled:)` 默认只返回 disabled。iOS/macOS 显式SDK构造还须提供当前scene的MainActor presentationAnchor；watchOS不暴露该不可用类型。nonce是已由服务算好的lowerhex SHA256，原值传入、不二次hash。请求state/operation与identityGeneration绑定；取消/身份推进使旧值回调失效并retire SDK操作，watchOS只逻辑取消，不能调用不可用cancel API。授权token/code只transient，不收集姓名/email，不由adapter自动admit。调用方负责取消其持有任务。
+
+`CloudIdentityProvider(containerIdentifier:environment:executionEnabled:)` 默认disabled；显式开启后只由指定CKContainer的available当前user record计算opaque cloudSpaceID，不保存原user。snapshot的 `zoneID(accountID:)` 对账号和cloudSpace稳定，epoch不参与。身份通知只触发调用方停止旧actor和显式重新核验，不能把通知当认证。025不得从默认container/普通URL/Debugfactory推导生产身份；真实两账号/容器留026。
