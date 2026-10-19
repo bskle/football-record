@@ -149,3 +149,40 @@ Factory/admission source `b860c117520deb5368ff451eae4fc080f0a7a263` uses origina
 | `composition-factory-checkpoint.log` | `3b0c767c9e392c5422b4326b65a1a1d97068e2184dc747e900404866ed4fb0f3` |
 
 The earlier 90/0 belongs to the RecoveryInbox-only source layer. It is not relabeled as a full pass of the later factory checkpoint containing the two known retirement regressions.
+
+## Bounded first receipts and independent membership revision
+
+Source `4be4a5c00bd4cfc3e476be750493a51c0422ef1b` is new catalog work after the separately reviewed 21ada crash-recovery repair. `membershipRevision` is separate from the publication journal revision. Capsule additions/retirements advance membership; reserve/seal/receipt progress does not change its revision/digest or original 037 binding. Optional absent fields preserve the prior canonical v1 shape. A prior reserved/sealed journal uses its original plan catalogRevision and exact full capsule membership evidence, rather than treating a later journal revision as new membership. Mismatching plan/member evidence is refused.
+
+The retained receipt stores the original parent intent digest, catalog digest, capsule digest, stable child ID, kind, leaf digest and exact canonical first bytes. Each payload is at most 16 KiB, with the unchanged complete journal limit of 1 MiB and 256 capsules; complete replacement bytes are checked before publication. A transaction accepts an identical first response idempotently and rejects a changed response or foreign binding. Known typed payload validation distinguishes Store control evidence, 033's own request digest, 024's parent request digest and 037's original request/intent digest. These records alone never establish actual current zero or whole-device erasure.
+
+- Existing API membership RED: **one test / four failures**. Reserve/seal previously moved the reported index revision and digest without changing members.
+- Actual old-writer RED: **one test / two failures**, using unmodified 21ada catalog writer bytes. The original owner/slots/catalog directory remains at `/private/tmp/football-record-NATIVE026-build/legacy-membership-original`; it has journal revision 3 and original plan membership revision 1. New-reader verification passed **two selected tests / zero failures**, preserving every original fixture file byte, device and inode. Exact writer source matches 21ada's Git bytes. Ordinary-suite coverage also constructs the prior v1 canonical shape explicitly; it is distinct from the actual old-writer run.
+- Receipt runtime RED: **three tests / 14 failures** at the no-op persistence boundary, then green after minimal implementation. The first RED attempt had 15 failures because the unsealed fixture used XCTUnwrap before the expected throwing boundary; that log is retained and not substituted for the corrected runtime RED.
+- One new selected run: **six tests / zero failures**. It includes immutable first-response replay after lost commit response, before-commit refusal and payload budget, changed parent/catalog/capsule/child/leaf refusal, independent membership, old format reopening, and typed receipts from actual local ledger/staging/DeviceSync APIs. The DeviceSync default returns pending/unresolved; an explicit controlled protocol drain is separate from any WC/native driver claim. 033's returned digest is retained, not recomputed or replaced by its parent digest.
+- One complete AppIntegration run: **102 tests / three failures**, with **25 catalog tests / zero failures**. The only failing cases remain the two registered NATIVE-042 retirement regressions (three assertions). All business assertions remain active. **337 inputs** were unchanged before/after, and match the committed source byte for byte. Nineteen real child exits have status 86. Host diagnostics retain 119 CoreData/Contacts lines. `git diff --check` passed.
+
+Actual old writer capture, before catalog implementation changed:
+
+```sh
+M4_LEGACY_CATALOG_ROOT=/private/tmp/football-record-NATIVE026-build/legacy-membership-original M4_LEGACY_CATALOG_MODE=capture swift test --package-path native/Apps/iOS/Integration --scratch-path /private/tmp/football-record-NATIVE026-build/AppIntegrationHost --filter '^AppIntegrationTests.M4OwnedDataCatalogTests/testLegacyReservedPlan'
+```
+
+The new reader uses the same command with `M4_LEGACY_CATALOG_MODE=read`; it does not recreate/copy/rebind that fixture. The before/after manifests retain absolute paths, SHA256, device and inode. Normal whole-suite runs use a separate fresh controlled fixture, preserving this original evidence.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `catalog-membership-red.log` | `0314fd368a011d270072eb84c432b5d5e99465218d6739c0b3f5a4436a2785b8` |
+| `catalog-legacy-original-writer-red.log` | `8c35a8b2288cf1f23379a67fbaf75cbae3a9f76677794011ffeba9863a3aba5a` |
+| `catalog-membership-old-writer.swift` | `c1d5a3b4e55c6b2ce40ec77a4b93a1ab813c7126e4028638685c32683442b842` |
+| `catalog-legacy-original-before.json` | `5b0c6e00bcf54e72fb959b6ebebcecbec82653ff1fc74c0f53ff6378ace8593a` |
+| `catalog-legacy-original-after.json` | `0d3881d5f12b33bff2b721464f30744a7a95f1a95df923f692b3fdc8c2d3dea9` |
+| `catalog-receipt-red-2.log` | `eeaa767c49779cd07addbffe46ebfce726cfc65760857cf97708b7459c828cb3` |
+| `catalog-receipt-red-source.swift` | `837e5ab5a0de456915fa8c0d1772a3030bf99e063a204845393d5b3047795645` |
+| `catalog-receipt-red-tests.swift` | `11628a30e919c0382ce00fd6bb4a8406c6884690fb0b73ef03adce83eecb70ac` |
+| `catalog-receipt-checkpoint-inputs.json` | `c4f96a70cc4db433384e611628633ba3dc9f55db767d36dd48793018b57057dc` |
+| `catalog-receipt-checkpoint-post.json` | `80be208180807bace9835e297f66fd39c41a13e3e83511367b1adc4d20055ef5` |
+| `catalog-receipt-six-green.log` | `68c73897f3e879216e9085ca713ca693ce94595a07892c4ddaacf342aa1cfe7b` |
+| `catalog-receipt-full-host.log` | `657d63a0972d0fba36b97f0d5687306af96983e74388008fe3944422c6f0e719` |
+
+Fullseal, aggregate current-zero replay, Store erasure/control retention, every resume entry and App integration remain pending. This checkpoint is not a complete full-suite PASS, real SDK/device/account validation, power-loss proof or whole-026 acceptance.
