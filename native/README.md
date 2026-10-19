@@ -4,7 +4,7 @@
 
 当前任务已将共享会话接入原生记录页面：Watch 为比赛/实时状态与四快记两页，iPhone 为比赛、历史、生涯、设置四标签，历史仅展示已保存事实骨架。赛后纠错、分析与路线页面留 M5。App、共享页面及测试均显式注册到实际 target，不能以文件存在替代编译。
 
-正式入口的开赛服务在 M4 前明确不可用，保留原开赛意图供重试，不会偷偷取得模拟许可。Debug 版本可从设置或 Watch 入口新建独立开发演练，持续显示“开发模拟锁”。每个演练使用实际独立 namespace、数据库和设备 identity；这不是真实开赛锁、真实运动采集或跨设备 E2E。结束先进入 `endedPendingSync`，不会因本机保存而冒充完整完成、释放锁或立即另开一场。
+当前026临时集成候选保留025的账号入口、明确重载与独立Debug演练；默认生产许可、采集、传输和可信配对仍 unavailable，不实例化018旧 `AppAssembly` 的真实SDK资源。018/037的采集、设备同步和恢复桥作为已审依赖保留，须经026同门装配后才接入；本次依赖合并不表示整包已通过。结束先进入 `endedPendingSync`，只有当前完整云证明与原正常释放均确认才可 completed；peer ACK不能替代任何一项。
 
 ## 验证与证据
 
@@ -14,7 +14,7 @@
 NATIVE_BUILD_ROOT=/tmp/football-record-check scripts/native/verify.sh
 ```
 
-脚本依次执行 MatchCore / MatchStore / MatchSession 共享包宿主 XCTest、Store 与 Session 的双端最低部署 SDK 编译、MatchPresentation 宿主 XCTest及双端最低部署 SDK 编译、两个 App 无签名 Simulator 构建。任一步失败返回非零。产物和日志可用独立 `NATIVE_BUILD_ROOT` 指定；Desktop FinderInfo 影响代码签名时使用 `/tmp`，不清除源码 xattr 或他人产物。
+脚本组合现有 Node reference authority、Core共享包、CloudSync、AccountKit、MatchPresentation及候选 WorkoutCapture / DeviceSync / AppIntegration 的宿主回归与最低SDK构建，并编译两个无签名Simulator App。026后续按实际依赖继续补齐矩阵；脚本命令清单不代表本轮已执行或通过。任一步失败返回非零。产物和日志可用独立 `NATIVE_BUILD_ROOT` 指定；Desktop FinderInfo 影响代码签名时使用 `/tmp`，不清除源码 xattr 或他人产物。
 
 实际 UI 验收需使用已安装 runtime 的模拟器 UDID，脚本不创建、重配或删除模拟器：
 
@@ -23,9 +23,9 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh Watch WAT
 NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHONE_SIMULATOR_UDID
 ```
 
-两端 scheme 均含 XCUI target。UI 脚本实际 launch/tap/swipe、核对按钮 frame/已保存显示变化并导出 xcresult 截图与可访问性树。`ONLY_ACTIVE_ARCH=YES` 限定实际测试设备架构。测试启动参数仅在 Debug 生效，dataset、失败注入和固定测试 clock 不进入生产入口。纯宿主或 SDK 构建不替代实际 UI 启动，更不证明 HealthKit、GPS、后台或触觉手感。
+两端 scheme 均含 XCUI target。UI 脚本实际 launch/tap/swipe、核对按钮 frame/已保存显示变化并导出 xcresult 截图与可访问性树。`ONLY_ACTIVE_ARCH=YES`限定测试设备架构。当前保留025的无签名UI命令、Mac监督fixture、绝对时间与实际安装容器/私有pin核验。历史010的HKSource/ad-hoc结果保留原输入层次；旧 `NativeIntegrationUITests` 属018设备候选，尚未完成本次账号装配复验，不能当当前入口验收。测试启动参数仅在 Debug 生效，dataset、失败注入和固定测试 clock 不进入生产入口。纯宿主或 SDK 构建不替代实际 UI 启动，更不证明 HealthKit、GPS、后台或触觉手感。
 
-基础已集成事实及证据见 [NATIVE-006](../docs/native/validation/NATIVE-006.md)、[NATIVE-007](../docs/native/validation/NATIVE-007.md) 与 [NATIVE-011](../docs/native/validation/NATIVE-011.md)。009最终组合源码 `117c4c42744a96fd5fa695671accee7a843d08df` 已通过158项宿主测试、六项最低部署SDK编译、双App构建及Watch/iPhone各七项实际XCUI；准确输入、runtime、截图及最低系统/真机限制见 [NATIVE-009](../docs/native/validation/NATIVE-009.md)。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试仅是当时证据，不是当前测试数或原生 UI 验收。
+基础已集成事实及证据见 [NATIVE-006](../docs/native/validation/NATIVE-006.md)、[NATIVE-007](../docs/native/validation/NATIVE-007.md) 与 [NATIVE-011](../docs/native/validation/NATIVE-011.md)。009基线的158宿主、六SDK、双App及两端七XCUI证据见[NATIVE-009](../docs/native/validation/NATIVE-009.md)。010候选4a90组合已执行204宿主、十SDK、双sim/双generic实际设备SDK无签名构建；最终同步source834包含已审012修复；本轮Presentation22+Integration6，未变化184项沿用旧源，累计覆盖212而非单轮全跑。两端App及实际交互的精确来源见[NATIVE-010](../docs/native/validation/NATIVE-010.md)。历史 M1 组合 `f94c915f5d2486ba1ff54471de9de98bc7fdc4d0` 的 70 项测试仅是当时证据，不是当前测试数或原生 UI 验收。
 
 ## 事实、事务和展示边界
 
@@ -37,11 +37,11 @@ NATIVE_UI_BUILD_ROOT=/tmp/football-record-ui scripts/native/ui-test.sh iOS IPHON
 
 没有可信 peer 时业务变更保留 `unrouted` outbox，不制造手机目标或把传输成功当持久 ACK。旧包/ACK API保留完整性校验；实际同账号认证、配对、传输和可信 ACK 来源仍待 M3。checksum 仅校验完整性。生产许可、账号、后台唯一锁与云仍待 M4。
 
-`MatchPresentation` 直接消费已集成 `MatchSession`，只投影事实并处理保存/重试/只读状态。心率、GPS、距离和速度走独立可选内存展示通道，缺失显示“未记录/不支持”，真实零值与未知分开，不进入业务 snapshot/outbox。009 默认装配 `UnavailableWorkoutGateway`；bootstrap 保留 gateway 注入接缝供010在 Apps/工程层装配已审适配器，许可与 namespace 隔离固定，不接受外部伪许可。
+`MatchPresentation` 直接消费已集成 `MatchSession`，只投影事实并处理保存/重试/只读状态。心率、GPS、距离和速度走独立可选内存展示通道，缺失显示“未记录/不支持”，真实零值与未知分开，不进入业务 snapshot/outbox。010仅在App层接入已审WorkoutCapture：每App生命周期同一个metrics channel/factory/gateway，其历史设备候选使用真实gateway；当前026默认入口不创建该factory/gateway，生产许可仍由Bootstrap固定unavailable。UI-only装配始终Unavailable，不静默降级真实模式。恢复信号在初始化/命令busy期间排队，并回到同model/MatchSession；没有直接驱动第二次Workout开始。许可及namespace隔离固定，不接受外部伪许可。
 
 ## 签名与真实采集
 
-`com.example.footballrecord` 与 `com.example.footballrecord.watchapp` 是本地开发占位 Bundle ID，尚不代表注册。009 未加 HealthKit/真实定位 entitlement，也未连接008。010将准备设备集成候选；真实采集相关实现须经对应真机验收后才进入 `dev`，不以 SDK/模拟器或 fake 代替真实授权、锁屏保存、GPS、后台和恢复证据。
+`com.example.footballrecord` 与 `com.example.footballrecord.watchapp` 是本地开发占位 Bundle ID，尚不代表注册。018依赖保留010原有HealthKit entitlement文件和Info用途/后台声明原bytes；本轮 `project.pbxproj` 不绑定这些entitlement，也不启用HealthKit/BackgroundModes capability，不表示权限已获或真实SDK已配置。无签名generic实际设备构建可运行`scripts/native/verify-device-candidate.sh`，产物Info及配置entitlement检查不等于真实签名entitlement/profile或安装。本026候选在真实门槛前不入dev/release/main；依赖文件存在不代表签名或能力验收。操作步骤、固定真实数据集、结束仍held不能另开场、免费普通能力支持与全部物理pending矩阵见[设备准备](../docs/native/device-setup.md)。
 
 用户连接配对 iPhone / Watch 后，在 Xcode 登录本人 Apple 账号、为两个 target 配置所属 Team、App ID 和签名，设备解锁并信任 Mac，按系统提示开启开发者模式。正式 Bundle ID 同时更新两 target 与 `WKCompanionAppBundleIdentifier`。账号授权、Team 归属和真机签名由用户条件决定，无签名构建不证明设备安装或付费分发资格。
 
@@ -75,3 +75,10 @@ NATIVE_M4_UI=1 NATIVE_M4_PHONE_DEVICE=IPHONE_SIMULATOR_UDID \
 Watch 演练由 Mac 私有邮箱转交到真正的 Phone AccountKit 登记服务，非真实 WC。开发账号、配对、模拟锁与开发云标识持续可见。文件云保存回读只证明已登记演练范围；Health 删除 unavailable、未登记其他安装 / ledger / staging 不算全设备完成。正常结束先保留 endedPendingSync，当前完整云 proof 与后台原正常释放均确认后才 completed；peer ACK 不替代任一 proof。异常释放显示不完整，后续新开赛仍经 Session 的 fresh authority 检查。
 
 配置字段及真实门槛见 [M4 capability handoff](Configuration/M4-capability-handoff.md)。最低 iOS17 / watchOS10 仍仅编译；实际 Apple / CloudKit / 签名、本人设备、后台、真人 VoiceOver 和触觉由026继续验收。
+
+
+### M3 临时设备整包（历史候选源码保留）
+
+NATIVE-018 在独立候选树将真实 WorkoutCapture / DeviceSync 与同一个 SQLiteSessionRepository、MatchSession、MatchSyncService 装配。每次切换环境都先停止旧 model、事件监听和指标监听，再关闭 facade、释放旧上下文；不缓存已 shutdown 的 model。设备验收安全扫描复用活动 facade；离线扫描只短开短关。
+
+018历史Debug真实设备入口显示本机持久 UUID；当前账号入口尚未启用该旧路径。双方显式配对配置使用 `--sync-peer-config` JSON，详见 `docs/native/device-setup.md`。未配置、身份或配置变化、WC 配对失效均停止可信传输，本机合法记录仍可保存。传输初始化异常保留原文件并降级 unavailable。生产 trust/start permit 仍 unavailable；开发 account/pair/epoch 不是 Apple 登录。Simulator 上的受控驱动和协议演练不证明真实 WatchConnectivity；真实签名、授权和户外采集继续延期。

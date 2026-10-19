@@ -31,6 +31,11 @@ F8910E5900BB8CC750ED2B01 = {isa = PBXBuildFile; fileRef = B4E05AE1A004EA2595CC43
 109723A50F147E72E3B34529 = {isa = PBXBuildFile; fileRef = DAD3FAE78E8213C5776C3FCC; };
 4B4AE74F2B7EE92443940262 = {isa = PBXBuildFile; fileRef = 283ABA4C2796AF2B7089F836; };
 69E8BD1193E31604244514D6 = {isa = PBXBuildFile; fileRef = 283ABA4C2796AF2B7089F836; };
+305D235223C20E18E45646FF = {isa = PBXBuildFile; productRef = B9B423C70AFEFC5F54CA5A9F; };
+280841D3627AE84F1047FD7A = {isa = PBXBuildFile; productRef = 8950DC32A775CABD2D31F2B5; };
+CB3841AE64F0AD0F44D3C458 = {isa = PBXBuildFile; fileRef = 67AA2F9C1D5FE2920C84A554; };
+9C8CD921958816A60C14D2B2 = {isa = PBXBuildFile; fileRef = DA065883C5ECBCC254CBB64C; };
+F768126B0E75F5C403B118D3 = {isa = PBXBuildFile; fileRef = DA065883C5ECBCC254CBB64C; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -78,11 +83,15 @@ F4A982DD4018FB97CEBF2EC5 = {isa = PBXFileReference; lastKnownFileType = sourceco
 B4E05AE1A004EA2595CC4390 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Apps/iOS/Features/Account/DeleteAccountView.swift"; sourceTree = "<group>"; };
 DAD3FAE78E8213C5776C3FCC = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Apps/Watch/Features/Account/WatchAccountView.swift"; sourceTree = "<group>"; };
 283ABA4C2796AF2B7089F836 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "UITests/NativeAccountLifecycleUITests.swift"; sourceTree = "<group>"; };
+B9BF9B07C7D674BA747D905E = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FootballRecord.entitlements; sourceTree = "<group>"; };
+68AB06B0F36FE0AB507E9ECE = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FootballRecord.entitlements; sourceTree = "<group>"; };
+67AA2F9C1D5FE2920C84A554 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkoutRecoveryDelegate.swift; sourceTree = "<group>"; };
+DA065883C5ECBCC254CBB64C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeIntegrationUITests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-        D00000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (710170000000000000000001, 4F84499E8D754EB4903D520F, EA90A8BEE107413A8816CE5D, 4F888403B1A1438A891272B5, B00000000000000000000003 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
-        D00000000000000000000005 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (710170000000000000000002, AE0A13407429459A9C986D81, 4538337D78994DCB8AE3EAC8, 57959E9694FF4BC6B29FA722, B00000000000000000000004 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (710170000000000000000001, 305D235223C20E18E45646FF, 4F84499E8D754EB4903D520F, EA90A8BEE107413A8816CE5D, 4F888403B1A1438A891272B5, B00000000000000000000003 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000005 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (710170000000000000000002, 280841D3627AE84F1047FD7A, AE0A13407429459A9C986D81, 4538337D78994DCB8AE3EAC8, 57959E9694FF4BC6B29FA722, B00000000000000000000004 /* MatchCore in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
 33C11198F6964F21B7182913 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 0286F0ADAA4848389C2D36F7 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
@@ -95,10 +104,10 @@ DAD3FAE78E8213C5776C3FCC = {isa = PBXFileReference; lastKnownFileType = sourceco
         };
         A00000000000000000000003 /* Products */ = {isa = PBXGroup; children = (B3DB6393ADC04592B36C6B9A, 2583ACF1290243C2A009C4A4, F00000000000000000000010 /* FootballRecord.app */, F00000000000000000000011 /* FootballRecordWatch.app */, ); name = Products; sourceTree = "<group>"; };
         A00000000000000000000004 /* iOS App */ = {isa = PBXGroup; children = (F00000000000000000000001 /* FootballRecordApp.swift */, ); name = "iOS App"; path = Apps/iOS/App; sourceTree = "<group>"; };
-        A00000000000000000000005 /* Watch App */ = {isa = PBXGroup; children = (F00000000000000000000002 /* FootballRecordWatchApp.swift */, ); name = "Watch App"; path = Apps/Watch/App; sourceTree = "<group>"; };
-        A00000000000000000000006 /* iOS Configuration */ = {isa = PBXGroup; children = (F00000000000000000000003 /* Info.plist */, F00000000000000000000020 /* InfoPlist.strings */, ); name = "iOS Configuration"; path = Configuration/iOS; sourceTree = "<group>"; };
-        A00000000000000000000007 /* Watch Configuration */ = {isa = PBXGroup; children = (F00000000000000000000004 /* Info.plist */, F00000000000000000000021 /* InfoPlist.strings */, ); name = "Watch Configuration"; path = Configuration/Watch; sourceTree = "<group>"; };
-C69748A4C9DA4706BC8555E1 = {isa = PBXGroup; children = (713AA27D164942F0B699347F, ); path = UITests; sourceTree = "<group>"; };
+        A00000000000000000000005 /* Watch App */ = {isa = PBXGroup; children = (67AA2F9C1D5FE2920C84A554, F00000000000000000000002 /* FootballRecordWatchApp.swift */, ); name = "Watch App"; path = Apps/Watch/App; sourceTree = "<group>"; };
+        A00000000000000000000006 /* iOS Configuration */ = {isa = PBXGroup; children = (B9BF9B07C7D674BA747D905E, F00000000000000000000003 /* Info.plist */, F00000000000000000000020 /* InfoPlist.strings */, ); name = "iOS Configuration"; path = Configuration/iOS; sourceTree = "<group>"; };
+        A00000000000000000000007 /* Watch Configuration */ = {isa = PBXGroup; children = (68AB06B0F36FE0AB507E9ECE, F00000000000000000000004 /* Info.plist */, F00000000000000000000021 /* InfoPlist.strings */, ); name = "Watch Configuration"; path = Configuration/Watch; sourceTree = "<group>"; };
+C69748A4C9DA4706BC8555E1 = {isa = PBXGroup; children = (DA065883C5ECBCC254CBB64C, 713AA27D164942F0B699347F, ); path = UITests; sourceTree = "<group>"; };
 D2270310F0F64E88BF337219 = {isa = PBXGroup; children = (0FE44D4A3B6D4CB2AD9B3554, ); name = "iOS Match"; path = Apps/iOS/Features/Match; sourceTree = "<group>"; };
 66B86CBE363F4BD6A0CF2B0E = {isa = PBXGroup; children = (9F134AB6BBB141DAB70B2D02, ); name = "Watch Match"; path = Apps/Watch/Features/Match; sourceTree = "<group>"; };
 /* End PBXGroup section */
@@ -111,7 +120,7 @@ D2270310F0F64E88BF337219 = {isa = PBXGroup; children = (0FE44D4A3B6D4CB2AD9B3554
             buildRules = ();
             dependencies = (C00000000000000000000002 /* PBXTargetDependency */, );
             name = "FootballRecord-iOS";
-            packageProductDependencies = (710170000000000000000003, E556930350E842BC965015E4, 91F0C158B9C84211875A5994, FF9AC8AEF3A04316A179631C, E00000000000000000000002 /* MatchCore */, );
+            packageProductDependencies = (710170000000000000000003, B9B423C70AFEFC5F54CA5A9F, E556930350E842BC965015E4, 91F0C158B9C84211875A5994, FF9AC8AEF3A04316A179631C, E00000000000000000000002 /* MatchCore */, );
             productName = FootballRecord;
             productReference = F00000000000000000000010 /* FootballRecord.app */;
             productType = "com.apple.product-type.application";
@@ -123,7 +132,7 @@ D2270310F0F64E88BF337219 = {isa = PBXGroup; children = (0FE44D4A3B6D4CB2AD9B3554
             buildRules = ();
             dependencies = ();
             name = "FootballRecord-Watch";
-            packageProductDependencies = (710170000000000000000004, 3A0BA22F6862429EA61BF0D6, 3E0DD92E29AE423C8CF58585, FCCDB1BCA2944608AD7D1562, E00000000000000000000003 /* MatchCore */, );
+            packageProductDependencies = (710170000000000000000004, 8950DC32A775CABD2D31F2B5, 3A0BA22F6862429EA61BF0D6, 3E0DD92E29AE423C8CF58585, FCCDB1BCA2944608AD7D1562, E00000000000000000000003 /* MatchCore */, );
             productName = FootballRecordWatch;
             productReference = F00000000000000000000011 /* FootballRecordWatch.app */;
             productType = "com.apple.product-type.application";
@@ -142,7 +151,7 @@ DB16D69FE75F425282B75785 = {isa = PBXNativeTarget; buildConfigurationList = 66AA
             hasScannedForEncodings = 0;
             knownRegions = (en, "zh-Hans", );
             mainGroup = A00000000000000000000002;
-            packageReferences = (40947FC041B04BA2A35B83AB, E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */, );
+            packageReferences = (1572C2605C02D51F43FB5729, 40947FC041B04BA2A35B83AB, E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */, );
             productRefGroup = A00000000000000000000003 /* Products */;
             projectDirPath = "";
             projectRoot = "";
@@ -159,9 +168,9 @@ DB16D69FE75F425282B75785 = {isa = PBXNativeTarget; buildConfigurationList = 66AA
 
 /* Begin PBXSourcesBuildPhase section */
         D00000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F8910E5900BB8CC750ED2B01, 4B434978226B9248552E6447, B5C8A6644A05DED3BEB1A740, 87161F5AC6C44FD0B296CA76, B00000000000000000000001 /* FootballRecordApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
-        D00000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (109723A50F147E72E3B34529, 08BE6DEF0991450B95B136CF, B00000000000000000000002 /* FootballRecordWatchApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
-F8E08F07575C4FA7813A6735 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (4B4AE74F2B7EE92443940262, 72FF9145115341399DDDD3E3, ); runOnlyForDeploymentPostprocessing = 0; };
-E8E50F5CAE5543B9B9271B14 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (69E8BD1193E31604244514D6, F15C76A2DC654886A3A258FD, ); runOnlyForDeploymentPostprocessing = 0; };
+        D00000000000000000000004 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (CB3841AE64F0AD0F44D3C458, 109723A50F147E72E3B34529, 08BE6DEF0991450B95B136CF, B00000000000000000000002 /* FootballRecordWatchApp.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
+F8E08F07575C4FA7813A6735 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (9C8CD921958816A60C14D2B2, 4B4AE74F2B7EE92443940262, 72FF9145115341399DDDD3E3, ); runOnlyForDeploymentPostprocessing = 0; };
+E8E50F5CAE5543B9B9271B14 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F768126B0E75F5C403B118D3, 69E8BD1193E31604244514D6, F15C76A2DC654886A3A258FD, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
@@ -294,6 +303,7 @@ E8E5DC620DF442FDA9E046DD = {isa = XCBuildConfiguration; buildSettings = {CODE_SI
 /* Begin XCLocalSwiftPackageReference section */
         E00000000000000000000001 /* XCLocalSwiftPackageReference Packages/MatchCore */ = {isa = XCLocalSwiftPackageReference; relativePath = Packages/MatchCore; };
 40947FC041B04BA2A35B83AB = {isa = XCLocalSwiftPackageReference; relativePath = Modules/MatchPresentation; };
+1572C2605C02D51F43FB5729 = {isa = XCLocalSwiftPackageReference; relativePath = Apps/iOS/Integration; };
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -307,6 +317,8 @@ FF9AC8AEF3A04316A179631C = {isa = XCSwiftPackageProductDependency; package = 409
 FCCDB1BCA2944608AD7D1562 = {isa = XCSwiftPackageProductDependency; package = 40947FC041B04BA2A35B83AB; productName = MatchPresentation; };
 710170000000000000000003 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchSync; };
 710170000000000000000004 = {isa = XCSwiftPackageProductDependency; package = E00000000000000000000001; productName = MatchSync; };
+B9B423C70AFEFC5F54CA5A9F = {isa = XCSwiftPackageProductDependency; package = 1572C2605C02D51F43FB5729; productName = AppIntegration; };
+8950DC32A775CABD2D31F2B5 = {isa = XCSwiftPackageProductDependency; package = 1572C2605C02D51F43FB5729; productName = AppIntegration; };
 /* End XCSwiftPackageProductDependency section */
     };
     rootObject = A00000000000000000000001 /* Project object */;
