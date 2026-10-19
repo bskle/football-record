@@ -186,3 +186,38 @@ The new reader uses the same command with `M4_LEGACY_CATALOG_MODE=read`; it does
 | `catalog-receipt-full-host.log` | `657d63a0972d0fba36b97f0d5687306af96983e74388008fe3944422c6f0e719` |
 
 Fullseal, aggregate current-zero replay, Store erasure/control retention, every resume entry and App integration remain pending. This checkpoint is not a complete full-suite PASS, real SDK/device/account validation, power-loss proof or whole-026 acceptance.
+
+## Erasure evidence and counter capacity preflight
+
+Source `90340d4ccc35c3f453e4afc1473e251bea1d15a5` follows root's accepted-041 ordinary merge `cd468eef50e73f830359f0f10b088f97f72f2861`. The separate root combination was 132 tests / three failures with 339 unchanged inputs; its dependency log SHA256 is `5bdc5da3a3a758bac65f7bad7c3abfb30bc9572a8106682892eef5348af2c81c`. Neither run is a whole-suite PASS.
+
+The journal limit stays 1 MiB and membership stays at most 256 capsules. A private, never persisted encoding bounds every missing required first receipt at the existing 16 KiB payload maximum, the real frozen identifiers/digests and maximum integer widths. It leaves 16 KiB for bounded Health raw/prepared references and aggregate fullseal metadata. Future schema must remain within that allowance. The encoding is size evidence only: zero-filled placeholder payloads are invalid receipts and are never returned, written or used as completion proof. Each original plan is checked before reserve publication/replay, seal, first receipt mutation and explicit erasure preflight. A remaining-write counter guard permits one write per missing receipt plus 16 bounded preparation/seal steps; idempotent retries do not consume writes. Overflow or insufficient space is a typed, preserving refusal.
+
+- Space RED: **two tests / six failures** against the preflight-less writer. A 48-capsule catalog could publish a deletion plan without enough space for its possible first receipts; an original sealed plan reopened without an erasure barrier. The actual writer generated `/private/tmp/football-record-NATIVE026-build/legacy-preflight-original` before the fix.
+- Space selected GREEN: **four tests / zero failures**, including immutable first receipts and actual typed leaf receipts. The new reader rejected the same original old-writer plan without altering its identifiers or any file byte, device or inode. Normal-suite compatibility fixtures are separate from this actual original writer fixture.
+- Counter RED: **one test / three failures** with a canonical sealed journal at revision UInt64.max-1. The new preflight rejects reserve replay, seal replay and erasure admission before any progress can overflow or business erasure starts. Original bytes remain unchanged.
+- One frozen complete AppIntegration run: **135 tests / three failures**. Catalog **28/0**, accepted retained-artifact **30/0**, Health bridge **25/0** and Watch relay **14/0** are included in that run. Only the two existing NATIVE-042 retirement cases fail (three unchanged business assertions). The run retains 19 real child exits with status86 and took 135 seconds.
+- All **339 conservative inputs** remained unchanged before/after and match the committed source byte for byte. `git diff --check` passed. The aggregate dispatcher and every resume/erasure entrance still need to invoke capacity preflight before mutating any leaf. This checkpoint does not prove fullseal, current zero, Store erasure, quiescence, real SDK/device/account behavior, power-loss durability or whole-026 acceptance.
+
+Actual old-writer capture used the exact preflight-less source and test snapshots below:
+
+```sh
+M4_EVIDENCE_BUDGET_ROOT=/private/tmp/football-record-NATIVE026-build/legacy-preflight-original M4_EVIDENCE_BUDGET_MODE=capture swift test --package-path native/Apps/iOS/Integration --scratch-path /private/tmp/football-record-NATIVE026-build/AppIntegrationHost --filter '^AppIntegrationTests.M4OwnedDataCatalogTests/test(EvidenceCapacity|LegacyPlanWithoutCompletionSpace)'
+```
+
+The fixed reader uses the same original path with `M4_EVIDENCE_BUDGET_MODE=read`. The before/after manifests record zero changed bytes or inodes. No fixture copy, identity replacement, limit increase, truncation or prior plan reset is used.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `catalog-evidence-capacity-red.log` | `5c5dafedebb1f1563591406026b9c221c353420a64e62513f33ce704ad465862` |
+| `catalog-evidence-capacity-red-source.swift` | `400a61f94c7cfb58fc549d8042ba10612c64749bb85e9641b05d7b25372f31ae` |
+| `catalog-evidence-capacity-red-tests.swift` | `e04cab5c1d85e3f4dc7a9147fc2e401ab0bbfc59ae9bd6c4b7bcab06cee35393` |
+| `catalog-evidence-legacy-before.json` | `723305ff415f88741c0436113529d061e82253d4eb9dfc8ff0606cf0b15c56d5` |
+| `catalog-evidence-legacy-after.json` | `0d3881d5f12b33bff2b721464f30744a7a95f1a95df923f692b3fdc8c2d3dea9` |
+| `catalog-evidence-capacity-selected-green.log` | `30cffa8980a8b40024d9c5a80e611670bbc2f74a04c1dbe1278a45f71142a6fa` |
+| `catalog-evidence-counter-red.log` | `e0401e196a647628e862fc2389729af9b1bf33912528b8bb0b6c37c8d9e04a8e` |
+| `catalog-evidence-counter-red-source.swift` | `382d89905b421eaee78019961fe9a9fe818cfebc5e78503e6ad3cf8085e5636b` |
+| `catalog-evidence-checkpoint-inputs.json` | `bade7b3036d5f74cfeedb178e052c1b2b40f9a666546cba0a0834807ebd530c0` |
+| `catalog-evidence-checkpoint-post.json` | `cc8a7cb011eb9691c236935b75de75759d44d799abe54558fb9bf7071bcc2a76` |
+| `catalog-evidence-checkpoint-commit-match.json` | `3e32807697094d3bf0e7b4e33a59ce907ef7e5071d104c23416028d7724f6bb6` |
+| `catalog-evidence-full-host.log` | `afa8235f1aff6da8796f6bb2ff36fd1d4be2526f59ac14bd1104146a1ee2f217` |
