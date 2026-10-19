@@ -148,7 +148,7 @@ struct M4CatalogState: Codable {
 /// composition barrier must quiesce actors before reserve/seal/resume admission.
 final class M4OwnedDataCatalog: @unchecked Sendable {
   private let journal: M4CatalogJournal
-  init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil) throws { journal = try M4CatalogJournal(directory: directory, crashHook: crashHook) }
+  init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws { journal = try M4CatalogJournal(directory: directory, crashHook: crashHook, synchronizationFault: synchronizationFault) }
   func record(_ capsule: M4OwnershipCapsule) throws {
     try capsule.verifyCurrent()
     try journal.transaction { state in
@@ -211,5 +211,6 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
     guard let plan = try plan(requestID: requestID) else { throw M4CatalogError.intentMismatch }; return plan
   }
   func injectNextFailure(_ fault: M4CatalogFault) { journal.injectNextFailure(fault) }
+  func injectNextSynchronizationFailure(_ boundary: M4CatalogSyncBoundary) { journal.injectNextSynchronizationFailure(boundary) }
   func close() throws { try journal.close() }
 }

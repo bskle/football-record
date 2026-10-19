@@ -264,6 +264,73 @@ final class M4OwnedDataCatalogTests: XCTestCase {
     XCTAssertEqual(try Data(contentsOf: owner), bytes)
     XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: control.path), ["catalog.owner"])
   }
+  func testReopenStabilizesDirectoriesBeforeReadAndInactiveSlotReuse() throws {
+    for phase in ["afterInitializationRename", "afterPublicationRename"] {
+      let dir = try root(), control = dir.appendingPathComponent("retained")
+      if phase == "afterPublicationRename" {
+        let initial = try M4OwnedDataCatalog(directory: control); try initial.record(capsule(dir, "ledger")); try initial.close()
+      }
+      try crashChild(root: dir,
+        method: phase == "afterInitializationRename" ? "testFreshInitializationCrashWindowsPublishOnlyCompleteDirectory" : "testFsyncedPendingCrashBeforeRenameRecoversExactFrozenParent", phase: phase)
+      let trace = CatalogSyncTrace()
+      let reopened = try M4OwnedDataCatalog(directory: control, crashHook: { trace.append($0) })
+      XCTAssertEqual(Array(trace.values().prefix(2)), [.afterCatalogDirectorySync, .afterPublicationParentSync], "constructor cannot expose unflushed namespace state")
+      trace.clear(); _ = try reopened.index()
+      XCTAssertEqual(Array(trace.values().prefix(2)), [.afterCatalogDirectorySync, .afterPublicationParentSync])
+      trace.clear()
+      if phase == "afterInitializationRename" { try reopened.record(capsule(dir, "first")) }
+      else { _ = try reopened.seal(requestID: "crash-original-parent", parentIntentDigest: String(repeating: "f", count: 64)) }
+      let events = trace.values()
+      let write = try XCTUnwrap(events.firstIndex(of: .beforeInactiveSlotWrite))
+      XCTAssertGreaterThanOrEqual(write, 2)
+      if write >= 2 { XCTAssertEqual(Array(events[(write - 2)..<write]), [.afterCatalogDirectorySync, .afterPublicationParentSync]) }
+      try reopened.close()
+    }
+  }
+  func testReopenSyncFailurePreservesPublishedStateAndBlocksReadback() throws {
+    for phase in ["afterInitializationRename", "afterPublicationRename"] {
+      for boundary in [M4CatalogSyncBoundary.catalogDirectory, .publicationParent] {
+        let dir = try root(), control = dir.appendingPathComponent("retained")
+        if phase == "afterPublicationRename" {
+          let initial = try M4OwnedDataCatalog(directory: control); try initial.record(capsule(dir, "ledger")); try initial.close()
+        }
+        try crashChild(root: dir,
+          method: phase == "afterInitializationRename" ? "testFreshInitializationCrashWindowsPublishOnlyCompleteDirectory" : "testFsyncedPendingCrashBeforeRenameRecoversExactFrozenParent", phase: phase)
+        let before = try fixtureBytes(dir)
+        XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control, synchronizationFault: boundary)) { error in XCTAssertEqual(error as? M4CatalogError, .storageBlocked) }
+        XCTAssertEqual(Set(try fixtureBytes(dir).keys), Set(before.keys))
+        for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+        let retry = try M4OwnedDataCatalog(directory: control)
+        if phase == "afterPublicationRename" { XCTAssertEqual(try retry.plan(requestID: "crash-original-parent")?.requestID, "crash-original-parent") }
+        try retry.close()
+      }
+    }
+  }
+  func testSameInstanceSyncFailureCannotReuseInactiveSlot() throws {
+    for boundary in [M4CatalogSyncBoundary.catalogDirectory, .publicationParent] {
+      let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+      try catalog.record(capsule(dir, "ledger")); let next = try capsule(dir, "next")
+      let before = try fixtureBytes(control)
+      catalog.injectNextSynchronizationFailure(boundary)
+      XCTAssertThrowsError(try catalog.record(next)) { error in XCTAssertEqual(error as? M4CatalogError, .storageBlocked) }
+      for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+      XCTAssertEqual(try catalog.index().entries.count, 1)
+      try catalog.record(next); XCTAssertEqual(try catalog.index().entries.count, 2); try catalog.close()
+    }
+  }
+  func testCurrentSlotExtraDescriptorIsPreservedAndRejected() throws {
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    try catalog.record(capsule(dir, "ledger")); try catalog.close()
+    let journal = control.appendingPathComponent("catalog.json"), bytes = try Data(contentsOf: journal)
+    let state = try JSONDecoder().decode(M4CatalogState.self, from: bytes)
+    let name = "catalog.pending.\(state.revision - 1).\(state.revision).\(String(repeating: "0", count: 64)).\(M4CatalogIO.hash(bytes))"
+    let extra = control.appendingPathComponent(name)
+    XCTAssertEqual(link(journal.path, extra.path), 0)
+    let before = try fixtureBytes(control)
+    XCTAssertThrowsError(try M4OwnedDataCatalog(directory: control))
+    XCTAssertEqual(Set(try fixtureBytes(control).keys), Set(before.keys))
+    for (path, expected) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), expected) }
+  }
   func testRetainedControlsCannotLiveInsideBusinessRoot() throws {
     let dir = try root(), control = dir.appendingPathComponent("business/owned/retained")
     let catalog = try M4OwnedDataCatalog(directory: control)
@@ -271,4 +338,12 @@ final class M4OwnedDataCatalogTests: XCTestCase {
     XCTAssertThrowsError(try catalog.record(value)); XCTAssertTrue(try catalog.index().entries.isEmpty)
     try catalog.close()
   }
+}
+
+private final class CatalogSyncTrace: @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [M4CatalogCrashPoint] = []
+  func append(_ point: M4CatalogCrashPoint) { lock.withLock { events.append(point) } }
+  func values() -> [M4CatalogCrashPoint] { lock.withLock { events } }
+  func clear() { lock.withLock { events.removeAll() } }
 }

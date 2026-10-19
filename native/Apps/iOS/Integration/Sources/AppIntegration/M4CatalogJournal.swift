@@ -3,9 +3,11 @@ import Darwin
 import CryptoKit
 
 enum M4CatalogFault: Sendable { case beforeCommit, afterCommitResponseLost }
+enum M4CatalogSyncBoundary: String, Sendable { case catalogDirectory, publicationParent }
 enum M4CatalogCrashPoint: String, Sendable {
   case afterStageCreate, afterSlotSync, afterOwnerCreateBeforeWrite, afterOwnerSync, beforeInitializationPublish
   case afterInitializationRename, afterInitializationPublish, afterPendingSync, afterPublicationRename, afterPublicationSync
+  case afterCatalogDirectorySync, afterPublicationParentSync, beforeInactiveSlotWrite
 }
 private struct M4CatalogOwner: Codable {
   let version: Int
@@ -48,7 +50,9 @@ final class M4CatalogJournal: @unchecked Sendable {
   private var fd: Int32 = -1, directoryFD: Int32 = -1
   private var closed = false
   private var fault: M4CatalogFault?
-  init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil) throws {
+  private var synchronizationFault: M4CatalogSyncBoundary?
+  init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws {
+    self.synchronizationFault = synchronizationFault
     guard directory.isFileURL else { throw M4CatalogError.storageBlocked }
     self.directory = M4CatalogIO.canonical(directory); self.crashHook = crashHook
     ownerURL = self.directory.appendingPathComponent("catalog.owner")
@@ -155,6 +159,27 @@ final class M4CatalogJournal: @unchecked Sendable {
       fstat(fd, &held) == 0, UInt64(UInt32(bitPattern: held.st_dev)) == owner.owner.device, held.st_ino == owner.owner.inode,
       fstat(directoryFD, &heldDirectory) == 0, UInt64(UInt32(bitPattern: heldDirectory.st_dev)) == directoryAnchor.device, heldDirectory.st_ino == directoryAnchor.inode else { throw M4CatalogError.identityChanged }
   }
+  /// A prior process may have renamed either the whole catalog or catalog.json
+  /// without reaching directory fsync. Stabilize both namespace levels before
+  /// exposing that read or reusing the old slot. No payload or name is changed.
+  private func stabilizePublication() throws {
+    try validateOwner()
+    let parent = directory.deletingLastPathComponent()
+    guard let expected = owner.ancestors.first(where: { M4CatalogIO.raw($0.path, parent.path) }), expected.directory else { throw M4CatalogError.identityChanged }
+    let parentFD = Darwin.open(parent.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard parentFD >= 0 else { throw M4CatalogError.storageBlocked }; defer { Darwin.close(parentFD) }
+    var held = stat()
+    guard fstat(parentFD, &held) == 0, (held.st_mode & S_IFMT) == S_IFDIR,
+          UInt64(UInt32(bitPattern: held.st_dev)) == expected.device, held.st_ino == expected.inode else { throw M4CatalogError.identityChanged }
+    if synchronizationFault == .catalogDirectory { synchronizationFault = nil; throw M4CatalogError.storageBlocked }
+    guard fsync(directoryFD) == 0 else { throw M4CatalogError.storageBlocked }
+    crashHook?(.afterCatalogDirectorySync)
+    if synchronizationFault == .publicationParent { synchronizationFault = nil; throw M4CatalogError.storageBlocked }
+    guard fsync(parentFD) == 0 else { throw M4CatalogError.storageBlocked }
+    crashHook?(.afterPublicationParentSync)
+    try validateOwner()
+    guard fstat(parentFD, &held) == 0, UInt64(UInt32(bitPattern: held.st_dev)) == expected.device, held.st_ino == expected.inode else { throw M4CatalogError.identityChanged }
+  }
   private func checkedState(_ bytes: Data) throws -> M4CatalogState {
     let state: M4CatalogState = try M4CatalogIO.decode(bytes); try state.validate()
     for entry in state.entries { try entry.capsule.verifyCurrent(); try requireOutside(entry.capsule) }
@@ -172,6 +197,7 @@ final class M4CatalogJournal: @unchecked Sendable {
     guard Self.fixedNames.isSubset(of: names) else { throw M4CatalogError.unknownControl }
     let extra = names.subtracting(Self.fixedNames)
     guard extra.count <= 1 else { throw M4CatalogError.unknownControl }
+    try stabilizePublication()
     let current = try committed()
     if let name = extra.first {
       let publication = try M4CatalogPublication(name: name)
@@ -181,12 +207,14 @@ final class M4CatalogJournal: @unchecked Sendable {
       guard candidate.revision == publication.afterRevision, M4CatalogIO.hash(bytes) == publication.afterDigest else { throw M4CatalogError.intentMismatch }
       if current.state.revision == publication.beforeRevision, M4CatalogIO.hash(current.bytes) == publication.beforeDigest, slot != current.slot {
         try validateOwner()
-        guard renameat(directoryFD, name, directoryFD, "catalog.json") == 0, fsync(directoryFD) == 0 else { throw M4CatalogError.storageBlocked }
-      } else if current.state.revision == publication.afterRevision, M4CatalogIO.hash(current.bytes) == publication.afterDigest, slot == current.slot {
-        // Only this proven extra hard link is removed, never its retained slot.
-        guard unlinkat(directoryFD, name, 0) == 0, fsync(directoryFD) == 0 else { throw M4CatalogError.storageBlocked }
-      } else { throw M4CatalogError.intentMismatch }
-      try validateOwner(); return try committed().state
+        guard renameat(directoryFD, name, directoryFD, "catalog.json") == 0 else { throw M4CatalogError.storageBlocked }
+      } else {
+        // This publisher always renames a different inactive slot. Atomic rename
+        // consumes the descriptor name; an extra link to the current slot has no
+        // supported publisher history, so preserve it and refuse to guess.
+        throw M4CatalogError.intentMismatch
+      }
+      try stabilizePublication(); return try committed().state
     }
     return current.state
   }
@@ -215,7 +243,7 @@ final class M4CatalogJournal: @unchecked Sendable {
     }
   }
   private func writeState(_ state: M4CatalogState) throws {
-    try validateOwner()
+    try stabilizePublication()
     let current = try committed(), bytes = try M4CatalogIO.encode(state)
     guard bytes.count <= Self.journalLimit else { throw M4CatalogError.budgetExceeded }
     let publication = try M4CatalogPublication(before: current.state, beforeBytes: current.bytes, after: state, afterBytes: bytes)
@@ -225,6 +253,7 @@ final class M4CatalogJournal: @unchecked Sendable {
     guard candidateFD >= 0 else { throw M4CatalogError.storageBlocked }; defer { Darwin.close(candidateFD) }
     var held = stat()
     guard fstat(candidateFD, &held) == 0, UInt64(UInt32(bitPattern: held.st_dev)) == owner.slots[slot].device, held.st_ino == owner.slots[slot].inode else { throw M4CatalogError.identityChanged }
+    crashHook?(.beforeInactiveSlotWrite)
     try M4CatalogIO.writeDescriptor(candidateFD, bytes: bytes)
     try validateOwner()
     guard linkat(directoryFD, name, directoryFD, publication.name, 0) == 0, fsync(directoryFD) == 0 else { throw M4CatalogError.storageBlocked }
@@ -241,6 +270,7 @@ final class M4CatalogJournal: @unchecked Sendable {
     if capsule.root.directory { guard !owner.ancestors.contains(where: { M4CatalogIO.sameInode($0, capsule.root) }) else { throw M4CatalogError.identityChanged } }
   }
   func injectNextFailure(_ value: M4CatalogFault) { lock.withLock { fault = value } }
+  func injectNextSynchronizationFailure(_ value: M4CatalogSyncBoundary) { lock.withLock { synchronizationFault = value } }
   func close() throws { lock.withLock { if !closed { closed = true; Darwin.close(fd); Darwin.close(directoryFD); fd = -1; directoryFD = -1 } } }
   deinit { if fd >= 0 { Darwin.close(fd) }; if directoryFD >= 0 { Darwin.close(directoryFD) } }
 }
