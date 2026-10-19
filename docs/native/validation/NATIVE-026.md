@@ -125,3 +125,27 @@ A process can terminate after directory or journal rename and before directory f
 | `catalog-sync-full-green.log` | `b70e404c67aafbeab1779a7e5189cf80c5b88f1f6c07a3cada7bb8f966b0adb2` |
 
 The separate dependency-039 root run was 68/0 with 332 unchanged inputs, not added to these 72. Default/Release provider gates remain unavailable. No real SDK factories, account/device setup, signing, App/UI execution or long-lived branch promotion was performed. The clean handoff pauses author writes for root's accepted-040 ordinary merge; it is not whole-026 source/final acceptance.
+
+## Recovery cancellation/join and scoped account factory
+
+Root's separate accepted-040 dependency run at `ee06ba98a3a3f69020c42b60f25f6802b3d05b1b` was 86/0 with 334 unchanged inputs. RecoveryInbox source `1e522821309c47e77400a61883d44468d521c2f8` then adds an explicit detach boundary: clear old pending signals, cancel and join even a cancellation-insensitive recovery, refuse attachment during an active worker/join, and let concurrent detach callers await the same worker. Existing pre-attachment coalescing and in-flight wake assertions remain. Runtime RED was **four tests / ten failures**; selected GREEN was **four / zero**. The following frozen full AppIntegration run was **90/0**, including those four cases, with **335 inputs unchanged and matching that source commit**. A first green compile attempt failed on inferred `Task<Void?, Never>`; explicit `Task<Void, Never>` corrected the type before runtime verification.
+
+Evidence under the same bootstrap folder: `recovery-inbox-red.log` SHA256 `351e6341840a829f5bb5a794f2ea815de7a6870c0593602f74c6fb842820c510`; `recovery-inbox-related-green.log` SHA256 `be0f31913d8b3fa080d98fa343c59b1bdc227ab9b3aefde88cc9eb97d1f8c1bf`; `recovery-inbox-checkpoint-inputs.json` SHA256 `5a2584776c1c514e6e0774bd7036cb5d36574c86adaa41a519e540eec6c52c08`; post SHA256 `6e971da125e946c4c3018ebbba2106b18a2f4880c8bca8192569931127c101aa`.
+
+Factory/admission source `b860c117520deb5368ff451eae4fc080f0a7a263` uses original prepared identity/vault before the one database facade, `AuthorityStartPermitProvider` rather than a simulation permit, original Session and same-facade services, followed by 038's checked AccountAppContext factory. An injected current dual-identity observation is required explicitly; a retained matching credential does not admit on open. Admission checks raw account/cloud/device/key and environment, compares the current durable binding/generation across awaits, and only then calls existing AccountKit admission and checked presentation projections. Default real services remain unavailable. No App entry or complete action controller is wired by this checkpoint.
+
+- Factory/current-identity initial runtime RED: **four tests / four unexpected unavailable failures** at the minimal boundary.
+- Frozen scoped GREEN: **four tests / zero failures**, covering exact same facade/Session, no credential-only admission, default unavailable identity, fresh matching Apple/cloud observation and a durable generation change during the observation await.
+- The complete six-case composition selection still has **three failures in two retirement tests**. The actual original Session capture probe observes returned generation 3 followed by generation 4 after its suspended gateway returns; old model snapshot/history also remain referenced. The two business assertions stay in the suite. NATIVE-042 owns the upstream permanent retirement/task-drain repair; 026 will connect its exact accepted API afterward. This is an acknowledged upstream block, not a whole-suite PASS.
+- All **337 inputs** remained byte-identical around both selections and match the committed checkpoint. `git diff --check` passed. No real SDK, account/device/signing/App/UI execution or whole-026 acceptance is established.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `composition-factory-red.log` | `6069335d4fb122d840117fb2361c276ee20f70f20f6e559e063956d2f8da7a4d` |
+| `composition-factory-checkpoint-inputs.json` | `3666bb82ba95810e509b527fb2b78fee928b63b9ce6704b17e5e910a0c235444` |
+| `composition-factory-checkpoint-post.json` | `80be208180807bace9835e297f66fd39c41a13e3e83511367b1adc4d20055ef5` |
+| `composition-factory-selected-post.json` | `80be208180807bace9835e297f66fd39c41a13e3e83511367b1adc4d20055ef5` |
+| `composition-factory-frozen-selected-green.log` | `f9706f319fd87de4f1749005b1f2d0d18a68bee0d242b963c7eeb8073dab47bb` |
+| `composition-factory-checkpoint.log` | `3b0c767c9e392c5422b4326b65a1a1d97068e2184dc747e900404866ed4fb0f3` |
+
+The earlier 90/0 belongs to the RecoveryInbox-only source layer. It is not relabeled as a full pass of the later factory checkpoint containing the two known retirement regressions.
