@@ -1,6 +1,6 @@
 # CloudSync（NATIVE-022）
 
-独立 SwiftPM 云传输模块，最低 iOS 17 / watchOS 10。它不直接写 MatchStore，不连接 CloudKit，不生成生产 `VerifiedCloudSave`。生产 App 装配没有变更；未注入业务 bridge 时，sink 明确返回 `awaitingBusinessImport`。
+独立 SwiftPM 云传输模块，最低 iOS 17 / watchOS 10。它不直接写 MatchStore；024 新增默认关闭的 CloudKit SDK 候选，不生成生产 `VerifiedCloudSave`。生产 App 装配没有变更；未注入业务 bridge 时，sink 明确返回 `awaitingBusinessImport`。
 
 ## 数据与持久化
 
@@ -75,3 +75,27 @@ xcrun swift build --package-path native/Modules/CloudSync --target CloudSync --t
 本任务使用文件 SQLite 与受控 driver，覆盖原 bytes、失败重开、双连接 parent CAS、receipt 优先重放、token 过期、tombstone、quota、完整保存约束及账号切换 TOCTOU。确切 SHA、单轮数量和原日志见 022 验证卡及树外 manifest。
 
 024/026 尚须真实 CloudKit private custom zone、CKServerChangeToken archive、CKAsset 上传/回读与回调内复制 staging 文件、真实 quota / accountChanged 及设备/账号验证。022 两个最低 SDK target 编译不能替代这些门槛。该模块未修改工程、App Bootstrap、共享 Core、verify.sh 或既有 canonical 协议。
+
+## 024 owned staging candidate
+
+CloudOwnedStaging(rootURL:controlURL:) owns non-health canonical asset files. Its separate SQLite control file retains admitted scope, monotonic identityGeneration, permanent stable-zone fences and original request/scope receipts; it binds the original root path digest. Call admit only after explicit current cloud and business identity agreement. Callback copying, cancellation, identity fencing and erasure use one shared synchronous gate, with no SDK await inside SQL.
+
+All handles for the same root share an owner. The control DB, its WAL, controlURL.path + ".owner" and rootURL.path + ".owner" are retained control files outside the asset root. The 025/026 catalog must preserve their live inodes and parent directories. Another control DB cannot bypass the same root lease, and a control DB cannot reopen against a different root. close invalidates all old operations; reopening needs explicit admission and a fresh operation.
+
+A valid callback copies bounded bytes and verifies size/SHA256 before returning, then fsyncs its owned file and directory. It never retains a system URL for later Task reading or removes the SDK source. Invalidated callbacks do not read the source or create files. Paths use stableZoneKey and hashes of original UTF8 record/part IDs; every existing directory component rejects symlinks. Manifest metadata is checked against exact canonical bytes, including Unicode byte distinctions.
+
+The public erase request contains original requestID, requestDigest and full scope. Erasure commits its permanent stable-zone fence first, removes files for all epochs of that zone, then commits its minimal receipt. Failures between these steps reopen for the original-scope retry. This receipt proves only this owned root component. The 026 aggregate translates the existing typed LocalTransportDeletionRequest, derives stable child IDs for every owned ledger/staging component, and protects Store saga/capability/028 selection and other accounts. There is no unfence API; retained-cloud recovery uses an explicit new namespace after stopping old actors.
+
+CloudAssetCodec keeps the original maximum 8MiB canonical payload in at most64 asset parts, default256KiB per part. The manifest also travels as an asset in the SDK adapter, keeping large bytes out of ordinary CKRecord fields. Complete readback requires every reference, size/hash, original manifest metadata, conditional tag and original byte. Host tests use controlled files/SQLite only; real CloudKit behavior remains for026.
+
+## 024 CloudKit SDK candidate and configuration handoff
+
+CloudKitDriverConfiguration requires the explicit containerIdentifier and development/production environment; no Team, container, Bundle ID or entitlement is invented here. This environment is a scope declaration that must match the signed build/container configuration in025/026; it cannot select a CloudKit server environment at runtime. Its zoneID(accountID:cloudSpaceID:) exactly matches CloudIdentitySnapshot.zoneID(accountID:), remains stable across epochs, and belongs only to the private current-user database. CloudKitDriver(configuration:staging:identityGeneration:executionEnabled:) defaults to disabled and never selects a controlled transport from a production factory.
+
+025 supplies a separately retained CloudOwnedStaging root/control pair, explicit admitted identityGeneration and verified scope. On identity change it stops old tasks, advances both vault and staging fences, and creates new actors only after explicit dual-identity admission. All owned roots and transport ledgers need a stable catalog for026. The root and control owner inodes, control DB/WAL and their parents are retained control; no recursive business cleanup may unlink them while owners are live.
+
+The SDK uses FootballAssetV1 and FootballManifestV1 supporting records plus the frozen MatchFactsV1/CheckpointV1/DeletionV1 canonical record types. Large canonical bytes and the manifest travel through CKAsset, with scope/reference/digest fields bounded separately. Download callbacks copy and hash into owned staging before returning; manifest reference totals are checked before requesting parts, and each part's expected reference is checked before copying. Cancellation, identity fencing and permanent zone fencing invalidate old callbacks before new files can be written. CKServerChangeToken is securely archived in a versioned container/environment/stable-zone envelope; it remains opaque and is never treated as an ordered version. Physical record absence is not a business tombstone.
+
+Saves use ifServerRecordUnchanged and atomic zone writes, then fetch the canonical fact, original manifest and every part back. Only full conditional tags and exact canonical readback return complete. Quota, partial/error, permission, conflict or wrong identity keep work pending; conflict retains both facts in the existing ledger. Fetch is paged one physical change at a time to bound logical payload size; auxiliary changes can produce empty pages with moreComing and an opaque next token. The existing ledger/business parent-token CAS still decides import and cursor advancement.
+
+CloudPrivateZoneDeletion(driver:originalScope:) fixes the persisted saga's full original scope. deletePrivateZone(scope:) additionally checks the current cloud identity, permanently fences/cancels old SDK writers, requests zone deletion and reads zone absence back. Cloud-only deletion preserves cached local files when that is the user's choice. CloudStagingEraseReceipt proves only that one local asset component; it never proves all local data or account/cloud/health completion.026 wraps these explicit boundaries in the existing AccountKit deletion saga and aggregates every owned catalog component. Actual server ordering, account transitions, quota, assets and SDK cancellation remain device/account acceptance work.
