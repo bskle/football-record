@@ -72,7 +72,7 @@ extension MatchSession {
         guard try await authorityManaged(),snapshot.business.descriptor.startPermit != nil else {return}
         try await updateAuthorityFence(snapshot)
         if terminal(snapshot) {return}
-        do {_=try await permits.acquire(for:snapshot.business.descriptor.startIntent)}
+        do {_=try await acquireBusinessPermit(for:snapshot.business.descriptor.startIntent)}
         catch {
             try await updateAuthorityFence(snapshot)
             if terminal(snapshot) {return}

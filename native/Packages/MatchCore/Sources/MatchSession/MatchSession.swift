@@ -324,7 +324,7 @@ public actor MatchSession {
       release(request.matchID)
       throw error
     }
-    let permit = try await permits.acquire(for: intent)
+    let permit = try await acquireBusinessPermit(for: intent)
     try requireBusinessActive()
     guard permit.intentID == intent.id, permit.matchID == intent.matchID,
       permit.recordingDeviceID == device, !permit.permitID.isEmpty

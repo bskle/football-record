@@ -167,6 +167,27 @@ final class SessionRetirementTests: XCTestCase, @unchecked Sendable {
     let calls = await h.gateway.performed.count; XCTAssertEqual(calls, 1)
   }
 
+  func testRetirementBeforeIntentReplyCannotDispatchNewPermitRequest() async throws {
+    let permits = CountingRetirementPermit(), h = try Harness(permits: permits)
+    await h.repo.holdIntentReplyForRetirement()
+    let request = try await h.session.prepareStart(starter: true)
+    let executing = Task { try await h.session.execute(request) }
+    await h.repo.waitForRetirementIntent()
+    let retiring = Task { try await h.session.retireBusiness() }
+    try await eventually("retirement gate") {
+      do { _ = try await h.session.prepareStart(starter: false); return false }
+      catch { return error as? SessionError == .retired }
+    }
+    await h.repo.releaseRetirementIntent()
+    do { _ = try await executing.value; XCTFail("retired start") }
+    catch { XCTAssertEqual(error as? SessionError, .retired) }
+    try await retiring.value
+    let count = await permits.calls; XCTAssertEqual(count, 0, "retirement before dispatch cannot issue a new lock request")
+    let stored = try await h.repo.snapshotV2(matchID: request.matchID)
+    XCTAssertTrue(stored.business.events.isEmpty); XCTAssertNil(stored.business.descriptor.startPermit)
+    let captures = await h.gateway.performed.count; XCTAssertEqual(captures, 0)
+  }
+
   func testLatePermitCannotStartAndRetirementJoinsOriginalExecute() async throws {
     let permits = HeldRetirementPermit(), h = try Harness(permits: permits)
     let request = try await h.session.prepareStart(starter: true)
@@ -230,4 +251,11 @@ private actor HeldRetirementPermit: StartPermitProvider {
   }
   func waitForEntry() async { if !entered { await withCheckedContinuation { waiter = $0 } } }
   func release() { blocked?.resume(); blocked = nil }
+}
+
+private actor CountingRetirementPermit: StartPermitProvider {
+  var calls = 0
+  func acquire(for intent: StartIntent) async throws -> TrustedStartPermit {
+    calls += 1; return DevelopmentStartFixture.permit(for: intent)
+  }
 }

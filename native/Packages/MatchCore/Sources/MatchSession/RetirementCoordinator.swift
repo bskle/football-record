@@ -6,6 +6,12 @@ extension MatchSession {
   func requireBusinessActive() throws {
     guard !businessRetired else { throw SessionError.retired }
   }
+  func acquireBusinessPermit(for intent: StartIntent) async throws -> TrustedStartPermit {
+    try requireBusinessActive()
+    let permit = try await permits.acquire(for: intent)
+    try requireBusinessActive()
+    return permit
+  }
   func beginBusiness() throws { try requireBusinessActive(); businessEntries += 1 }
   func endBusiness() {
     businessEntries -= 1

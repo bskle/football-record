@@ -8,7 +8,7 @@ import MatchSync
 
 @MainActor final class RetirementTests: XCTestCase {
   func testShutdownJoinsHeldPrepareAndCannotExecuteItsLateRequest() async throws {
-    let f = try Fixture(), client = RetirementClient(try Fixture().session)
+    let f = try Fixture(), client = RetirementClient(f.session)
     let model = RecordingModel(session: client, repository: f.repository, development: true)
     await client.hold(.prepare)
     let starting = Task { await model.start(starter: true) }
@@ -68,6 +68,38 @@ import MatchSync
     XCTAssertFalse(persisted.business.events.isEmpty)
   }
 
+  func testShutdownJoinsAcknowledgementDerivedHistoryTask() async throws {
+    let f = try Fixture(), client = RetirementClient(f.session)
+    let model = RecordingModel(session: client, repository: f.repository, development: true)
+    await client.hold(.snapshot)
+    await model.start(starter: true)
+    await client.waitForEntry()
+    XCTAssertNotNil(model.snapshot)
+    model.beginRetirement(); try await f.session.retireBusiness()
+    var finished = false
+    let closing = Task { await model.shutdown(); finished = true }
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertFalse(finished, "receipt-derived history task belongs to the model")
+    await client.release(); await closing.value
+    XCTAssertNil(model.snapshot); XCTAssertTrue(model.history.isEmpty)
+    XCTAssertEqual(model.feedbackCount, 0)
+  }
+
+  func testShutdownJoinsOwnUpdatesRegistrationAfterSessionRetirement() async throws {
+    let f = try Fixture(), client = RetirementClient(f.session)
+    let model = RecordingModel(session: client, repository: f.repository, development: true)
+    await client.hold(.updates)
+    await model.start(starter: true); await client.waitForEntry()
+    model.beginRetirement(); try await f.session.retireBusiness()
+    var finished = false
+    let closing = Task { await model.shutdown(); finished = true }
+    for _ in 0..<100 { await Task.yield() }
+    XCTAssertFalse(finished)
+    await client.release(); await closing.value
+    XCTAssertNil(model.snapshot); XCTAssertNil(model.syncStatus.matchID)
+    await model.load(); XCTAssertTrue(model.history.isEmpty)
+  }
+
   func testSyncShutdownJoinsHeldObservationRegistrationAndCanRestart() async throws {
     let source = RetirementSyncSource()
     let model = SyncStatusModel(service: source)
@@ -88,7 +120,7 @@ import MatchSync
 }
 
 private actor RetirementClient: SessionCommanding {
-  enum Held { case prepare, snapshot }
+  enum Held { case prepare, snapshot, updates }
   let underlying: MatchSession
   var point: Held?
   var entered = false
@@ -112,7 +144,7 @@ private actor RetirementClient: SessionCommanding {
   func execute(_ request: SessionRequest) async throws -> SessionReceipt { executions += 1; return try await underlying.execute(request) }
   func recover() async throws -> RecoverySelection { recoveries += 1; return try await underlying.recover() }
   func snapshot(matchID: String) async throws -> SessionSnapshot { await pause(.snapshot); return try await underlying.snapshot(matchID: matchID) }
-  func updates(matchID: String) async -> AsyncStream<SessionSnapshot> { await underlying.updates(matchID: matchID) }
+  func updates(matchID: String) async -> AsyncStream<SessionSnapshot> { await pause(.updates); return await underlying.updates(matchID: matchID) }
 }
 private actor RetirementSyncSource: SyncStatusServing {
   var entered = false
