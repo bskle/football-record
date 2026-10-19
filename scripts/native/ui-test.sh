@@ -169,6 +169,9 @@ PY
 fi
 if [[ -n "${NATIVE_UI_TEST_FILTER:-}" ]]; then
   test_args+=("-only-testing:$NATIVE_UI_TEST_FILTER")
+elif [[ -n "${NATIVE_UI_TEST_CLASS:-}" ]]; then
+  [[ "$NATIVE_UI_TEST_CLASS" =~ ^[A-Za-z0-9_]+$ ]] || { printf 'Invalid UI test class\n' >&2; exit 2; }
+  test_args+=("-only-testing:FootballRecord-$platform-UITests/$NATIVE_UI_TEST_CLASS")
 fi
 set +e
 xcodebuild "${test_args[@]}" -collect-test-diagnostics never -test-timeouts-enabled YES -maximum-test-execution-time-allowance 180 -project "$repo_root/native/FootballRecord.xcodeproj" \

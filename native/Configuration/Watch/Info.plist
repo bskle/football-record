@@ -24,5 +24,15 @@
 	<true/>
 	<key>WKCompanionAppBundleIdentifier</key>
 	<string>com.example.footballrecord</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>读取本App保存的运动，用于核对本场训练是否已保存。</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>将本场足球运动与路线保存到健康。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>记录本场运动路线与距离；定位不可用时仍保留比赛事实。</string>
+	<key>WKBackgroundModes</key>
+	<array>
+		<string>workout-processing</string>
+	</array>
 </dict>
 </plist>
