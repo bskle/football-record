@@ -66,9 +66,197 @@ import HealthKitDeletion
     XCTAssertEqual(try scalar(h,"SELECT count(*) FROM health_artifacts"),0);try await s.close()
   }
 
-  private struct Fixture {let root,directory,business:URL;let owner:M4HealthArtifactOwner}
-  private func fixture(space:String="space") throws -> Fixture {
-    let root=URL(fileURLWithPath:"/private/tmp").appendingPathComponent("NATIVE041-"+UUID().uuidString),business=root.appendingPathComponent("business")
+  func testUnknownFilesMissingOwnerAndMissingDatabaseArePreservedWithoutReinitialization() async throws {
+    for damage in ["unknown","owner","database"] {
+      let h=try fixture(),s=try open(h);try await s.reserve(reservation());try await s.close()
+      if damage == "unknown" {try Data("foreign".utf8).write(to:h.directory.appendingPathComponent("unknown.data"))}
+      else {try FileManager.default.removeItem(at:h.directory.appendingPathComponent(damage == "owner" ? "health.owner":"health.sqlite"))}
+      let before=try inventory(h.directory)
+      XCTAssertThrowsError(try open(h),damage)
+      XCTAssertEqual(try inventory(h.directory),before,damage)
+    }
+  }
+  func testFutureSchemaForeignMetadataAndCorruptCanonicalRejectBeforeWritableOpen() async throws {
+    for sql in ["PRAGMA user_version=99","CREATE TABLE foreign_control(secret BLOB)","UPDATE health_artifacts SET canonical=x'7b7d'","UPDATE health_artifacts SET digest=zeroblob(64)"] {
+      let h=try fixture(),s=try open(h);try await s.reserve(reservation());try await s.close();try modify(h,sql)
+      let before=try inventory(h.directory)
+      XCTAssertThrowsError(try open(h),sql)
+      let after=try inventory(h.directory)
+      if sql.hasPrefix("PRAGMA") {XCTAssertEqual(after,before,sql)}
+      else {XCTAssertEqual(after.filter{!$0.key.hasSuffix("-wal") && !$0.key.hasSuffix("-shm")},before.filter{!$0.key.hasSuffix("-wal") && !$0.key.hasSuffix("-shm")},sql)}
+    }
+  }
+  func testForeignDatabaseCannotReplaceOriginalInodeEvenWithValidCopiedCanonicalRows() async throws {
+    let h=try fixture(),s=try open(h);try await s.reserve(reservation());try await s.close()
+    let db=h.directory.appendingPathComponent("health.sqlite"),bytes=try Data(contentsOf:db)
+    try FileManager.default.moveItem(at:db,to:h.root.appendingPathComponent("original.sqlite"));try bytes.write(to:db)
+    let before=try inventory(h.directory);XCTAssertThrowsError(try open(h));XCTAssertEqual(try inventory(h.directory),before)
+  }
+  func testOwnerReplacementWithSameBytesAndParentReplacementBothFailClosed() async throws {
+    let h=try fixture(),s=try open(h);try await s.reserve(reservation())
+    let owner=h.directory.appendingPathComponent("health.owner"),bytes=try Data(contentsOf:owner)
+    try FileManager.default.moveItem(at:owner,to:h.root.appendingPathComponent("original.owner"));try bytes.write(to:owner)
+    let before=try inventory(h.directory)
+    do{_=try await s.readReservation(parentID:"parent-delete");XCTFail("replaced owner inode")}catch{}
+    XCTAssertEqual(try inventory(h.directory),before);try await s.close();XCTAssertThrowsError(try open(h))
+    let other=try fixture(),next=try open(other);try await next.reserve(reservation());try await next.close()
+    let moved=other.root.appendingPathComponent("moved");try FileManager.default.moveItem(at:other.directory,to:moved)
+    try FileManager.default.createDirectory(at:other.directory,withIntermediateDirectories:false)
+    for child in try FileManager.default.contentsOfDirectory(at:moved,includingPropertiesForKeys:nil){try FileManager.default.moveItem(at:child,to:other.directory.appendingPathComponent(child.lastPathComponent))}
+    let second=try inventory(other.directory);XCTAssertThrowsError(try open(other));XCTAssertEqual(try inventory(other.directory),second)
+  }
+  func testRetainedDirectoryMustBeOutsideBothDirectionsOfAllRemovableRoots() throws {
+    let h=try fixture()
+    for (directory,business) in [(h.business.appendingPathComponent("retained"),h.business),(h.directory,h.root)] {
+      XCTAssertThrowsError(try M4RetainedHealthArtifactStore(directory:directory,owner:h.owner,removableRoots:[business]))
+      XCTAssertFalse(FileManager.default.fileExists(atPath:directory.appendingPathComponent("health.owner").path))
+    }
+    let h2=try fixture(),inside=h2.directory.appendingPathComponent("business")
+    try FileManager.default.createDirectory(at:inside,withIntermediateDirectories:true)
+    XCTAssertThrowsError(try M4RetainedHealthArtifactStore(directory:h2.directory,owner:h2.owner,removableRoots:[inside]))
+    XCTAssertFalse(FileManager.default.fileExists(atPath:h2.directory.appendingPathComponent("health.owner").path))
+  }
+  func testRealCaseAliasAndSymlinkRootsCannotBypassRetainedSeparation() throws {
+    let h=try fixture(),business=h.root.appendingPathComponent("CaseBusiness")
+    try FileManager.default.createDirectory(at:business,withIntermediateDirectories:false)
+    let alias=h.root.appendingPathComponent("casebusiness")
+    var one=stat(),two=stat();guard lstat(business.path,&one)==0,lstat(alias.path,&two)==0,one.st_ino==two.st_ino,one.st_dev==two.st_dev else {throw XCTSkip("host volume does not expose a case alias")}
+    XCTAssertThrowsError(try M4RetainedHealthArtifactStore(directory:alias.appendingPathComponent("retained"),owner:h.owner,removableRoots:[business]))
+    XCTAssertFalse(FileManager.default.fileExists(atPath:business.appendingPathComponent("retained/health.owner").path))
+    let link=h.root.appendingPathComponent("link");try FileManager.default.createSymbolicLink(at:link,withDestinationURL:h.business)
+    XCTAssertThrowsError(try M4RetainedHealthArtifactStore(directory:link.appendingPathComponent("retained"),owner:h.owner,removableRoots:[h.business]))
+  }
+  func testKnownSidecarNamesNeverAuthorizeSymlinkOrForeignControl() async throws {
+    for name in ["health.sqlite-wal","health.sqlite-shm","health.sqlite-journal"] {
+      let h=try fixture(),s=try open(h);try await s.reserve(reservation());try await s.close()
+      let foreign=h.root.appendingPathComponent("foreign");try Data("foreign-sidecar".utf8).write(to:foreign)
+      let sidecar=h.directory.appendingPathComponent(name)
+      if FileManager.default.fileExists(atPath:sidecar.path){try FileManager.default.removeItem(at:sidecar)}
+      try FileManager.default.createSymbolicLink(at:sidecar,withDestinationURL:foreign)
+      let before=try inventory(h.directory);XCTAssertThrowsError(try open(h));XCTAssertEqual(try inventory(h.directory),before);XCTAssertEqual(try Data(contentsOf:foreign),Data("foreign-sidecar".utf8))
+    }
+  }
+  func testTightenedArtifactParentRowCountAndAggregateBudgetsRollbackWithoutChangingFirstBytes() async throws {
+    let raw=try reservation(),prepared=try M4HealthPreparedMapping(reservation:raw,parentDigest:String(repeating:"a",count:64)),rawSize=try raw.canonicalBytes().count,pSize=try prepared.canonicalBytes().count
+    let limits=[try M4HealthArtifactLimits(artifactBytes:rawSize-1),try M4HealthArtifactLimits(parentBytes:rawSize+pSize-1),try M4HealthArtifactLimits(parents:1),try M4HealthArtifactLimits(rows:1),try M4HealthArtifactLimits(totalBytes:rawSize+pSize-1)]
+    for (index,limit) in limits.enumerated() {
+      let h=try fixture(),s=try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],limits:limit)
+      if index==0 {await rejects(.limitExceeded){try await s.reserve(raw)};let none=try await s.readReservation(parentID:raw.parentID);XCTAssertNil(none)}
+      else {
+        try await s.reserve(raw)
+        if index==2 {await rejects(.limitExceeded){try await s.reserve(reservation(parentID:"other-parent"))}}
+        else {await rejects(.limitExceeded){try await s.putPrepared(prepared)}}
+        try await s.reserve(raw);let first=try await s.readReservation(parentID:raw.parentID);XCTAssertEqual(try first?.canonicalBytes(),try raw.canonicalBytes())
+        let absent=try await s.readPrepared(parentID:raw.parentID);XCTAssertNil(absent)
+      }
+      try await s.close()
+    }
+    XCTAssertThrowsError(try M4HealthArtifactLimits(parents:65));XCTAssertThrowsError(try M4HealthArtifactLimits(totalBytes:256*1024*1024+1))
+  }
+  func testTransactionFaultsPreserveFirstRawAndReplayCommittedPreparedAfterResponseLoss() async throws {
+    for fault in [M4HealthArtifactFault.beforeCommit,.afterCommitLost] {
+      let h=try fixture(),s=try open(h),raw=try reservation(),prepared=try M4HealthPreparedMapping(reservation:raw,parentDigest:String(repeating:"a",count:64))
+      try await s.reserve(raw);await s.injectNextFault(fault)
+      await rejects(.storageBlocked){try await s.putPrepared(prepared)}
+      let first=try await s.readReservation(parentID:raw.parentID);XCTAssertEqual(try first?.canonicalBytes(),try raw.canonicalBytes());try await s.close()
+      let next=try open(h),saved=try await next.readPrepared(parentID:raw.parentID)
+      XCTAssertEqual(saved != nil,fault == .afterCommitLost)
+      if let saved {XCTAssertEqual(try saved.canonicalBytes(),try prepared.canonicalBytes())}
+      try await next.putPrepared(prepared);try await next.close()
+    }
+  }
+  func testDirectoryBarriersFailBeforeReadOrMutationAndPreservePublishedBytes() async throws {
+    for fault in [M4HealthArtifactFault.directorySync,.parentSync] {
+      let h=try fixture(),s=try open(h),raw=try reservation();try await s.reserve(raw)
+      let before=try inventory(h.directory);await s.injectNextFault(fault)
+      await rejects(.storageBlocked){_=try await s.readReservation(parentID:raw.parentID)}
+      XCTAssertEqual(try inventory(h.directory),before)
+      await s.injectNextFault(fault);await rejects(.storageBlocked){try await s.reserve(reservation(parentID:"not-admitted"))}
+      let absent=try await s.readReservation(parentID:"not-admitted");XCTAssertNil(absent);try await s.close()
+    }
+  }
+  func testRealChildCommitCrashRecoversOriginalWALAndMissingSHMWithoutNewOwner() async throws {
+    let env=ProcessInfo.processInfo.environment
+    if let path=env["NATIVE041_CHILD_ROOT"],let phase=env["NATIVE041_CHILD_PHASE"] {
+      let h=try fixture(root:URL(fileURLWithPath:path)),s=try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],boundaryHook:{if $0.rawValue==phase{_exit(86)}})
+      let raw=try reservation();try await s.putPrepared(M4HealthPreparedMapping(reservation:raw,parentDigest:String(repeating:"a",count:64)))
+      try await s.close();return
+    }
+    for phase in ["beforeSQLCommit","afterSQLCommit","afterSQLCommit-no-shm"] {
+      let h=try fixture(),s=try open(h),raw=try reservation();try await s.reserve(raw);try await s.close()
+      let owner=try Data(contentsOf:h.directory.appendingPathComponent("health.owner"))
+      try crashChild(h,method:#function,phase:phase)
+      XCTAssertTrue(FileManager.default.fileExists(atPath:h.directory.appendingPathComponent("health.sqlite-wal").path))
+      if phase.hasSuffix("no-shm") {let path=h.directory.appendingPathComponent("health.sqlite-shm");if FileManager.default.fileExists(atPath:path.path){try FileManager.default.removeItem(at:path)}}
+      let next=try open(h),saved=try await next.readPrepared(parentID:raw.parentID),first=try await next.readReservation(parentID:raw.parentID)
+      XCTAssertEqual(try first?.canonicalBytes(),try raw.canonicalBytes());XCTAssertEqual(saved != nil,phase != "beforeSQLCommit")
+      if let saved {XCTAssertEqual(try saved.canonicalBytes(),try M4HealthPreparedMapping(reservation:raw,parentDigest:String(repeating:"a",count:64)).canonicalBytes())}
+      XCTAssertEqual(try Data(contentsOf:h.directory.appendingPathComponent("health.owner")),owner);try await next.close()
+    }
+  }
+  func testRealInitializationCrashesNeverExposePartialDirectoryAndReopenStabilizesOriginalOwner() async throws {
+    let env=ProcessInfo.processInfo.environment
+    if let path=env["NATIVE041_CHILD_ROOT"],let phase=env["NATIVE041_CHILD_PHASE"] {
+      let h=try fixture(root:URL(fileURLWithPath:path)),s=try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],boundaryHook:{if $0.rawValue==phase{_exit(86)}})
+      try await s.close();return
+    }
+    for phase in ["afterDatabaseSync","afterOwnerSync","beforePublication","afterPublicationRename","afterParentSync"] {
+      let h=try fixture();try crashChild(h,method:#function,phase:phase)
+      let published=FileManager.default.fileExists(atPath:h.directory.path)
+      XCTAssertEqual(published,["afterPublicationRename","afterParentSync"].contains(phase))
+      let oldOwner=published ? try Data(contentsOf:h.directory.appendingPathComponent("health.owner")):nil
+      let unclaimed=try FileManager.default.contentsOfDirectory(at:h.root,includingPropertiesForKeys:nil).filter{$0.lastPathComponent.hasPrefix(".")}
+      let original=try unclaimed.map{try inventory($0)}
+      let next=try open(h);try await next.reserve(reservation());try await next.close()
+      if let oldOwner {XCTAssertEqual(try Data(contentsOf:h.directory.appendingPathComponent("health.owner")),oldOwner)}
+      for (index,path) in unclaimed.enumerated(){XCTAssertEqual(try inventory(path),original[index])}
+    }
+  }
+  func testConcurrentForeignFinalDirectoryIsNotOverwrittenByEXCLPublication() throws {
+    let h=try fixture(),bytes=Data([0,255,7])
+    XCTAssertThrowsError(try M4RetainedHealthArtifactStore(directory:h.directory,owner:h.owner,removableRoots:[h.business],boundaryHook:{point in
+      if point == .beforePublication {try? FileManager.default.createDirectory(at:h.directory,withIntermediateDirectories:false);try? bytes.write(to:h.directory.appendingPathComponent("foreign"))}
+    }))
+    XCTAssertEqual(try Data(contentsOf:h.directory.appendingPathComponent("foreign")),bytes)
+    XCTAssertFalse(FileManager.default.fileExists(atPath:h.directory.appendingPathComponent("health.owner").path))
+  }
+  func testOwnerEncodingBudgetRejectsDeepOriginalPathsBeforeCandidateCreation() throws {
+    let h=try fixture();var deep=h.root
+    for _ in 0..<300 {deep.appendPathComponent("d")};try FileManager.default.createDirectory(at:deep,withIntermediateDirectories:true)
+    let target=deep.appendingPathComponent("retained")
+    XCTAssertThrowsError(try M4RetainedHealthArtifactStore(directory:target,owner:h.owner,removableRoots:[h.business])){XCTAssertEqual($0 as? M4HealthArtifactError,.limitExceeded)}
+    XCTAssertFalse(FileManager.default.fileExists(atPath:target.path));XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:deep.path),[])
+  }
+  func testMalformedKnownSidecarsAreClassifiedBeforeSQLiteMayResetThem() async throws {
+    for name in ["health.sqlite-wal","health.sqlite-shm"] {
+      let h=try fixture(),s=try open(h);try await s.reserve(reservation());try await s.close()
+      try Data("unrecognized control format".utf8).write(to:h.directory.appendingPathComponent(name))
+      let before=try inventory(h.directory);XCTAssertThrowsError(try open(h));XCTAssertEqual(try inventory(h.directory),before)
+    }
+  }
+  private func crashChild(_ h:Fixture,method:String,phase:String)throws {
+    let p=Process();p.executableURL=URL(fileURLWithPath:"/usr/bin/xcrun");p.arguments=["xctest","-XCTest","AppIntegrationTests.M4RetainedHealthArtifactStoreTests/"+method.replacingOccurrences(of:"()",with:""),Bundle(for:Self.self).bundleURL.path]
+    var env=ProcessInfo.processInfo.environment;env["NATIVE041_CHILD_ROOT"]=h.root.path;env["NATIVE041_CHILD_PHASE"]=phase.replacingOccurrences(of:"-no-shm",with:"");p.environment=env
+    let log=h.root.appendingPathComponent("child-"+phase+".log");XCTAssertTrue(FileManager.default.createFile(atPath:log.path,contents:nil));let handle=try FileHandle(forWritingTo:log);defer{try? handle.close()};p.standardOutput=handle;p.standardError=handle
+    try p.run();p.waitUntilExit();print("NATIVE041-crash phase=\(phase) status=\(p.terminationStatus)");XCTAssertEqual(p.terminationReason,.exit);XCTAssertEqual(p.terminationStatus,86)
+  }
+  private func inventory(_ directory:URL)throws->[String:Data] {
+    var result:[String:Data]=[:]
+    for name in try FileManager.default.contentsOfDirectory(atPath:directory.path) {
+      let url=directory.appendingPathComponent(name);var value=stat();guard lstat(url.path,&value)==0 else {throw M4HealthBridgeError.mappingUnavailable}
+      if value.st_mode&S_IFMT==S_IFLNK {result[name]=Data(("symlink:"+(try FileManager.default.destinationOfSymbolicLink(atPath:url.path))).utf8)}
+      else if value.st_mode&S_IFMT==S_IFREG {result[name]=try Data(contentsOf:url)}
+      else {result[name]=Data("directory".utf8)}
+    };return result
+  }
+  private func modify(_ h:Fixture,_ sql:String)throws {
+    var db:OpaquePointer?;guard sqlite3_open_v2(h.directory.appendingPathComponent("health.sqlite").path,&db,SQLITE_OPEN_READWRITE,nil)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable};defer{sqlite3_close(db)}
+    guard sqlite3_exec(db,sql,nil,nil,nil)==SQLITE_OK else {throw M4HealthBridgeError.mappingUnavailable}
+  }
+
+  private struct Fixture:Sendable {let root,directory,business:URL;let owner:M4HealthArtifactOwner}
+  private func fixture(space:String="space",root requested:URL?=nil) throws -> Fixture {
+    let root=requested ?? URL(fileURLWithPath:"/private/tmp").appendingPathComponent("NATIVE041-"+UUID().uuidString),business=root.appendingPathComponent("business")
     try FileManager.default.createDirectory(at:business,withIntermediateDirectories:true)
     return Fixture(root:root,directory:root.appendingPathComponent("retained"),business:business,owner:M4HealthArtifactOwner(installationID:"12345678-1234-4234-8234-123456789ABC",namespace:"fixture-original",scope:try scope(space:space)))
   }
