@@ -1,6 +1,6 @@
 # M4 账号、权威锁、私有云与生命周期合同
 
-状态快照：2026-10-19截止[GIT-007](../tasks/GIT-007.md)基线`dev=origin/dev=2642b426ee0ade276316a348537f72c0b2a1ed8a`。023执行source5ee7bd3/final f7f7a3b whole root+m2 exact PASS、actual2642全树同f7，单轮591/0+12最低sim SDK+2无签名generic sim App通过并同步，原生树实际archive/safe-d；034/035/036本地交付及清理完成。024/025已按base17f+accepted whole f7正式各树推进但未final/未入dev，selected不计591；028及008/010/016/018继续held，真实SDK/账号/设备/配置/部署/026组合擦除仍延后，production Unavailable、M4未完成。以下合同wire与证明边界不因本次状态更新改变；依据仍为[产品](../../0-产品方案.md)、[母计划](../../superpowers/plans/2026-10-15-native-development.md)、[M3合同](m3-durable-sync.md)及[M4计划](../../superpowers/plans/2026-10-18-native-m4.md)，最低系统不变。
+状态快照：2026-10-20，[GIT-008](../tasks/GIT-008.md)登记时`dev=origin/dev=e3e4b09d79c1f2556b8648c214f6c3c148ca8cd1`，后续纯文档合并会推进Git HEAD。025 source4ec78e8 / final1c09eb1已whole双审、actual e3同步，root相关63host/2最低SDK/4UI与作者615/12SDK/6App分层；023及034～036历史交付保留GIT-007。024 finala8ad011（181host/8最低SDK）和037 final55718f4（69host/4最低SDK）已双审、hold026；026依赖接入及Watch合并类型修复完成，本地整包仍实现中且未组合验收；038独立边界未交付/未入dev。真实SDK/账号/设备/签名配置/部署及026组合擦除留后验，production Unavailable，M4未完成。以下合同正文、wire与证明边界不变；依据仍为[产品](../../0-产品方案.md)、[母计划](../../superpowers/plans/2026-10-15-native-development.md)、[M3合同](m3-durable-sync.md)及[M4计划](../../superpowers/plans/2026-10-18-native-m4.md)。
 
 ## 1. 事实源和实现层次
 
