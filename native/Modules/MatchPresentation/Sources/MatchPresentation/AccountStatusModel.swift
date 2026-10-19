@@ -7,6 +7,25 @@ import AccountKit
 public enum AccountPhase: String, Sendable { case unavailable, signedOut, pending, waitingMigration, ready, suspended, unknown }
 public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, renew, identityChanged }
 
+struct PresentationAccountAdmissionRead: Sendable {
+  let binding: AccountBindingV4?
+  let identityGeneration: Int64
+  let authIDs, watchIDs: [String]
+  static func read(_ repository: SQLiteSessionRepository) async throws -> Self {
+    let before = try await repository.identityGenerationV4()
+    let binding = try await repository.accountBindingV4()
+    let auth = try await repository.pendingAuthAttemptsV4(), watches = try await repository.pendingWatchRegistrationAttemptsV4()
+    guard try await repository.identityGenerationV4() == before else { throw AuthorityError.identityChanged }
+    return Self(binding: binding, identityGeneration: before, authIDs: auth.map(\.requestID), watchIDs: watches.map(\.requestID))
+  }
+}
+
+func presentationBindingsEqual(_ lhs: AccountBindingV4, _ rhs: AccountBindingV4) -> Bool {
+  Data(lhs.accountID.utf8) == Data(rhs.accountID.utf8) && Data(lhs.cloudSpaceID.utf8) == Data(rhs.cloudSpaceID.utf8)
+    && Data(lhs.deviceID.utf8) == Data(rhs.deviceID.utf8) && lhs.activationEpoch == rhs.activationEpoch
+    && lhs.role == rhs.role && Data(lhs.environment.rawValue.utf8) == Data(rhs.environment.rawValue.utf8) && lhs.suspended == rhs.suspended
+}
+
 /// A query projection, never an authentication or activation authority.
 @MainActor @Observable public final class AccountStatusModel {
   public private(set) var phase: AccountPhase = .unavailable
@@ -22,7 +41,11 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
   @ObservationIgnored private let action: (@MainActor (AccountUserAction) async throws -> Void)?
   @ObservationIgnored private var generation = UUID()
   @ObservationIgnored private var stopped = false
-  public init(repository: SQLiteSessionRepository, development: Bool = false, identityVerified: Bool = false, action: (@MainActor (AccountUserAction) async throws -> Void)? = nil) {
+  @ObservationIgnored private var checkedIdentity: (AccountBindingV4, Int64)?
+  public convenience init(repository: SQLiteSessionRepository, development: Bool = false, action: (@MainActor (AccountUserAction) async throws -> Void)? = nil) {
+    self.init(repository: repository, development: development, identityVerified: false, action: action)
+  }
+  init(repository: SQLiteSessionRepository, development: Bool = false, identityVerified: Bool, action: (@MainActor (AccountUserAction) async throws -> Void)? = nil) {
     self.repository = repository; self.development = development; self.identityVerified = identityVerified; self.action = action
   }
   public var canEnterRecording: Bool { !stopped && !requiresReload && identityVerified && phase == .ready }
@@ -60,21 +83,29 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
       let value = try await repository.accountBindingV4()
       let auth = try await repository.pendingAuthAttemptsV4()
       let watches = try await repository.pendingWatchRegistrationAttemptsV4()
+      var stillVerified = true
+      if let checkedIdentity {
+        let durableGeneration = try await repository.identityGenerationV4()
+        stillVerified = durableGeneration == checkedIdentity.1 && value.map { presentationBindingsEqual($0, checkedIdentity.0) } == true
+      }
       guard !stopped, generation == token else { return }
-      binding = value; pendingAuthIDs = auth.map(\.requestID); pendingWatchIDs = watches.map(\.requestID)
-      issue = nil
-      if action == nil { phase = .unavailable }
-      else if value == nil && auth.isEmpty && watches.isEmpty { phase = .signedOut }
-      else if !identityVerified || value?.suspended == true { phase = .suspended }
-      else if !auth.isEmpty || !watches.isEmpty { phase = .pending }
-      else if value?.role == .waiting { phase = .waitingMigration }
-      else if value != nil { phase = .ready }
-      else { phase = .signedOut }
+      if !stillVerified { identityVerified = false; checkedIdentity = nil }
+      apply(value, authIDs: auth.map(\.requestID), watchIDs: watches.map(\.requestID))
     } catch {
       guard !stopped, generation == token else { return }
       binding = nil; pendingAuthIDs = []; pendingWatchIDs = []; phase = .unknown
       issue = AccountMessages.message(error)
     }
+  }
+  private func apply(_ value: AccountBindingV4?, authIDs: [String], watchIDs: [String]) {
+    binding = value; pendingAuthIDs = authIDs; pendingWatchIDs = watchIDs; issue = nil
+    if action == nil { phase = .unavailable }
+    else if value == nil && authIDs.isEmpty && watchIDs.isEmpty { phase = .signedOut }
+    else if !identityVerified || value?.suspended == true { phase = .suspended }
+    else if !authIDs.isEmpty || !watchIDs.isEmpty { phase = .pending }
+    else if value?.role == .waiting { phase = .waitingMigration }
+    else if value != nil { phase = .ready }
+    else { phase = .signedOut }
   }
   public func perform(_ value: AccountUserAction) async {
     guard !stopped, !busy, let action else { return }; busy = true
@@ -88,10 +119,28 @@ public enum AccountUserAction: Sendable { case signIn, recover, registerWatch, r
     guard !stopped, generation == refresh else { return }
     if let failure { issue = failure }
   }
-  func requireReload() { requiresReload = true }
-  func confirmIdentity() { identityVerified = true }
-  public func pauseIdentity() { identityVerified = false; phase = .suspended; generation = UUID() }
-  public func stop() { stopped = true; generation = UUID(); binding = nil; phase = .unavailable }
+  /// Called only after the identity service has admitted the current identity.
+  /// This checks its projection against durable truth; it does not authenticate.
+  public func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64) async throws {
+    try await admitIdentity(binding, expectedIdentityGeneration: expectedIdentityGeneration, read: { try await PresentationAccountAdmissionRead.read(self.repository) })
+  }
+  func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64, read: @MainActor () async throws -> PresentationAccountAdmissionRead) async throws {
+    guard !stopped else { throw AuthorityError.identityChanged }
+    let token = UUID(); generation = token; identityVerified = false; checkedIdentity = nil; phase = .suspended
+    let value = try await read()
+    let durableGeneration = try await repository.identityGenerationV4()
+    guard !stopped, generation == token, expectedIdentityGeneration >= 0,
+          value.identityGeneration == expectedIdentityGeneration, durableGeneration == expectedIdentityGeneration,
+          let current = value.binding, !current.suspended, !binding.suspended,
+          presentationBindingsEqual(current, binding) else { throw AuthorityError.identityChanged }
+    checkedIdentity = (current, expectedIdentityGeneration); identityVerified = true
+    apply(current, authIDs: value.authIDs, watchIDs: value.watchIDs)
+  }
+  public func requireReload() { requiresReload = true; generation = UUID() }
+  func confirmIdentity() { guard !stopped else { return }; checkedIdentity = nil; identityVerified = true }
+  public func pauseIdentity() { checkedIdentity = nil; identityVerified = false; phase = .suspended; generation = UUID() }
+  public func stop() { stopped = true; checkedIdentity = nil; generation = UUID(); binding = nil; phase = .unavailable }
+
 }
 
 enum AccountMessages {
