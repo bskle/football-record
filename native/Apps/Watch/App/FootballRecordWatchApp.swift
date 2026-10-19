@@ -1,8 +1,12 @@
+import AppIntegration
 import MatchPresentation
 import SwiftUI
+import WatchKit
 
 @main
 struct FootballRecordWatchApp: App {
+    // The retained recovery bridge queues a signal; the legacy SDK assembly is not started here.
+    @WKApplicationDelegateAdaptor(WorkoutRecoveryDelegate.self) var delegate
     var body: some Scene { WindowGroup { RecordingRoot() } }
 }
 private struct RecordingRoot: View {

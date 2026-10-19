@@ -10,6 +10,9 @@ struct PhoneMatchView: View {
   var context: AccountAppContext? = nil
   var reloadAccount: () -> Void = {}
   @State private var abnormal = false
+  var openEnvironment: (() -> Void)? = nil
+  var environmentTitle: String? = nil
+  var devicePairStatus: String? = nil
   @Environment(\.colorScheme) private var scheme
   @Environment(\.dynamicTypeSize) private var typeSize
   @State private var choosingStart = false
@@ -39,6 +42,7 @@ struct PhoneMatchView: View {
         if typeSize.isAccessibilitySize {
           VStack(alignment: .leading, spacing: 8) { Text("比赛").font(.largeTitle.bold()); if model.development { DevelopmentMarker() } }
         } else { HStack { Text("比赛").font(.largeTitle.bold()); Spacer(); if model.development { DevelopmentMarker() } } }
+        if let devicePairStatus { Text(devicePairStatus).font(.caption).accessibilityIdentifier("device-pair-marker") }
         if let s = model.snapshot, s.replay.state != .notStarted {
           TimelineView(.periodic(from: .now, by: 1)) { tick in
             let p = MatchProjection(snapshot: s, now: tick.date, authorityStatus: model.authorityStatus)
@@ -122,10 +126,13 @@ struct PhoneMatchView: View {
     else { ScrollView {
       VStack(alignment: .leading, spacing: 16) {
         Text("设置").font(.largeTitle.bold()); Text("球历").font(.title2.bold()); Text("football-record").foregroundStyle(.secondary)
-        Text("生产开赛服务、可信配对和真实运动采集仍在开发中。").font(.subheadline)
+        Text("生产开赛服务、可信配对和真实运动采集尚未接通。").font(.subheadline)
         if model.development { DevelopmentMarker(); Text("此演练使用独立记录，不代表真实开赛锁或真实运动数据。").font(.caption) }
         #if DEBUG
-        Button("新建独立开发演练", action: enterDevelopment).frame(minHeight: 44).accessibilityIdentifier("enter-development")
+        if let environmentTitle { Text(environmentTitle).accessibilityIdentifier("integration-environment-title") }
+        if let devicePairStatus { Text(devicePairStatus).font(.caption).accessibilityIdentifier("device-pair-status") }
+        if let openEnvironment { Button("开发环境", action: openEnvironment).frame(minHeight: 44).accessibilityIdentifier("open-environment") }
+        Button("新建纯界面演练", action: enterDevelopment).frame(minHeight: 44).accessibilityIdentifier("enter-development")
         #endif
       }.padding(20)
     }.background(paper)
