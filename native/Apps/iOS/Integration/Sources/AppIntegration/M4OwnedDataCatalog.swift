@@ -2,6 +2,7 @@ import Foundation
 import CloudSync
 import DeviceSync
 import MatchStore
+import HealthKitDeletion
 
 enum M4CatalogError: String, Error, Sendable {
   case storageBlocked, identityChanged, intentMismatch, unsupportedSchema, unknownControl
@@ -72,7 +73,20 @@ enum M4HealthSelectionIssue: String, Codable, Sendable { case sourceUnavailable,
 struct M4HealthReservation: Codable, Sendable {
   let selections: [M4HealthSelectionReference]
   let issue: M4HealthSelectionIssue?
+  let rawArtifactDigest: String?
+  init(selections: [M4HealthSelectionReference], issue: M4HealthSelectionIssue?, rawArtifactDigest: String? = nil) {
+    self.selections = selections; self.issue = issue; self.rawArtifactDigest = rawArtifactDigest
+  }
   static let empty = Self(selections: [], issue: nil)
+}
+struct M4HealthPreparedReference: Codable, Sendable {
+  let reservationDigest, preparedDigest, parentDigest: String
+  let selection: M4HealthSelectionReference
+}
+struct M4DeletionFullSeal: Codable, Sendable {
+  let version: Int
+  let parentIntentDigest, catalogDigest: String
+  let health: M4HealthFullSeal?
 }
 struct M4CatalogEntry: Codable, Sendable { let capsule: M4OwnershipCapsule; var retired: Bool }
 struct M4CatalogIndex: Codable, Sendable {
@@ -153,6 +167,35 @@ struct M4FrozenDeletionPlan: Codable, Sendable {
   var parentIntentDigest: String?
   var children: [M4CatalogChild]
   var receipts: [M4RetainedLeafReceipt]? = nil
+  var preparedHealth: M4HealthPreparedReference? = nil
+  var fullSeal: M4DeletionFullSeal? = nil
+  private struct Metadata: Encodable {
+    let preparedHealth: M4HealthPreparedReference?
+    let fullSeal: M4DeletionFullSeal?
+  }
+  func validateControlMetadata() throws {
+    guard try M4CatalogIO.encode(Metadata(preparedHealth: preparedHealth, fullSeal: fullSeal)).count <= 16_384 else { throw M4CatalogError.budgetExceeded }
+    if let digest = health.rawArtifactDigest {
+      guard M4CatalogIO.isDigest(digest), choices.health == .delete, health.issue == nil, health.selections.isEmpty else { throw M4CatalogError.intentMismatch }
+    }
+    if let prepared = preparedHealth {
+      guard choices.health == .delete, health.issue == nil, prepared.reservationDigest == health.rawArtifactDigest,
+            prepared.parentDigest == parentIntentDigest, M4CatalogIO.isDigest(prepared.preparedDigest),
+            M4CatalogIO.isDigest(prepared.selection.selectionDigest), prepared.selection.confirmationID != nil else { throw M4CatalogError.intentMismatch }
+    }
+    if let seal = fullSeal {
+      guard seal.version == 1 else { throw M4CatalogError.unsupportedSchema }
+      guard seal.parentIntentDigest == parentIntentDigest, seal.catalogDigest == catalogDigest else { throw M4CatalogError.intentMismatch }
+      if choices.health == .delete {
+        guard let prepared = preparedHealth, let value = seal.health, value.version == 1,
+              M4CatalogIO.raw(value.parentID, requestID), value.parentDigest == parentIntentDigest,
+              value.reservationDigest == health.rawArtifactDigest, value.preparedDigest == prepared.preparedDigest,
+              value.catalogDigest == catalogDigest, value.scope == (try CloudScopeV1(accountID: scope.accountID, cloudSpaceID: scope.cloudSpaceID, zoneID: scope.zoneID, activationEpoch: scope.activationEpoch)),
+              value.cloud == choices.cloud, value.local == choices.local, value.health == choices.health,
+              value.healthConfirmed == choices.healthConfirmed, choices.healthConfirmed else { throw M4CatalogError.intentMismatch }
+      } else { guard seal.health == nil, preparedHealth == nil, health.rawArtifactDigest == nil else { throw M4CatalogError.intentMismatch } }
+    }
+  }
   func canonicalBytes() throws -> Data { try M4CatalogIO.encode(self) }
   func expectedChildren(_ digest: String) throws -> [M4CatalogChild] {
     try entries.map { entry in
@@ -172,8 +215,9 @@ struct M4FrozenDeletionPlan: Codable, Sendable {
           health.selections.count <= 256,
           Set(health.selections.map(\.requestID)).count == health.selections.count,
           health.selections.allSatisfy({ M4CatalogIO.isDigest($0.selectionDigest) }) else { throw M4CatalogError.intentMismatch }
-    guard choices.health != .delete || (choices.healthConfirmed && (!health.selections.isEmpty || health.issue != nil)) else { throw M4CatalogError.intentMismatch }
-    guard choices.health != .keep || (health.selections.isEmpty && health.issue == nil) else { throw M4CatalogError.intentMismatch }
+    guard choices.health != .delete || (choices.healthConfirmed && (!health.selections.isEmpty || health.issue != nil || health.rawArtifactDigest != nil)) else { throw M4CatalogError.intentMismatch }
+    guard choices.health != .keep || (health.selections.isEmpty && health.issue == nil && health.rawArtifactDigest == nil) else { throw M4CatalogError.intentMismatch }
+    try validateControlMetadata()
     for entry in entries {
       try entry.capsule.validate()
       let original = entry.capsule.scope
@@ -224,6 +268,10 @@ struct M4CatalogState: Codable {
           leafDigest: String(repeating: "f", count: 64), receiptDigest: String(repeating: "f", count: 64), canonicalReceipt: payload)
       }
     }
+    // The fixed metadata reserve replaces, rather than duplicates, metadata
+    // already published by a later preparation/seal step.
+    try plan.validateControlMetadata()
+    plan.preparedHealth = nil; plan.fullSeal = nil
     bound.plans = [plan]
     let reservedControlBytes = 16_384
     guard try M4CatalogIO.encode(bound).count <= M4CatalogJournal.maximumJournalBytes - reservedControlBytes else { throw M4CatalogError.budgetExceeded }
@@ -314,6 +362,47 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
   }
   /// Capacity only, not proof that identity/quiescence/full-seal admission passed.
   /// Every aggregate erase entrance must call this before invoking any mutating leaf.
+  func sealFullControls(saga: DeletionSagaV4, raw: M4HealthRawReservation? = nil, prepared: M4HealthPreparedMapping? = nil, entry: HealthDeletionEntry? = nil) throws {
+    try journal.transaction { state in
+      guard var plan = state.plans.first, M4CatalogIO.raw(plan.requestID, saga.intent.requestID),
+            saga.intent.operation == .deleteAccount, plan.parentIntentDigest == saga.intent.digest,
+            saga.originalScope == (try CloudScopeV1(accountID: plan.scope.accountID, cloudSpaceID: plan.scope.cloudSpaceID, zoneID: plan.scope.zoneID, activationEpoch: plan.scope.activationEpoch)),
+            M4CatalogIO.raw(saga.accountID, plan.scope.accountID), saga.activationEpoch == plan.scope.activationEpoch,
+            saga.cloudChoice == plan.choices.cloud, saga.localChoice == plan.choices.local,
+            saga.healthChoice == plan.choices.health, saga.healthConfirmed == plan.choices.healthConfirmed else { throw M4CatalogError.intentMismatch }
+      for value in plan.entries { try value.capsule.verifyCurrent() }
+      var healthSeal: M4HealthFullSeal?
+      var reference: M4HealthPreparedReference?
+      if plan.choices.health == .delete {
+        guard plan.health.issue == nil, let raw, let prepared, let entry,
+              raw.scope == saga.originalScope, M4CatalogIO.raw(raw.parentID, plan.requestID),
+              raw.cloud == plan.choices.cloud, raw.local == plan.choices.local, raw.health == plan.choices.health,
+              raw.healthConfirmed == plan.choices.healthConfirmed, try raw.digest() == plan.health.rawArtifactDigest,
+              try prepared.canonicalBytes() == M4HealthPreparedMapping(reservation: raw, parentDigest: saga.intent.digest).canonicalBytes(),
+              try entry.request.canonicalBytes() == prepared.request.canonicalBytes(),
+              entry.selectionDigest == prepared.confirmation.selectionDigest,
+              try entry.confirmation.map(M4CatalogIO.encode) == M4CatalogIO.encode(prepared.confirmation) else { throw M4CatalogError.intentMismatch }
+        let digest = try M4CatalogIO.hash(prepared.canonicalBytes())
+        reference = M4HealthPreparedReference(reservationDigest: try raw.digest(), preparedDigest: digest, parentDigest: saga.intent.digest,
+          selection: M4HealthSelectionReference(requestID: prepared.request.requestID, selectionDigest: prepared.confirmation.selectionDigest, confirmationID: prepared.confirmation.confirmationID))
+        healthSeal = M4HealthFullSeal(version: 1, parentID: plan.requestID, parentDigest: saga.intent.digest,
+          reservationDigest: try raw.digest(), preparedDigest: digest, catalogDigest: plan.catalogDigest,
+          scope: raw.scope, cloud: raw.cloud, local: raw.local, health: raw.health, healthConfirmed: raw.healthConfirmed)
+      } else { guard raw == nil, prepared == nil, entry == nil else { throw M4CatalogError.intentMismatch } }
+      let seal = M4DeletionFullSeal(version: 1, parentIntentDigest: saga.intent.digest, catalogDigest: plan.catalogDigest, health: healthSeal)
+      if let previous = plan.fullSeal {
+        guard try M4CatalogIO.encode(previous) == M4CatalogIO.encode(seal),
+              try M4CatalogIO.encode(plan.preparedHealth) == M4CatalogIO.encode(reference) else { throw M4CatalogError.intentMismatch }
+        try state.requireCompletionCapacity(); return
+      }
+      guard plan.preparedHealth == nil else { throw M4CatalogError.intentMismatch }
+      plan.preparedHealth = reference; plan.fullSeal = seal; try plan.validate()
+      state.plans = [plan]; try state.requireCompletionCapacity()
+    }
+  }
+  func healthFullSeal(parentID: String) throws -> M4HealthFullSeal? {
+    try plan(requestID: parentID)?.fullSeal?.health
+  }
   func preflightErasure(requestID: String) throws {
     try journal.transaction { state in
       guard state.plans.contains(where: { M4CatalogIO.raw($0.requestID, requestID) }) else { throw M4CatalogError.intentMismatch }

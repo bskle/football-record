@@ -1,7 +1,13 @@
 import Foundation
+import CryptoKit
 import XCTest
 import CloudSync
 import DeviceSync
+import MatchCore
+import MatchStore
+import MatchSession
+import AccountKit
+import HealthKitDeletion
 @testable import AppIntegration
 
 @MainActor final class M4DeletionRecoveryTests: XCTestCase {
@@ -103,6 +109,77 @@ import DeviceSync
     catch { XCTAssertEqual(error as? DeviceSyncErasureError, .unknownInventory) }
     let calls = await drain.calls; XCTAssertEqual(calls, 0)
     XCTAssertEqual(try Data(contentsOf: foreign), bytes); XCTAssertTrue(try catalog.receipts(requestID: plan.requestID).isEmpty); try catalog.close()
+  }
+  func testRealRetainedHealthArtifactsAnd028ConfirmationPublishOnlyBoundedFullSealReferences() async throws {
+    let root = try root(), namespace = "fullseal-fixture", business = root.appendingPathComponent(namespace)
+    let key = Curve25519.Signing.PrivateKey(), trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["fullseal-fixture": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
+    let repo = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: namespace, authorityTrust: trust)
+    try await repo.bindAccountV4(AccountBindingV4(accountID: "account", cloudSpaceID: "cloud", deviceID: "phone", activationEpoch: 2, role: .phone, environment: .development))
+    let raw = try rawHealthReservation(), catalogURL = root.appendingPathComponent("catalog"), catalog = try M4OwnedDataCatalog(directory: catalogURL)
+    let capsule = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "original-store", kind: .businessStore, scope: scope(), root: business.appendingPathComponent("matches.sqlite"), retainedControls: [])
+    try catalog.record(capsule)
+    let artifactURL = root.appendingPathComponent("health-artifacts"), owner = M4HealthArtifactOwner(installationID: UUID().uuidString, namespace: namespace, scope: raw.scope)
+    let artifacts = try M4RetainedHealthArtifactStore(directory: artifactURL, owner: owner, removableRoots: [business], fullSealProvider: { try catalog.healthFullSeal(parentID: $0) })
+    let ledger = try SQLiteHealthDeletionLedger(url: root.appendingPathComponent("health-selection/selection.sqlite"), businessDataDirectory: business)
+    let bridge = M4HealthDeletionBridge(mapping: artifacts, parents: repo, ledger: ledger, allowedSourceOrigin: .controlledFixture, clock: { 12 })
+    try await bridge.reserve(raw)
+    _ = try catalog.reserve(requestID: raw.parentID, scope: scope(), choices: M4DeletionChoices(cloud: raw.cloud, local: raw.local, health: raw.health, healthConfirmed: raw.healthConfirmed), health: M4HealthReservation(selections: [], issue: nil, rawArtifactDigest: raw.digest()))
+    let saga = try healthSaga(raw); try await repo.createDeletionSagaV4(saga)
+    let savedSaga = try await repo.deletionSagaV4(requestID: raw.parentID), persisted = try XCTUnwrap(savedSaga)
+    _ = try catalog.seal(requestID: raw.parentID, parentIntentDigest: persisted.intent.digest)
+    let absent = try await artifacts.readFullSeal(parentID: raw.parentID); XCTAssertNil(absent)
+    let proposed = try M4HealthPreparedMapping(reservation: raw, parentDigest: persisted.intent.digest)
+    let submitted = try await ledger.submit(proposed.request), unsealedBytes = try Data(contentsOf: catalogURL.appendingPathComponent("catalog.json"))
+    XCTAssertNil(submitted.confirmation)
+    XCTAssertThrowsError(try catalog.sealFullControls(saga: persisted, raw: raw, prepared: proposed, entry: submitted)) { XCTAssertEqual($0 as? M4CatalogError, .intentMismatch) }
+    XCTAssertEqual(try Data(contentsOf: catalogURL.appendingPathComponent("catalog.json")), unsealedBytes)
+    let prepared = try await bridge.prepare(parentID: raw.parentID), entry = try await ledger.entry(prepared.request.requestID)
+    try catalog.sealFullControls(saga: persisted, raw: raw, prepared: prepared, entry: entry)
+    let actual = try await artifacts.readFullSeal(parentID: raw.parentID), seal = try XCTUnwrap(actual)
+    XCTAssertEqual(seal.reservationDigest, try raw.digest()); XCTAssertEqual(seal.preparedDigest, try M4CatalogIO.hash(prepared.canonicalBytes()))
+    XCTAssertEqual(seal.parentDigest, persisted.intent.digest); XCTAssertEqual(seal.catalogDigest, try catalog.index().digest())
+    let bytes = try Data(contentsOf: catalogURL.appendingPathComponent("catalog.json"))
+    XCTAssertLessThan(bytes.count, 1_048_576)
+    XCTAssertFalse(String(decoding: bytes, as: UTF8.self).contains("raw-capture-token-kept-out-of-catalog"))
+    try catalog.sealFullControls(saga: persisted, raw: raw, prepared: prepared, entry: entry)
+    XCTAssertEqual(try Data(contentsOf: catalogURL.appendingPathComponent("catalog.json")), bytes)
+    let changedRaw = try rawHealthReservation(), changedPrepared = try M4HealthPreparedMapping(reservation: changedRaw, parentDigest: persisted.intent.digest)
+    XCTAssertThrowsError(try catalog.sealFullControls(saga: persisted, raw: changedRaw, prepared: changedPrepared, entry: entry)) { XCTAssertEqual($0 as? M4CatalogError, .intentMismatch) }
+    XCTAssertEqual(try Data(contentsOf: catalogURL.appendingPathComponent("catalog.json")), bytes)
+    try await artifacts.close(); try catalog.close(); try await ledger.close(); try await repo.close()
+    let reopened = try M4OwnedDataCatalog(directory: catalogURL)
+    let restoredArtifacts = try M4RetainedHealthArtifactStore(directory: artifactURL, owner: owner, removableRoots: [business], fullSealProvider: { try reopened.healthFullSeal(parentID: $0) })
+    let restoredSeal = try await restoredArtifacts.readFullSeal(parentID: raw.parentID)
+    XCTAssertEqual(try M4CatalogIO.encode(restoredSeal), try M4CatalogIO.encode(actual))
+    XCTAssertEqual(try Data(contentsOf: catalogURL.appendingPathComponent("catalog.json")), bytes)
+    try await restoredArtifacts.close(); try reopened.close()
+  }
+  func testUnmappedHealthSelectionCannotPublishFullSealOrInventArtifactReference() throws {
+    let root = try root(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog"))
+    let (staging, capsule, _) = try staging(root); try staging.close(); try catalog.record(capsule)
+    let raw = try rawHealthReservation(), saga = try healthSaga(raw)
+    _ = try catalog.reserve(requestID: saga.intent.requestID, scope: scope(), choices: M4DeletionChoices(cloud: .keep, local: .delete, health: .delete, healthConfirmed: true), health: M4HealthReservation(selections: [], issue: .missingMapping))
+    let original = try catalog.seal(requestID: saga.intent.requestID, parentIntentDigest: saga.intent.digest)
+    let bytes = try Data(contentsOf: root.appendingPathComponent("catalog/catalog.json"))
+    XCTAssertThrowsError(try catalog.sealFullControls(saga: saga)) { XCTAssertEqual($0 as? M4CatalogError, .intentMismatch) }
+    XCTAssertThrowsError(try catalog.sealFullControls(saga: saga, raw: raw, prepared: M4HealthPreparedMapping(reservation: raw, parentDigest: saga.intent.digest))) { XCTAssertEqual($0 as? M4CatalogError, .intentMismatch) }
+    XCTAssertNil(try catalog.healthFullSeal(parentID: saga.intent.requestID))
+    XCTAssertEqual(try catalog.plan(requestID: saga.intent.requestID)?.canonicalBytes(), try original.canonicalBytes())
+    XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("catalog/catalog.json")), bytes); try catalog.close()
+  }
+  private func healthSaga(_ raw: M4HealthRawReservation) throws -> DeletionSagaV4 {
+    let capability = AuthorityWire.base64URL(Data(repeating: 7, count: 32)); var fields = AuthorityFields(); fields.reauthenticationID = "reauth-original"; fields.recoveryCapabilityDigest = AuthorityWire.hash(Data(capability.utf8))
+    return try DeletionSagaV4(intent: ControlIntentV1(requestID: raw.parentID, operation: .deleteAccount, fields: fields), accountID: raw.scope.accountID, activationEpoch: raw.scope.activationEpoch, recoveryCapability: capability, cloudChoice: raw.cloud, localChoice: raw.local, healthChoice: raw.health, healthConfirmed: raw.healthConfirmed, originalScope: raw.scope)
+  }
+  private func rawHealthReservation() throws -> M4HealthRawReservation {
+    let binding = try CaptureBinding(matchID: "match-original", recordingDeviceID: "watch-original"), date = Date(timeIntervalSince1970: 10), token = "raw-capture-token-kept-out-of-catalog"
+    let operation = try CaptureOperation(id: token, binding: binding, associatedCommandID: "command-original", action: .start, requestedAt: date, externalToken: token)
+    let window = try CaptureWindow(start: date, end: date.addingTimeInterval(1)), workout = UUID().uuidString
+    let observation = try WorkoutObservation(operationID: token, binding: binding, externalToken: token, observedAt: date, outcome: .linked(workoutID: workout), window: window)
+    let segment = try CaptureSegment(id: "opaque-original-segment", binding: binding, workoutID: workout, window: window)
+    let revision = try CaptureRevision(id: "revision-original", binding: binding, parentID: nil, revision: 1, observedAt: date, metadata: CaptureMetadata(binding: binding, segments: [segment], gaps: []))
+    let facts = M4HealthCaptureFacts(binding: binding, revisions: [revision], operations: [try CaptureOperationRecord(operation: operation, state: .settled, observation: observation)])
+    return try M4HealthRawReservation(parentID: "original-parent", scope: CloudScopeV1(accountID: "account", cloudSpaceID: "cloud", zoneID: "zone", activationEpoch: 2), cloud: .keep, local: .delete, health: .delete, healthConfirmed: true, createdAt: 10, confirmedAt: 11, facts: [facts], sources: [M4HealthSourceEvidence(recordingDeviceID: "watch-original", bundleID: "app.fixture.watch", platform: .watchOS, origin: .controlledFixture, evidenceID: "controlled-source")])
   }
   func testWrongOriginalParentOrDigestPreservesJournalAndLeaf() async throws {
     let root = try root(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog"))
