@@ -241,3 +241,27 @@ Source `977cfeb8324d9e37c03ca6c43dc35ee6a4f54ce3` adds only the owned leaf execu
 | `local-leaves-checkpoint-inputs.json` | `a7d02a8673a11db73c070fcc3f53d55ff2568714a77b726fa57a015f0ac60726` |
 | `local-leaves-checkpoint-post.json` | `5e0c2674f925cb3df4d386f96bb2f0930f58ee164e6b825fdc5486b5d876da5b` |
 | `local-leaves-full-host.log` | `c80850895fd7f5c822bff7f0cb65cbb0b5ffbb370c4075e77ad6daaa9ee5e250` |
+
+## Bounded Health artifact references and immutable fullseal persistence
+
+Source `b7050006c45f6c2ee9bca7d95d542fa93db591c8` consumes accepted 039/041 and 028 APIs without editing those paths. New optional catalog fields omit nil and preserve old canonical records. Initial reserve binds the original valid raw artifact digest; prepared references carry original raw/prepared/parent digests and stable 028 request/confirmation/selection IDs. Fullseal publication checks original saga scope/choices/intent, actual raw/prepared canonical mapping and the read-back 028 request plus explicit confirmation. Immutable CAS/readback preserves exact prior bytes. The 041 provider only reads the catalog's real stored Health seal; it does not construct or persist a substitute.
+
+Metadata encoding is bounded to 16 KiB. Capacity preflight removes already-published metadata from its private size-bound copy before adding that same fixed reserve, so subsequent preparation cannot double-count the allowance promised before erasure. Complete journal 1 MiB, membership256, first receipt16KiB and independent artifact-store limits stay fixed. Complete raw capture facts stay in 041; the catalog is verified not to contain their raw capture token. Existing capsule identities are revalidated before seal publication.
+
+- Initial fixture attempts separately failed compilation on a missing import/internal scope helper and then failed at the repository's required trust boundary. These logs remain preserved; public scope construction and explicit controlled development trust corrected the fixture without upstream changes.
+- Actual intended runtime RED: **one test / one unexpected storageBlocked failure** at the new seal boundary, after real 041 raw/prepared and 028 confirmation operations. Exact red source/tests are preserved. The first green compile required an explicit throwing-comparison marker; its log is separate.
+- Scoped **nine tests / zero failures** includes the prior seven actual leaf cases and two new Health cases. Real SQLiteSessionRepository saga, 041 retained raw/prepared store and 028 SQLite ledger are composed. Before confirmation the fullseal is refused without mutation. Identical replay/reopen preserves original seal and catalog bytes; changed raw/prepared inputs cannot replace it. Honest missingMapping has no invented artifact reference or fullseal. The Health driver is unavailable and no Health deletion executes.
+- One complete frozen host run: **144 tests / three failures**, 134 seconds. Only the two unchanged NATIVE-042 retirement cases fail (three business assertions). **341 inputs** have zero before/post differences and match the exact source commit. `git diff --check` passed.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `fullseal-runtime-red-3.log` | `142a47fa0468ff029fbcae15e413fcfd06a99daaf3feb306a8ef7505ff798fad` |
+| `fullseal-red-source.swift` | `c3998f3f2f91902935ddb38e1c42a093f772b5fb68289261d32f990003d3d31c` |
+| `fullseal-red-tests.swift` | `0e4de06249696ce523c961d40e70872d97446f727c9d5b59c2c08d989565c7b8` |
+| `fullseal-nine-green.log` | `9d0df53fe6f7c48bfc3ac4aa93bfaa2679f089bc674897e5e3a0a083c4dc9439` |
+| `fullseal-checkpoint-inputs.json` | `e22a947f2ebeb20a578c5f07643924f213941cbc39fa8ab9969498152b3808e6` |
+| `fullseal-checkpoint-post.json` | `5e0c2674f925cb3df4d386f96bb2f0930f58ee164e6b825fdc5486b5d876da5b` |
+| `fullseal-checkpoint-commit-match.json` | `3ba37faa952024aa17c173228f4dfdfa918d1d5280de99e76f0875fcc32248bf` |
+| `fullseal-full-host.log` | `846f93556eb7ac17f0234732acead9ceb12ad0bd8953bfde86140a5076eb26b3` |
+
+This checkpoint publishes coherent retained control evidence. The composition must still enforce fullseal/capacity/quiescence at every explicit/background/retry erasure entrance and recover createSaga-before-seal interruptions using the original parent. Store and all-epoch cloud-ledger current-zero boundaries remain reported upstream gaps; cached component progress does not prove them. Actual original-session retirement depends on accepted 042. App wiring, full aggregate erase/resume, real SDK/account/device/signing/App/UI checks, power-loss and whole-026 source/final acceptance remain incomplete.
