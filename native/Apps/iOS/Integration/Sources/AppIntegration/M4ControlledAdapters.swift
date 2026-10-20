@@ -13,14 +13,15 @@ actor M4ControlledAdapters: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, 
   private let cloudSpaceID: String
   #if DEBUG
   private let clients: DevelopmentAuthorityProtocolClients
-  private init(configuration: DevelopmentAuthorityConfiguration, clients: DevelopmentAuthorityProtocolClients) throws {
+  private let generationReplyGate: (@Sendable () async -> Void)?
+  private init(configuration: DevelopmentAuthorityConfiguration, clients: DevelopmentAuthorityProtocolClients, generationReplyGate: (@Sendable () async -> Void)?) throws {
     namespace = configuration.namespace; cloudSpaceID = configuration.cloudSpaceID
     trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
-    self.clients = clients
+    self.clients = clients; self.generationReplyGate = generationReplyGate
   }
-  static func make(configuration: DevelopmentAuthorityConfiguration, rootDirectory: URL) throws -> M4ControlledAdapters {
+  static func make(configuration: DevelopmentAuthorityConfiguration, rootDirectory: URL, generationReplyGate: (@Sendable () async -> Void)? = nil) throws -> M4ControlledAdapters {
     let clients = try DevelopmentAuthorityScenario.protocolClients(configuration: configuration, rootDirectory: rootDirectory)
-    return try M4ControlledAdapters(configuration: configuration, clients: clients)
+    return try M4ControlledAdapters(configuration: configuration, clients: clients, generationReplyGate: generationReplyGate)
   }
   #else
   private init(namespace: String, trust: AuthorityTrustConfiguration, cloudSpaceID: String) {
@@ -31,6 +32,8 @@ actor M4ControlledAdapters: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, 
   private var repository: SQLiteSessionRepository?
   private var originalIdentity: SyncRepositoryIdentity?
   private var businessStopped = false
+  private var businessLifetime = UUID()
+  var businessAdmissionClosed: Bool { businessStopped }
   private var finalStopped = false
   private struct Pending: Sendable {
     let cancel: @Sendable () -> Void
@@ -61,15 +64,24 @@ actor M4ControlledAdapters: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, 
   }
   private func ownedBusiness<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
     guard !businessStopped, !finalStopped else { throw AuthorityError.identityChanged }
-    let repository = try await original(), generation = try await repository.identityGenerationV4()
-    guard !businessStopped, !finalStopped else { throw AuthorityError.identityChanged }
+    let lifetime = businessLifetime
+    let repository = try await original(), generation = try await originalGenerationReply(repository)
+    guard !businessStopped, !finalStopped, businessLifetime == lifetime else { throw AuthorityError.identityChanged }
     try Task.checkCancellation()
     let id = UUID(), task = Task { try await work() }
     business[id] = Pending(cancel: { task.cancel() }, join: Task { _ = await task.result })
     defer { business[id] = nil; notifyBusinessDrainers() }
     let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-    guard !businessStopped, !finalStopped, try await repository.identityGenerationV4() == generation else { throw AuthorityError.identityChanged }
+    let currentGeneration = try await originalGenerationReply(repository)
+    guard !businessStopped, !finalStopped, businessLifetime == lifetime, currentGeneration == generation else { throw AuthorityError.identityChanged }
     try Task.checkCancellation(); return value
+  }
+  private func originalGenerationReply(_ repository: SQLiteSessionRepository) async throws -> Int64 {
+    let original = try await repository.identityGenerationV4()
+    #if DEBUG
+    await generationReplyGate?()
+    #endif
+    return original
   }
   func authorize(nonceSHA256: String) async throws -> AppleAuthorization {
     #if DEBUG
@@ -127,7 +139,7 @@ actor M4ControlledAdapters: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, 
   func close() async { await quiesceBusiness() }
   func quiesceBusiness() async {
     if let quiescing { await quiescing.value; return }
-    businessStopped = true
+    businessStopped = true; businessLifetime = UUID()
     let pending = Array(business.values), rpc = Array(exchanges.values)
     pending.forEach { $0.cancel() }; rpc.forEach { $0.cancel() }
     let task = Task {
@@ -175,7 +187,7 @@ actor M4ControlledAdapters: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, 
   /// Only the composition's final close calls this after all original controls join.
   func finalClose() async throws {
     if let finalClosing { return try await finalClosing.value }
-    finalStopped = true
+    finalStopped = true; businessLifetime = UUID()
     let task = Task<Void, any Error> {
       await self.quiesceBusiness()
       #if DEBUG

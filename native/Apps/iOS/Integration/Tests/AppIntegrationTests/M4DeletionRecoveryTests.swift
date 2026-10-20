@@ -551,7 +551,7 @@ import MatchPresentation
       try await healthArtifacts?.close(); try await healthLedger?.close()
     }
   }
-  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil, completeHealth: Bool = false, lateGateway: GateHeldLinkedCapture? = nil, controlledClients: Bool = false) async throws -> GateFixture {
+  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil, completeHealth: Bool = false, lateGateway: GateHeldLinkedCapture? = nil, controlledClients: Bool = false, generationReplyGate: (@Sendable () async -> Void)? = nil) async throws -> GateFixture {
     let root = try root(), namespace = controlledClients ? "m4-ui-integration-phone" : "guard-fixture", key = Curve25519.Signing.PrivateKey()
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["guard-key": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
     let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("identity-control")) { seed in
@@ -564,7 +564,7 @@ import MatchPresentation
       #if DEBUG
       let directory = root.appendingPathComponent("protocol-clients"); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
       let configuration = DevelopmentAuthorityConfiguration(dataset: "integration", namespace: namespace, baseURL: "http://127.0.0.1:1", keyID: "guard-key", publicKey: AuthorityWire.base64URL(key.publicKey.rawRepresentation), cloudSpaceID: "cloud", subject: "controlled-fixture", role: "phone")
-      controlled = try M4ControlledAdapters.make(configuration: configuration, rootDirectory: directory); protocolRoot = directory
+      controlled = try M4ControlledAdapters.make(configuration: configuration, rootDirectory: directory, generationReplyGate: generationReplyGate); protocolRoot = directory
       #else
       throw M4LocalErasureError.unavailable
       #endif
@@ -677,6 +677,38 @@ import MatchPresentation
     do { try await adapters.assertDrained(scope: f.scope, requestID: f.saga.intent.requestID, parentIntentDigest: f.saga.intent.digest) }
     catch { XCTFail("original control completion must leave a readable drain state: \(error)") }
     do { try await adapters.assertDrained(scope: f.scope, requestID: "foreign-parent", parentIntentDigest: f.saga.intent.digest); XCTFail("a foreign parent cannot borrow original mailbox zero") } catch { XCTAssertEqual(error as? M4LocalErasureError, .intentMismatch) }
+    try await f.close()
+  }
+  func testCompletedAppleResultCannotCrossStoppedSecondGenerationReply() async throws { try await completedBusinessReply(cloud: false) }
+  func testCompletedCloudResultCannotCrossStoppedSecondGenerationReply() async throws { try await completedBusinessReply(cloud: true) }
+  private func completedBusinessReply(cloud: Bool) async throws {
+    let gate = M4SecondGenerationReplyGate(), f = try await deletionGuardFixture(healthIssue: nil, controlledClients: true, generationReplyGate: { await gate.pause() })
+    let adapters = try XCTUnwrap(f.controlledAdapters), root = try XCTUnwrap(f.protocolRoot)
+    let originalIdentity = await f.composition.repository.syncRepositoryIdentity(), generation = try await f.composition.repository.identityGenerationV4()
+    let call = Task {
+      if cloud {
+        let record = try CloudRecord(scope: f.scope, payload: .deletion(CloudDeletion(matchID: "original-match", deletionID: "original-delete", deletedAt: Date(timeIntervalSince1970: 10))))
+        _ = try await adapters.save(CloudUpload(id: "original-upload", scope: f.scope, record: record))
+      } else { _ = try await adapters.authorize(nonceSHA256: AuthorityWire.hash(Data("original-nonce".utf8))) }
+    }
+    let pending = try await protocolRequest(root, operation: cloud ? "cloud-save" : "apple")
+    try protocolReply(pending, payload: cloud ? pending.payload : JSONSerialization.data(withJSONObject: ["identityToken": "completed-token", "authorizationCode": "completed-code"]))
+    // Real work has completed. Hold only the reply from the original second
+    // repository read; the fixture cannot manufacture its generation/identity.
+    await gate.waitForReply()
+    let quiesce = Task { try await f.composition.quiesceBusiness() }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2)); var stopped = false
+    while ContinuousClock.now < deadline {
+      if await adapters.businessAdmissionClosed { stopped = true; break }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    XCTAssertTrue(stopped)
+    await gate.release()
+    do { try await call.value; XCTFail("completed original business result cannot escape a stop established during generation-read await") }
+    catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    try await quiesce.value
+    let actualIdentity = await f.composition.repository.syncRepositoryIdentity(), actualGeneration = try await f.composition.repository.identityGenerationV4()
+    XCTAssertEqual(actualIdentity, originalIdentity); XCTAssertEqual(actualGeneration, generation)
     try await f.close()
   }
   func testControlledFinalCloseUndrainedPreservesOriginalDBAndLeaseForRetry() async throws {
@@ -885,5 +917,18 @@ private actor GateHeldLinkedCapture: WorkoutGateway {
     return try! WorkoutObservation(operationID: operation.id, binding: operation.binding, externalToken: operation.externalToken, observedAt: operation.requestedAt.addingTimeInterval(2), outcome: .linked(workoutID: UUID().uuidString), window: CaptureWindow(start: operation.requestedAt, end: operation.requestedAt.addingTimeInterval(2)))
   }
   func reconcile(_ operation: CaptureOperation) async -> WorkoutObservation { await perform(operation) }
+  func release() { held?.resume(); held = nil }
+}
+
+private actor M4SecondGenerationReplyGate {
+  private var reads = 0, entered = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  private var held: CheckedContinuation<Void, Never>?
+  func pause() async {
+    reads += 1
+    guard reads == 2 else { return }
+    await withCheckedContinuation { held = $0; entered = true; waiter?.resume(); waiter = nil }
+  }
+  func waitForReply() async { if entered { return }; await withCheckedContinuation { waiter = $0 } }
   func release() { held?.resume(); held = nil }
 }
