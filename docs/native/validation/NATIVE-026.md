@@ -472,3 +472,10 @@ Prepared.close validates its original retained identity lease before DB closure 
 | `composition-close-checkpoint-commit-match.json` | `0bfa5fd20221b95eb5e19f6d7cc969779defc0402dcf32b00d482367c6e07343` |
 
 This clean dependency handoff stops author writes until root returns the tree. Accepted043/046/047 must be ordinary-merged and their actual APIs consumed after review. Both known047 tests remain intact. Final App route assembly, full Health selection coverage, mailbox drain and strict Cloud replay, complete build/test matrix, real SDK/device/account/App/UI/power-loss and whole026 acceptance remain pending. Empty ignored `.swiftpm/xcode/` metadata remains the saved exception; no cleanup or long-lived branch promotion is performed.
+
+
+### Strict Cloud proof replay checkpoint
+
+Source `91a2e7b12475452342e81c94b53eb4f6d406e0f2`, on actual dependency merge5658e4: original missing-internal-proof and restored-v3 cases were RED2tests/6assertions and become2/0 through accepted047 APIs. Frozen related Composition11 + Recovery31 = **42tests/1unexpected**;349 inputs before/post/commit0diff. The remaining test is `testConcreteCloudLeafPreservesUnknownLiveLayoutAfterFirstReceipt`: the strict constructor fails before its first receipt on a legitimate initialized v4/WAL DB that has no business write or WAL sidecars. Original DB/inode and copied bytes are preserved; a read-only SQLite probe also fails quick_check while immutable read-only inspection returns ok. This is an upstream boundary under investigation, not a SQLite close failure or device failure. No added enqueue, skipped assertion or schema repair is used.
+
+Evidence: `strict-cloud-postmerge-red.log`, `strict-cloud-two-green.log`, `strict-cloud-checkpoint-inputs.json`, `strict-cloud-frozen-related.log`, `strict-cloud-frozen-related-post.json`, `strict-cloud-commit-match.json`, `strict-cloud-empty-wal-fixture.json` and preserved SQLite copy under `/private/tmp/football-record-NATIVE026-build/bootstrap`. Frozen related log SHA256 `9a2483854833559a960fdadee6c44354e4a4e63f9563eb3d52a0a5efdbff5b8f`. No whole026, App/UI, real SDK, account/device or power-loss claim.
