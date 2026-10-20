@@ -85,6 +85,29 @@ import CloudSync
   let completed = await clients.drainState(); XCTAssertEqual(completed, .drained)
   let state = await clients.close(); XCTAssertEqual(state, .drained)
  }
+ func testPublishedMailboxRootAndChildrenCannotBeReplacedOrDisappearIntoDrained() async throws {
+  for variant in 0..<4 {
+   let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
+   let clients = try DevelopmentAuthorityScenario.protocolClients(configuration: configuration(), rootDirectory: root)
+   let originalBytes = Data([0, 255, 61]), original = mailbox(root).appendingPathComponent("outgoing/original-request.json")
+   try write(originalBytes, original)
+   let wholeRoot = variant < 2, replacement = variant.isMultiple(of: 2)
+   let published = wholeRoot ? mailbox(root) : mailbox(root).appendingPathComponent("outgoing")
+   let retained = root.appendingPathComponent(wholeRoot ? "retained-mailbox" : "retained-outgoing")
+   try FileManager.default.moveItem(at: published, to: retained)
+   if replacement {
+    if wholeRoot {
+     for name in ["outgoing", "responses", "incoming", "incoming-responses"] {
+      try FileManager.default.createDirectory(at: published.appendingPathComponent(name), withIntermediateDirectories: true)
+     }
+    } else { try FileManager.default.createDirectory(at: published, withIntermediateDirectories: true) }
+   }
+   let state = await clients.drainState(); XCTAssertEqual(state, .undrained, "Published root/child missing or replaced: variant \(variant)")
+   let closed = await clients.close(); XCTAssertEqual(closed, .undrained, "Close cannot erase the missing inventory evidence")
+   let kept = retained.appendingPathComponent(wholeRoot ? "outgoing/original-request.json" : "original-request.json")
+   XCTAssertEqual(try Data(contentsOf: kept), originalBytes)
+  }
+ }
  func testDrainStateDoesNotReportDrainedBeforeOwnedWorkWritesMailbox() async throws {
   let root = try root(); defer { try? FileManager.default.removeItem(at: root) }
   let clients = try DevelopmentAuthorityScenario.protocolClients(configuration: configuration(), rootDirectory: root)

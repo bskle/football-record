@@ -56,6 +56,7 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
   private let mailbox: DevelopmentMailbox
   private let relay: URLSessionAuthorityRelay
   private let mailboxRoot: URL
+  private let mailboxInventory: [String: ProtocolClientDirectoryIdentity]
   private var closed = false
   private var closing: Task<Void, Never>?
   private struct Pending: Sendable {
@@ -74,6 +75,7 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
     do {
       mailbox = try DevelopmentMailbox(root: mailboxRoot, dataset: configuration.dataset)
       guard try protocolClientMailboxEmpty(mailboxRoot) else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+      mailboxInventory = try protocolClientPublishedInventory(mailboxRoot)
     } catch { relay.shutdown(); throw error }
     self.relay = relay; self.mailboxRoot = mailboxRoot; namespace = configuration.namespace
   }
@@ -124,8 +126,11 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
   /// Point-in-time inspection only: it neither closes nor cancels clients needed by the original Saga.
   /// Callers must gate business admission before checking; later calls can change this state.
   public func drainState() -> DevelopmentAuthorityProtocolCloseState {
-    guard operations.isEmpty else { return .undrained }
-    return (try? protocolClientMailboxEmpty(mailboxRoot)) == true ? .drained : .undrained
+    guard operations.isEmpty,
+          (try? protocolClientPublishedInventory(mailboxRoot)) == mailboxInventory,
+          (try? protocolClientMailboxEmpty(mailboxRoot)) == true,
+          (try? protocolClientPublishedInventory(mailboxRoot)) == mailboxInventory else { return .undrained }
+    return .drained
   }
   /// Final close, not business quiescence: retain these clients while the original Saga needs them.
   /// The state is a fresh mailbox snapshot, not a durable whole-device erasure receipt.
@@ -145,6 +150,23 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
   }
 }
 
+private struct ProtocolClientDirectoryIdentity: Equatable, Sendable {
+  let device: dev_t
+  let inode: ino_t
+}
+/// Published instances require the same complete directory inventory; a missing
+/// or substituted empty directory cannot prove that the original copies drained.
+private func protocolClientPublishedInventory(_ root: URL) throws -> [String: ProtocolClientDirectoryIdentity] {
+  let names = ["outgoing", "responses", "incoming", "incoming-responses"]
+  var result: [String: ProtocolClientDirectoryIdentity] = [:]
+  for name in [""] + names {
+    let url = name.isEmpty ? root : root.appendingPathComponent(name)
+    var info = stat()
+    guard lstat(url.path, &info) == 0, Int(info.st_mode) & Int(S_IFMT) == Int(S_IFDIR) else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+    result[name] = ProtocolClientDirectoryIdentity(device: info.st_dev, inode: info.st_ino)
+  }
+  return result
+}
 private func protocolClientDirectoryExists(_ url: URL) throws -> Bool {
   var info = stat()
   if lstat(url.path, &info) != 0 {
