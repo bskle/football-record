@@ -135,4 +135,39 @@ final class CloudLocalTransportCurrentZeroTests: XCTestCase, @unchecked Sendable
   let replay = try await ledger.eraseLocalTransport(request)
   XCTAssertEqual(replay.requestDigest, try request.digest); try await ledger.close()
  }
+
+ func testLiveReceiptReplayRejectsFutureOrUnknownLayoutWithoutChangingIt() async throws {
+  let edits: [(String, CloudIssue)] = [
+   ("PRAGMA user_version=99", .unsupportedSchema),
+   ("CREATE TABLE future_business(value BLOB) STRICT", .invalidPayload),
+   ("ALTER TABLE cloud_uploads ADD COLUMN future_field TEXT", .invalidPayload),
+   ("CREATE VIEW future_view AS SELECT id FROM cloud_uploads", .invalidPayload),
+   ("CREATE TRIGGER future_trigger AFTER INSERT ON cloud_uploads BEGIN SELECT 1; END", .invalidPayload),
+   ("CREATE INDEX future_index ON cloud_uploads(scope)", .invalidPayload)
+  ]
+  for (edit, expected) in edits {
+   let url = try tempCloudURL(), ledger = try SQLiteCloudLedger(url: url), scope = try cloudScope()
+   let other = try CloudScope(accountID: "other", cloudSpaceID: "space", zoneID: "zone", activationEpoch: 1)
+   try await seedErasurePhases(ledger, scope: other)
+   let request = try CloudLocalTransportEraseRequest(requestID: "live-layout", scope: scope)
+   _ = try await ledger.eraseLocalTransport(request)
+   let firstControl = try control(url), raw = try CloudSQL(url: url)
+   try raw.execute(edit)
+   let schema = try raw.rows("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").map { $0.map(\.string) }
+   let version = try raw.rows("PRAGMA user_version").first?.first?.number
+   let before = try canonicalSnapshot(url), originalInode = try identity(url)
+   do {
+    _ = try await ledger.eraseLocalTransport(request)
+    XCTFail("Expected \(expected) for \(edit)")
+   } catch let error as CloudError {
+    print("Layout probe blocked \(edit): \(error.issue)")
+    XCTAssertEqual(error.issue, expected, edit)
+   }
+   XCTAssertEqual(try raw.rows("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").map { $0.map(\.string) }, schema)
+   XCTAssertEqual(try raw.rows("PRAGMA user_version").first?.first?.number, version)
+   XCTAssertEqual(try canonicalSnapshot(url), before); XCTAssertEqual(try control(url), firstControl)
+   XCTAssertEqual(try identity(url), originalInode)
+   try raw.close(); try await ledger.close()
+  }
+ }
 }

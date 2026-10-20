@@ -11,7 +11,7 @@
 ## 实施顺序
 
 1. 在真实 SQLite 先产生原 receipt 与永久 fence；用同文件 SQL 恢复目标 canonical 行，覆盖四表与旧 epoch，先运行失败测试。另核同 inode 重开、foreign 合法保全、malformed / unknown inventory、原 receipt / COMMIT 丢响应重放。
-2. 仅在已核原 request digest、stable zone 与 fence 的重放返回前调用现有完整 `validateErasureCanonicalRows`；目标 stable zone 任一 epoch 非零或任一行不可严格归属即 typed `invalidPayload`。不重新删除、不修改 first receipt、不解除 fence。原 requestID 异意图仍先 `identityConflict`。
+2. 同一事务先只读核对原 `user_version=4` 与原迁移发出的七表/七自动索引精确布局；未来版本 `unsupportedSchema`，新表/列/view/trigger/index 或非原布局 `invalidPayload`，保全且不迁移。再在已核原 request digest、stable zone 与 fence 的重放返回前调用现有完整 `validateErasureCanonicalRows`；目标 stable zone 任一 epoch 非零或任一行不可严格归属即 `invalidPayload`。不重新删除、不修改 first receipt、不解除 fence；已知布局下原 requestID 异意图仍先 `identityConflict`。
 3. 同一事务保留 current-zero 校验与返回。保留全部原 canonical / control bytes 和其他合法 scope；原 receipt 只证明历史操作，成功重放还要求当前库存严格可验证且目标为零。
 4. 完整 Cloud 宿主回归及最低 iOS17/watch10 两模拟器、两设备 SDK 产品编译；所有构建与证据在树外隔离，记录命令、原红绿日志、输入前后 hash 与精确 source / final。
 
