@@ -58,3 +58,6 @@ Replacement overlap repair source `ef557edd01bb099b145b57ce1980c9fd11ccba9d` fol
 
 
 Cancellation follow-up source `47559320f844f2d30f29309f7542c6a373497335` closes the awaited-shutdown cancellation window: the original positive observation still drains, the cancelled caller never builds a context, and a valid queued replacement proceeds. Actual RED1/2 and frozen related16/0 retain all346 inputs unchanged/commit-matched. The prior overlap2/9→15/0 remains distinct. Independent review is pending; aggregate and final App lifecycle work continue.
+
+
+Concrete local leaf source `49c3258e053928c5a8d33882eee6dc471cf11a75` now reopens each original Cloud ledger and invokes accepted044 on every attempt, including retained receipt replay. Store routes use the original composition's private identity-bootstrap DB anchor and same Session/facade, then accepted045 fresh read-only current-zero witness. The stable first receipt omits mutable Saga revision. Actual three-case unsupported RED3/3 becomes3/0, and one frozen related27/0 keeps346 inputs unchanged/commit-matched. Restored old-epoch ledger rows, unknown live schema, restored Store business, wrong facade and missing Store route cannot borrow retained evidence. All-catalog aggregate,043 mailbox drain,046 complete Health capture inventory and App/final-close remain pending; no whole026 completion is claimed.

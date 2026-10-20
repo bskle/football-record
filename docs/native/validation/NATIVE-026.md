@@ -357,3 +357,27 @@ The added runtime regression is **RED1/2**, followed by one frozen related **16/
 | `replacement-cancellation-checkpoint-inputs.json` | `15964f582ae09eedd5376c367917b058c2015cc0ab5ab10efd553b44338eb3fb` |
 | `replacement-cancellation-checkpoint-post.json` | `dc7a3caf7184696da2a7fb294a9e969b4670050de63f5c2cb528d1a8d2ed82ed` |
 | `replacement-cancellation-checkpoint-commit-match.json` | `19971b6189dde1095cb99ec23c9a8e01ff4d6d61b5b89d7f2c5f7a740d0b52bf` |
+
+
+## Concrete original Store and Cloud local leaf replay
+
+Source `49c3258e053928c5a8d33882eee6dc471cf11a75` consumes accepted044 and045 without editing their source. Cloud ledger routing verifies the original catalog root/controls before constructor entry, opens that exact inode, invokes concrete `eraseLocalTransport` on every attempt, closes the connection, then verifies capsule identity again and retains exact first canonical bytes with CAS/readback. An existing catalog receipt never skips current all-epoch canonical inventory checks.
+
+Store dispatch requires an explicit original composition route. The composition compares the capsule with its private identity-bootstrap DB anchor, joins its original business/capture writer, checks Session/repository identity, and invokes the accepted045 read-only witness for the original parent/digest/raw scope. Stable evidence binds the original backend receipt digest and DB capsule; it omits changing Saga revision. Another facade or absent original route cannot represent another Store. This is a fresh point-in-time query on every replay; its retained stable receipt is not current authorization.
+
+- Actual runtime RED: three new tests / three unsupportedComponent errors, all unexpected as the behaviors were not implemented. The route constructor seam was present but did not change dispatch; exact red leaf/test bytes are preserved.
+- First GREEN3/0 covers actual original-inode ledger reopen, target old-epoch canonical upload restoration, unknown live schema, legal foreign-scope preservation, stable original Store receipt across Saga revision changes and actual close/reopen, missing/wrong Store routing, and restoration of normal-intent business after first receipt. Restored/unknown bytes and first receipts remain unchanged when replay refuses completion.
+- Frozen related selection: **27/0**, containing Recovery19 and Composition8 in one run, with **346 inputs unchanged before/post and matching source49c3258**. `git diff --check` passes. Earlier148/0, guard16/0 and replacement16/0 are separate input layers.
+
+| Evidence in bootstrap | SHA256 |
+| --- | --- |
+| `concrete-leaves-red.log` | `2b2e56a3992e4ca375472c8accc5be5687cb26ad588726d19d03f6f8db84cc7f` |
+| `concrete-leaves-red-source.swift` | `b1f82d91bab9ed76de60b28b02225ae8f0e65f5c34344bfb820c9701fa29bb8b` |
+| `concrete-leaves-red-tests.swift` | `435c8527ca6edadf58691769c780d1793fe5109b1f76ed374024ca713219a312` |
+| `concrete-leaves-three-green.log` | `feb5db8d15ce15f216ff3d2c27e454a8bfc3cc90f8129bec1ae7de3a941aa29c` |
+| `concrete-leaves-frozen-related.log` | `2bf2782bb8220645ed77384513a9c10ba5c328ad3d6bef51d2b151a33b638b7e` |
+| `concrete-leaves-checkpoint-inputs.json` | `36e635fe13d9abcd00b5dcb42ee2d1975ce17ebdf39c7b2d6cc3ec536356856f` |
+| `concrete-leaves-checkpoint-post.json` | `dc7a3caf7184696da2a7fb294a9e969b4670050de63f5c2cb528d1a8d2ed82ed` |
+| `concrete-leaves-checkpoint-commit-match.json` | `93472a38c935c7210841e9b64f14ffb98bef80b20c42399e3f37473f5d92e27a` |
+
+All-catalog aggregate completion remains unsupported at this checkpoint. It must include every current and retired component and freshly replay historical completed progress. Accepted043 mailbox drain and046 full capture inventory are still pending inputs. Health selection cannot be inferred from empty Store after erasure or from045's post-erasure witness; unknown or extra Store without original Saga/facts stays incomplete. No SDK, account, device, App/UI, power-loss or whole026 acceptance follows from this selection.
