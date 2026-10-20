@@ -410,3 +410,35 @@ Store completion always invokes fresh045 and saves/readbacks stable first bytes.
 | `local-aggregate-checkpoint-commit-match.json` | `6e95bb08b3a880c3630c9485f580361f52ec238dbe32ab93b44322668e96f619` |
 
 Independent reviews and accepted043/046/047 inputs are still required. These fixtures do not prove real Apple, CloudKit, Keychain, Health, WC, signing/devices, App/UI, power loss, production drainage or whole026 completion.
+
+
+## Original control-task exit ownership and multi-Store preflight
+
+Source `adff0f574424bf6292d1ec838cb1a22e66d55168` owns both resume and generic reconciliation Tasks. Final stop closes entry permanently, cancels each owned Task and joins its actual result, including cancellation-insensitive Cloud and original AuthorityHTTPRelay operations. The same original Session, repository, HTTP client and parent/capability remain available through the join. The controller stop does not close them and is not called by business quiescence. Repeated final stop shares its join Task.
+
+DEBUG development may explicitly inject the existing public AuthorityHTTPRelay protocol into the one original factory/client. Default injection is absent and unavailable. Release/production rejects explicit injection before first business DB open. The host negative fixture uses an isolated development signing material name; it proves early refusal, not production signing. No043 implementation is consumed or copied.
+
+The additional routed Store regression uses two real controlled compositions and their original DB capsules, with the extra Store's original parent Saga absent. Previously the first Store erased before the missing second Saga was discovered. The minimal aggregate now explicitly rejects multiple Store provenance before any Store erasure even when all route paths/inodes match; both business witnesses survive and independent Cloud completes. No product creates another Saga/Session/DB to make provenance appear complete.
+
+- New stop API gate/cancel skeleton actual RED **2/2** shows both control Tasks still outlive final stop. Joining both Task families makes the selected exit cases2/0.
+- Routed multi-Store actual runtime RED **1/3** shows first Store progress completed, its witness gone and partial first receipt saved. The first fixture attempt omitted await on a public actor URL property and is retained separately. Minimal unsupported admission gives the combined controller/multi-Store selection **3/0**.
+- First frozen related layer **38/7** includes one invalid production-test signer namespace plus the six known047 assertions;346 bytes remained unchanged. Correcting only that fixture to an isolated signer name yields one frozen related **38 tests /6 failures, zero unexpected**, exclusively047's same two cases. All other36 pass,346 inputs are unchanged before/post and match sourceadff0f5. No test is skipped or weakened. `git diff --check` passes.
+
+| Bootstrap evidence | SHA256 |
+| --- | --- |
+| `controller-exit-red.log` | `01e19d12b2137c1a30ed6f37c6037f88bbe7b84008d32deb045eca081ff8094a` |
+| `controller-exit-red-source.swift` | `e45b368ada8e439eb6a971de1075f1ab2d6cea85c5198cd6b5957073621471e9` |
+| `controller-exit-red-composition.swift` | `aea80b8b8705d19d2fb276f49ef97d05a32ae3c0d71e2abca1e42823581f1fe6` |
+| `controller-exit-red-tests.swift` | `5fc0b2241a11b5e40598b70b45eb50d830729105f972890eda32c2fa04b01833` |
+| `controller-exit-two-green.log` | `394468e1ed8db7857e77574e7a44ac88f8f3dc3ac6cc445feb50da033978a242` |
+| `local-multistore-runtime-red.log` | `5e33fa760f152c8f690035ac718f348112cee305eb32b992e28fddad2efceefd` |
+| `local-multistore-red-source.swift` | `029a9a7e6cbf9943e2acf2844507e8232ff0ccb9f896ac299b31b30fda086973` |
+| `local-multistore-red-tests.swift` | `3d947c141692d503678544209a938e5bda8e5ad1ca516b2f57bff119a76a7b00` |
+| `controller-and-multistore-three-green.log` | `40d30fd8da5f48bd0169d45c8c468c4ddca283239346ee69a4ba184b9eb4e458` |
+| `control-owner-frozen-related.log` (fixture38/7) | `dfb59ca982ace345f653c1df8754037ce5d8c7a8aec082bdd2ea09ddbfd79fd5` |
+| `control-owner-frozen-related-2.log` (single38/6) | `4b7745a00ee403d7894a73d119043417343e52fe86d14bb34c7f5696c9b829a9` |
+| `control-owner-checkpoint-inputs.json` | `714e8a832f5dc4a1b9f0b9e3b2b6473e4937f36a347e4dc036448dba9560ded8` |
+| `control-owner-checkpoint-post.json` | `dc7a3caf7184696da2a7fb294a9e969b4670050de63f5c2cb528d1a8d2ed82ed` |
+| `control-owner-checkpoint-commit-match.json` | `ade40255165ecf0f940d0e51a05bba42e86a9f412f91c414f97df557be883db4` |
+
+Composition's throwing final close, public Void context callback safety and App/serial-replacement routing are a following independent slice.043 mailbox,046 full Health inventory and047 strict Cloud reopen/replay remain blocked dependencies. No whole026, true SDK/device/account, App/UI, production or power-loss acceptance is established.
