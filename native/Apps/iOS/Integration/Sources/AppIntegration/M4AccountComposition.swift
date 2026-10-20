@@ -156,8 +156,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   /// A stable component receipt is derived only from this original facade's
   /// fresh045 SQL snapshot. Mutable Saga progress/revision is never frozen into it.
   func localStoreEvidence(capsule: M4OwnershipCapsule, parentID: String, parentIntentDigest: String, scope: CloudScope) async throws -> M4StoreCompletionEvidence {
-    guard capsule.kind == .businessStore, !capsule.root.directory, capsule.scope == scope,
-          try M4CatalogIO.encode(capsule.root) == M4CatalogIO.encode(M4CatalogIO.anchor(prepared.seed.businessDatabaseURL)) else { throw M4CatalogError.identityChanged }
+    try validateOriginalStoreCapsule(capsule, scope: scope)
     try await quiesceBusiness()
     try capsule.verifyCurrent()
     guard await session.syncRepositoryIdentity() == repository.syncRepositoryIdentity() else { throw AuthorityError.identityChanged }
@@ -167,6 +166,11 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     try capsule.verifyCurrent()
     return M4StoreCompletionEvidence(requestID: parentID, parentIntentDigest: parentIntentDigest, backendReceiptDigest: witness.backendReceiptDigest,
       scope: scope, database: capsule.root, localProgress: .completed)
+  }
+  func validateOriginalStoreCapsule(_ capsule: M4OwnershipCapsule, scope: CloudScope) throws {
+    guard capsule.kind == .businessStore, !capsule.root.directory, capsule.scope == scope,
+          try M4CatalogIO.encode(capsule.root) == M4CatalogIO.encode(M4CatalogIO.anchor(prepared.seed.businessDatabaseURL)) else { throw M4CatalogError.identityChanged }
+    try capsule.verifyCurrent()
   }
   private func unchanged(_ binding: AccountBindingV4, generation: Int64, token: UUID) async throws {
     guard !closed, !businessStopped, lifetime == token, try await repository.identityGenerationV4() == generation,

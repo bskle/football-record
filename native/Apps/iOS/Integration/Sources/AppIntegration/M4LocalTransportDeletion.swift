@@ -85,6 +85,15 @@ struct M4LocalTransportLeaves: Sendable {
 
 }
 
+/// Internal controlled seam only. The production default cannot prove that
+/// retained transport/control payload directories have drained.
+protocol M4LocalCopyDrainChecking: Sendable {
+  func assertDrained(scope: CloudScope, requestID: String, parentIntentDigest: String) async throws
+}
+struct M4UnavailableLocalCopyDrain: M4LocalCopyDrainChecking {
+  func assertDrained(scope: CloudScope, requestID: String, parentIntentDigest: String) async throws { throw M4LocalErasureError.unavailable }
+}
+
 /// One original Session/facade. This guard is also used by direct coordinator
 /// entrances so bypassing a UI resume helper cannot bypass erasure admission.
 @MainActor final class M4DeletionAdmission {
@@ -95,11 +104,15 @@ struct M4LocalTransportLeaves: Sendable {
   let healthArtifacts: M4RetainedHealthArtifactStore?
   let healthLedger: SQLiteHealthDeletionLedger?
   let allowedHealthSourceOrigin: M4HealthSourceEvidence.Origin
+  let localLeaves: M4LocalTransportLeaves?
+  let copyDrain: any M4LocalCopyDrainChecking
   init(composition: M4AccountComposition, catalog: M4OwnedDataCatalog, scope: CloudScope, ledger: any CloudLedger,
        healthArtifacts: M4RetainedHealthArtifactStore? = nil, healthLedger: SQLiteHealthDeletionLedger? = nil,
-       allowedHealthSourceOrigin: M4HealthSourceEvidence.Origin = .platformObservation) {
+       allowedHealthSourceOrigin: M4HealthSourceEvidence.Origin = .platformObservation,
+       localLeaves: M4LocalTransportLeaves? = nil, copyDrain: any M4LocalCopyDrainChecking = M4UnavailableLocalCopyDrain()) {
     self.composition = composition; self.catalog = catalog; self.scope = scope; self.ledger = ledger
     self.healthArtifacts = healthArtifacts; self.healthLedger = healthLedger; self.allowedHealthSourceOrigin = allowedHealthSourceOrigin
+    self.localLeaves = localLeaves; self.copyDrain = copyDrain
   }
   func resume(requestID: String) async throws -> DeletionSagaV4 {
     guard let original = try await composition.repository.deletionSagaV4(requestID: requestID) else { throw LifecycleClientError.unknownOriginal }
@@ -127,7 +140,7 @@ struct M4LocalTransportLeaves: Sendable {
   }
   func localErase(requestID: String) async throws -> DeletionSagaV4 {
     let original = try await resume(requestID: requestID), plan = try catalog.requireOriginalParentSeal(saga: original)
-    if plan.choices.health == .keep { return original }
+    if plan.choices.health == .keep { try await localPrerequisites(plan); return original }
     if let issue = plan.health.issue {
       switch issue {
       case .missingMapping: throw M4HealthBridgeError.missingMapping
@@ -152,7 +165,54 @@ struct M4LocalTransportLeaves: Sendable {
     let actual = try await resume(requestID: requestID), after = try catalog.requireOriginalParentSeal(saga: actual)
     guard try M4CatalogIO.encode(after.fullSeal) == M4CatalogIO.encode(plan.fullSeal),
           try M4CatalogIO.encode(after.preparedHealth) == M4CatalogIO.encode(plan.preparedHealth) else { throw M4HealthBridgeError.identityConflict }
-    return actual
+    // Complete original Store capture inventory is an independent leaf input.
+    // Until accepted046 is connected, a matching artifact is not proof that late
+    // or orphaned positive observations were included before first Store erase.
+    throw M4HealthBridgeError.unsupportedSelection
+  }
+  private func localPrerequisites(_ plan: M4FrozenDeletionPlan) async throws {
+    guard let leaves = localLeaves, leaves.catalog === catalog else { throw M4LocalErasureError.unsupportedComponent }
+    try await copyDrain.assertDrained(scope: scope, requestID: plan.requestID, parentIntentDigest: try requiredDigest(plan))
+    // Every business Store needs its own original facade and same-parent proof.
+    // Prove route identities before the first mutating Store entrance.
+    for entry in plan.entries where entry.capsule.kind == .businessStore {
+      guard let route = leaves.storeRoutes[entry.capsule.componentID] else { throw M4LocalErasureError.unsupportedComponent }
+      try route.validateOriginalStoreCapsule(entry.capsule, scope: plan.scope)
+    }
+  }
+  private func requiredDigest(_ plan: M4FrozenDeletionPlan) throws -> String {
+    guard let digest = plan.parentIntentDigest else { throw M4LocalErasureError.intentMismatch }; return digest
+  }
+  func storeCompletion(requestID: String) async throws {
+    let original = try await localErase(requestID: requestID), plan = try catalog.requireOriginalParentSeal(saga: original)
+    guard original.localChoice == .delete, original.localProgress == .completed,
+          let leaves = localLeaves, leaves.catalog === catalog else { throw M4LocalErasureError.unsupportedComponent }
+    let stores = plan.entries.filter { $0.capsule.kind == .businessStore }
+    guard !stores.isEmpty else { throw M4LocalErasureError.unsupportedComponent }
+    // A crash after Store commit and before catalog receipt can reconstruct only
+    // this original component using a fresh045 read, never a cached progress bit.
+    for entry in stores { _ = try await leaves.erase(componentID: entry.capsule.componentID, parentID: requestID, parentIntentDigest: try requiredDigest(plan)) }
+  }
+  func purgeLocalCopies(requestID: String, requireFirstReceipts: Bool = false) async throws {
+    let original = try await localErase(requestID: requestID), plan = try catalog.requireOriginalParentSeal(saga: original)
+    guard original.localProgress == .completed, let leaves = localLeaves, leaves.catalog === catalog else { throw M4LocalErasureError.unsupportedComponent }
+    if requireFirstReceipts {
+      guard plan.receipts?.count == plan.entries.count else { throw M4LocalErasureError.intentMismatch }
+    }
+    try await storeCompletion(requestID: requestID)
+    for entry in plan.entries where entry.capsule.kind != .businessStore {
+      _ = try await leaves.erase(componentID: entry.capsule.componentID, parentID: requestID, parentIntentDigest: try requiredDigest(plan))
+    }
+    let actual = try await resume(requestID: requestID), after = try catalog.requireOriginalParentSeal(saga: actual)
+    guard after.catalogDigest == plan.catalogDigest, after.parentIntentDigest == plan.parentIntentDigest,
+          let receipts = after.receipts, receipts.count == after.entries.count else { throw M4LocalErasureError.intentMismatch }
+    for receipt in receipts { try receipt.validate(plan: after) }
+    try await copyDrain.assertDrained(scope: scope, requestID: requestID, parentIntentDigest: try requiredDigest(after))
+  }
+  func validateHistoricalLocalCompletion(_ saga: DeletionSagaV4) async throws {
+    guard saga.localChoice == .delete else { return }
+    if saga.localProgress == .completed { try await storeCompletion(requestID: saga.intent.requestID) }
+    if saga.localTransportProgress == .completed { try await purgeLocalCopies(requestID: saga.intent.requestID, requireFirstReceipts: true) }
   }
   func healthCompletion(requestID: String) async throws {
     _ = try await localErase(requestID: requestID)
@@ -207,12 +267,18 @@ struct M4GuardedLifecycleCoordinator: LifecycleInboundCoordinator, ControlQueueI
   func createDeletionSaga(_ saga: DeletionSagaV4) async throws { try await admission.creation(saga); try await original.createDeletionSaga(saga) }
   func updateDeletionSaga(_ saga: DeletionSagaV4, expectedRevision: Int64) async throws {
     let prior = try await admission.resume(requestID: saga.intent.requestID)
-    if saga.localTransportProgress == .completed, prior.localTransportProgress != .completed { throw M4LocalErasureError.unsupportedComponent }
+    if prior.localProgress == .completed { try await admission.storeCompletion(requestID: saga.intent.requestID) }
+    if saga.localTransportProgress == .completed { try await admission.purgeLocalCopies(requestID: saga.intent.requestID, requireFirstReceipts: true) }
     if saga.healthProgress == .completed, prior.healthProgress != .completed { try await admission.healthCompletion(requestID: saga.intent.requestID) }
     try await original.updateDeletionSaga(saga, expectedRevision: expectedRevision)
   }
   func acceptDeletion(requestID: String, receipt: VerifiedAuthorityReceiptV1, expectedRevision: Int64) async throws -> DeletionSagaV4 { _ = try await admission.resume(requestID: requestID); return try await original.acceptDeletion(requestID: requestID, receipt: receipt, expectedRevision: expectedRevision) }
-  func eraseLocalBusiness(requestID: String, expectedRevision: Int64) async throws -> DeletionSagaV4 { _ = try await admission.localErase(requestID: requestID); return try await original.eraseLocalBusiness(requestID: requestID, expectedRevision: expectedRevision) }
+  func eraseLocalBusiness(requestID: String, expectedRevision: Int64) async throws -> DeletionSagaV4 {
+    _ = try await admission.localErase(requestID: requestID)
+    let erased = try await original.eraseLocalBusiness(requestID: requestID, expectedRevision: expectedRevision)
+    try await admission.storeCompletion(requestID: requestID)
+    return erased
+  }
   func setAnalyticsEnabled(_ enabled: Bool) async throws { try await original.setAnalyticsEnabled(enabled) }
   func enqueueAnalytics(_ event: AnalyticsEventV4) async throws { try await original.enqueueAnalytics(event) }
   func acknowledgeAnalytics(requestID: String) async throws { try await original.acknowledgeAnalytics(requestID: requestID) }
@@ -222,8 +288,7 @@ struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
   func purgeBusinessCopies(_ request: LocalTransportDeletionRequest) async throws {
     let saga = try await admission.localErase(requestID: request.requestID)
     guard saga.intent.digest == request.requestDigest, request.scope == admission.scope else { throw AuthorityError.intentMismatch }
-    // 044/045 current-zero aggregate dependencies are not accepted yet.
-    throw M4LocalErasureError.unsupportedComponent
+    try await admission.purgeLocalCopies(requestID: request.requestID)
   }
 }
 
@@ -242,8 +307,11 @@ struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
     if let prior = running[key] { return try await prior.value }
     let admission = admission, service = service
     let task = Task {
-      _ = try await admission.resume(requestID: requestID); try Task.checkCancellation()
-      return try await service.resumeDeletion(requestID: requestID)
+      let original = try await admission.resume(requestID: requestID)
+      try await admission.validateHistoricalLocalCompletion(original); try Task.checkCancellation()
+      let result = try await service.resumeDeletion(requestID: requestID)
+      try await admission.validateHistoricalLocalCompletion(result)
+      return result
     }
     running[key] = task; defer { running[key] = nil }
     return try await task.value

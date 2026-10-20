@@ -95,6 +95,32 @@ import HealthKitDeletion
     XCTAssertEqual(try M4CatalogIO.encode(reopened.receipts(requestID: plan.requestID)), saved)
     try reopened.close()
   }
+  func testCloudCachedReceiptMissingInternalProofMustNotEraseRestoredPayload() async throws {
+    try await cloudLostProofFixture(legacyV3: false)
+  }
+  func testCloudCachedReceiptLegacyV3MustNotMigrateOrEraseRestoredPayload() async throws {
+    try await cloudLostProofFixture(legacyV3: true)
+  }
+  private func cloudLostProofFixture(legacyV3: Bool) async throws {
+    let root = try root(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog")), url = root.appendingPathComponent("proof-ledger.sqlite")
+    let scope = try scope(), ledger = try SQLiteCloudLedger(url: url)
+    let record = try CloudRecord(scope: scope, payload: .deletion(CloudDeletion(matchID: "proof-match", deletionID: "proof-delete", deletedAt: Date(timeIntervalSince1970: 10))))
+    try await ledger.enqueue(CloudUpload(id: "proof-upload", scope: scope, record: record))
+    let row = try XCTUnwrap(sqlStrings(url, "SELECT quote(id)||','||quote(scope)||','||quote(digest)||','||quote(original)||','||quote(state)||','||quote(attempts)||','||quote(issue)||','||quote(retry_ms)||','||quote(attempted_ms) FROM cloud_uploads WHERE id='proof-upload'").first)
+    let capsule = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "proof-ledger", kind: .cloudLedger, scope: scope, root: url, retainedControls: [])
+    let plan = try seal(catalog, capsules: [capsule]); try await ledger.close()
+    let leaves = M4LocalTransportLeaves(catalog: catalog), first = try await erase(leaves, capsule, plan)
+    let edits = legacyV3 ? "DROP TABLE cloud_local_erase_receipts; DROP TABLE cloud_local_erase_fences; PRAGMA user_version=3;" : "DELETE FROM cloud_local_erase_receipts; DELETE FROM cloud_local_erase_fences;"
+    try executeSQL(url, edits + "INSERT INTO cloud_uploads VALUES(" + row + ")")
+    let schema = try sqlStrings(url, "SELECT type||':'||name||':'||coalesce(sql,'') FROM sqlite_schema ORDER BY type,name"), version = try sqlStrings(url, "PRAGMA user_version")
+    let original = try sqlStrings(url, "SELECT hex(original) FROM cloud_uploads WHERE id='proof-upload'"), identity = try M4CatalogIO.encode(M4CatalogIO.anchor(url))
+    do { _ = try await erase(leaves, capsule, plan); XCTFail("external first receipt requires retained internal proof; it cannot authorize a fresh re-erase or constructor migration") } catch {}
+    XCTAssertEqual(try sqlStrings(url, "SELECT hex(original) FROM cloud_uploads WHERE id='proof-upload'"), original)
+    XCTAssertEqual(try sqlStrings(url, "SELECT type||':'||name||':'||coalesce(sql,'') FROM sqlite_schema ORDER BY type,name"), schema)
+    XCTAssertEqual(try sqlStrings(url, "PRAGMA user_version"), version)
+    XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(url)), identity)
+    XCTAssertEqual(try M4CatalogIO.encode(catalog.receipts(requestID: plan.requestID)), try M4CatalogIO.encode([first])); try catalog.close()
+  }
   func testConcreteCloudLeafPreservesUnknownLiveLayoutAfterFirstReceipt() async throws {
     let root = try root(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog")), url = root.appendingPathComponent("ledger.sqlite")
     let ledger = try SQLiteCloudLedger(url: url); try await ledger.close()
@@ -279,13 +305,13 @@ import HealthKitDeletion
   }
   func testHealthKeepUsesGeneralParentSealWithoutInventingHealthArtifacts() async throws {
     let f = try await deletionGuardFixture(healthIssue: nil), cloud = GateControlledCloud()
-    let admission = M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger)
+    let admission = controlledAggregateAdmission(f)
     let service = LifecycleService(client: f.composition.client, repository: f.composition.repository, coordinator: M4GuardedLifecycleCoordinator(admission: admission), scope: f.scope, ledger: f.ledger, cloudDeletion: cloud, localTransportDeletion: M4GuardedLocalTransportDeletion(admission: admission))
     let result = try await service.resumeDeletion(requestID: f.saga.intent.requestID)
     XCTAssertEqual(result.localProgress, .completed); XCTAssertEqual(result.healthProgress, .retained)
     XCTAssertEqual(try businessWitnessCount(f.database), 0)
     XCTAssertNil(try f.catalog.healthFullSeal(parentID: f.saga.intent.requestID))
-    XCTAssertFalse(result.finished, "pending current-zero aggregate cannot fabricate completion")
+    XCTAssertTrue(result.finished, "the explicit controlled copy drain and every concrete local leaf must complete")
     try await f.close()
   }
   func testUnsealedDirectServiceAndCoordinatorCannotBypassGeneralResumeGate() async throws {
@@ -349,6 +375,72 @@ import HealthKitDeletion
     let calls = await cloud.calls; XCTAssertEqual(calls, 0); XCTAssertEqual(try businessWitnessCount(f.database), 1)
     try await f.close()
   }
+  private func aggregateLeaves(_ f: GateFixture, deviceDriver: any DeviceSyncErasureDriving = LocalControlledDrain()) -> M4LocalTransportLeaves {
+    M4LocalTransportLeaves(catalog: f.catalog, stagingControls: ["retired-staging": f.root.appendingPathComponent("retired-staging-control.sqlite")], deviceDriver: deviceDriver, storeRoutes: ["guard-store": f.composition])
+  }
+  private func controlledAggregateAdmission(_ f: GateFixture, deviceDriver: any DeviceSyncErasureDriving = LocalControlledDrain()) -> M4DeletionAdmission {
+    M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger,
+      localLeaves: aggregateLeaves(f, deviceDriver: deviceDriver), copyDrain: GateControlledCopyDrain(scope: f.scope, parent: f.saga.intent.requestID, digest: f.saga.intent.digest))
+  }
+  func testAggregateDefaultCopyDrainPreservesStoreAndAllowsIndependentCloud() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil), cloud = GateControlledCloud()
+    let admission = M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger, localLeaves: aggregateLeaves(f))
+    let result = try await M4DeletionResumeController(admission: admission, cloudDeletion: cloud).resume(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(result.cloudProgress, .completed); XCTAssertEqual(result.localProgress, .failed); XCTAssertEqual(result.localTransportProgress, .failed)
+    XCTAssertEqual(try businessWitnessCount(f.database), 1); XCTAssertFalse(result.finished)
+    XCTAssertTrue(try f.catalog.receipts(requestID: result.intent.requestID).isEmpty); try await f.close()
+  }
+  func testAggregateUsesEveryCurrentAndRetiredLeafThenReplaysHistoricalCompleted() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, additionalTransport: true), admission = controlledAggregateAdmission(f), cloud = GateControlledCloud()
+    let controller = M4DeletionResumeController(admission: admission, cloudDeletion: cloud)
+    let result = try await controller.resume(requestID: f.saga.intent.requestID)
+    XCTAssertTrue(result.finished); XCTAssertEqual(result.localTransportProgress, .completed); XCTAssertEqual(try businessWitnessCount(f.database), 0)
+    let plan = try XCTUnwrap(f.catalog.plan(requestID: result.intent.requestID)), receipts = try f.catalog.receipts(requestID: result.intent.requestID)
+    XCTAssertEqual(receipts.count, plan.entries.count); XCTAssertEqual(Set(receipts.map(\.kind)), Set([.businessStore, .cloudLedger, .cloudStaging, .deviceSync]))
+    XCTAssertTrue(plan.entries.contains(where: { $0.retired && $0.capsule.kind == .cloudLedger }))
+    let firstBytes = try M4CatalogIO.encode(receipts)
+    let replay = try await controller.resume(requestID: result.intent.requestID)
+    XCTAssertTrue(replay.finished); XCTAssertEqual(replay.intent, f.saga.intent); XCTAssertEqual(replay.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(try M4CatalogIO.encode(f.catalog.receipts(requestID: result.intent.requestID)), firstBytes)
+    try executeSQL(f.root.appendingPathComponent("retired-ledger.sqlite"), "CREATE TABLE future_business(value BLOB) STRICT; INSERT INTO future_business VALUES(X'040506')")
+    do { _ = try await controller.resume(requestID: result.intent.requestID); XCTFail("historical transport completed cannot bypass every actual leaf replay") }
+    catch { XCTAssertEqual(error as? CloudError, CloudError(.invalidPayload)) }
+    XCTAssertEqual(try sqlStrings(f.root.appendingPathComponent("retired-ledger.sqlite"), "SELECT hex(value) FROM future_business"), ["040506"])
+    XCTAssertEqual(try M4CatalogIO.encode(f.catalog.receipts(requestID: result.intent.requestID)), firstBytes); try await f.close()
+  }
+  func testAggregateUnknownAdditionalStoreBlocksBeforeErasingOriginalStore() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, additionalStore: true), admission = controlledAggregateAdmission(f), cloud = GateControlledCloud()
+    let before = try Data(contentsOf: f.root.appendingPathComponent("unproven-store.sqlite"))
+    let result = try await M4DeletionResumeController(admission: admission, cloudDeletion: cloud).resume(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(result.cloudProgress, .completed); XCTAssertEqual(result.localProgress, .failed); XCTAssertEqual(result.localTransportProgress, .failed)
+    XCTAssertEqual(try businessWitnessCount(f.database), 1); XCTAssertFalse(result.finished)
+    XCTAssertEqual(try Data(contentsOf: f.root.appendingPathComponent("unproven-store.sqlite")), before)
+    XCTAssertTrue(try f.catalog.receipts(requestID: result.intent.requestID).isEmpty); try await f.close()
+  }
+  func testAggregatePendingDeviceNeverBecomesCompleteAndCanRetryOriginalParent() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, additionalTransport: true), cloud = GateControlledCloud()
+    let blocked = controlledAggregateAdmission(f, deviceDriver: UnavailableDeviceSyncErasureDriver())
+    let first = try await M4DeletionResumeController(admission: blocked, cloudDeletion: cloud).resume(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(first.localProgress, .completed); XCTAssertEqual(first.localTransportProgress, .failed); XCTAssertFalse(first.finished)
+    let firstReceipts = try f.catalog.receipts(requestID: first.intent.requestID)
+    XCTAssertTrue(firstReceipts.contains(where: { $0.kind == .businessStore })); XCTAssertFalse(firstReceipts.contains(where: { $0.kind == .deviceSync }))
+    let retry = try await M4DeletionResumeController(admission: controlledAggregateAdmission(f), cloudDeletion: cloud).resume(requestID: first.intent.requestID)
+    XCTAssertTrue(retry.finished); XCTAssertEqual(retry.intent, first.intent); XCTAssertEqual(retry.recoveryCapability, first.recoveryCapability)
+    for original in firstReceipts { XCTAssertTrue(try f.catalog.receipts(requestID: first.intent.requestID).contains(where: { try M4CatalogIO.encode($0) == M4CatalogIO.encode(original) })) }
+    try await f.close()
+  }
+  func testAggregateHistoricalStoreCompletedStillRunsFresh045BeforeReturn() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil), admission = controlledAggregateAdmission(f)
+    let controller = M4DeletionResumeController(admission: admission, cloudDeletion: GateControlledCloud())
+    let completed = try await controller.resume(requestID: f.saga.intent.requestID)
+    XCTAssertTrue(completed.finished)
+    let first = try M4CatalogIO.encode(f.catalog.receipts(requestID: completed.intent.requestID)), raw = try M4CatalogIO.encode("restored after completion"), hex = raw.map { String(format: "%02x", $0) }.joined()
+    try executeSQL(f.database, "INSERT INTO lifecycle_steps_v4 VALUES('normal-intent:guard-witness',X'" + hex + "','" + M4CatalogIO.hash(raw) + "')")
+    do { _ = try await controller.resume(requestID: completed.intent.requestID); XCTFail("historical Store completed is not a current-zero authority") }
+    catch { XCTAssertEqual(error as? LocalBusinessErasureErrorV4, .residualBusiness(table: "lifecycle_steps_v4")) }
+    XCTAssertEqual(try businessWitnessCount(f.database), 1); XCTAssertEqual(try M4CatalogIO.encode(f.catalog.receipts(requestID: completed.intent.requestID)), first)
+    try await f.close()
+  }
   private struct GateFixture {
     let root: URL
     let composition: M4AccountComposition
@@ -360,7 +452,7 @@ import HealthKitDeletion
     let database: URL
     func close() async throws { try await composition.quiesceBusiness(); try catalog.close(); try await ledger.close(); try await prepared.close() }
   }
-  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true) async throws -> GateFixture {
+  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false) async throws -> GateFixture {
     let root = try root(), namespace = "guard-fixture", key = Curve25519.Signing.PrivateKey()
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["guard-key": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
     let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("identity-control")) { seed in
@@ -373,6 +465,23 @@ import HealthKitDeletion
     let database = prepared.seed.businessDatabaseURL
     try catalog.record(M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "guard-store", kind: .businessStore, scope: scope, root: database, retainedControls: []))
     try catalog.record(M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "guard-ledger", kind: .cloudLedger, scope: scope, root: ledgerURL, retainedControls: []))
+    if additionalTransport {
+      let (staged, capsule, _) = try staging(root, id: "retired-staging"); try staged.close(); try catalog.record(capsule); try catalog.retire(componentID: capsule.componentID)
+      let directory = root.appendingPathComponent("DeviceSync"), context = try DeviceSyncStorageContext(root: directory)
+      let device = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "owned-device", kind: .deviceSync, scope: scope, root: directory,
+        retainedControls: [directory.appendingPathComponent(".control/.owner"), directory.appendingPathComponent(".control/control.sqlite")])
+      try context.bind(device.deviceBinding()); try catalog.record(device)
+      let oldURL = root.appendingPathComponent("retired-ledger.sqlite"), old = try SQLiteCloudLedger(url: oldURL)
+      let oldScope = try CloudScope(accountID: scope.accountID, cloudSpaceID: scope.cloudSpaceID, zoneID: scope.zoneID, activationEpoch: 1)
+      let record = try CloudRecord(scope: oldScope, payload: .deletion(CloudDeletion(matchID: "retired", deletionID: "retired", deletedAt: Date(timeIntervalSince1970: 10))))
+      try await old.enqueue(CloudUpload(id: "retired-payload", scope: oldScope, record: record)); try await old.close()
+      let capsuleOld = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "retired-ledger", kind: .cloudLedger, scope: oldScope, root: oldURL, retainedControls: [])
+      try catalog.record(capsuleOld); try catalog.retire(componentID: capsuleOld.componentID)
+    }
+    if additionalStore {
+      let extra = root.appendingPathComponent("unproven-store.sqlite"); try Data("unproven original Store without same-parent Saga".utf8).write(to: extra)
+      try catalog.record(M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "unproven-store", kind: .businessStore, scope: scope, root: extra, retainedControls: []))
+    }
     let health: ClientDeletionChoiceV4 = healthIssue == nil ? .keep : .delete
     let choices = M4DeletionChoices(cloud: .delete, local: .delete, health: health, healthConfirmed: health == .delete)
     _ = try catalog.reserve(requestID: "guard-parent", scope: scope, choices: choices, health: M4HealthReservation(selections: [], issue: healthIssue))
@@ -436,4 +545,12 @@ private actor LocalCountingDrain: DeviceSyncErasureDriving {
 private actor GateControlledCloud: CloudAccountDeletionDriver {
   private(set) var calls = 0
   func deletePrivateZone(scope: CloudScope) async throws { calls += 1 }
+}
+
+private struct GateControlledCopyDrain: M4LocalCopyDrainChecking {
+  let scope: CloudScope
+  let parent, digest: String
+  func assertDrained(scope: CloudScope, requestID: String, parentIntentDigest: String) async throws {
+    guard scope == self.scope, requestID.utf8.elementsEqual(parent.utf8), parentIntentDigest == digest else { throw M4LocalErasureError.intentMismatch }
+  }
 }
