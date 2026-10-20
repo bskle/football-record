@@ -569,3 +569,23 @@ The Watch cases drive original WatchRegistrationService with040 typed relay and 
 Scoped3/0 then one frozen full Composition class26/0;353 before/post/commit0diff, diff-check0. Frozen log `/private/tmp/football-record-NATIVE026-build/bootstrap/service-fresh-flows-frozen-composition.log` SHA256 `2b58ae60063ad1f434df9b96a6c1122733aace59ba010bd66d1065ae59c27d7d`. inputs.json, post.json, frozen-tests.swift and commit-match.json share prefix service-fresh-flows-. Earlier fixture-config-initial.log preserves strict namespace3unexpected; three.log and diagnostic/diagnostic-counts logs preserve noncanonical Challenge3unexpected and finite original invalidWire/read/HTTP counts. canonical.log is the corrected3/0. The fixture corrected its own namespace/canonical encoding; no product or upstream source changed.
 
 The previous service-owner79/0 and Release product build remain separate evidence. They are not combined into a fabricated82-test single run.051/052 have not been consumed; full material/inbox/control assembly, actual Node E2E, App/UI, real account/device/provider and whole026 acceptance remain pending.
+
+
+### Cancelled late factory result retains and drains its original owner
+
+Source `80101c5dbe23befc1794e90a42aeb2f959622054` keeps cancellation tied to the actual caller Task through the asynchronous factory. If that caller was cancelled while the factory was held, the real returned context becomes the retained current owner before shutdown is awaited; only successful shutdown clears it and returns CancellationError. A close failure propagates its original error, retains that same owner and prevents the next factory. This uses the existing FIFO without an unstructured worker or a synthetic cancellation flag.
+
+Two actual regressions were RED2tests/3assertions/0unexpected, then the unchanged two cases pass2/0. The first holds the original Session capture gateway inside the real factory, cancels its caller, queues a valid replacement and proves the original positive observation is joined/persisted before DB close or the queued factory. The second replaces the actual retained identity.owner inode with a foreign fixture file and proves the original identity-lease preflight refuses close, the original DB remains readable, both cancelled and queued calls receive failure, and no queued factory executes. Restoring the same original inode permits retry of that same unpublished owner. This is a lease-preflight refusal, not SQLite.close failure or a device fault; the capture fixture is explicit unbound development.
+
+The first frozen related command was36tests/1unexpected: the existing Watch credential-tail fixture enumerated an outgoing mailbox JSON that the real client consumed before Data(contentsOf:). Its original log and353-input before/post manifests remain preserved. Root-approved helper-only commit `e980e7fdeaa544b8e93eed71d8139f47033a3b6f` retries exactly NSCocoaErrorDomain/NSFileReadNoSuchFileError260 at that read; other reads and JSON errors still throw. It neither changes product behavior nor removes business assertions, and the fixture race is not counted as product RED.
+
+After that separate fix, the exact frozen related command passes **36/0** (Context9 + Composition26 + DevicePair1),353 inputs before/post/commit0diff and diff-check0. Evidence prefix `/private/tmp/football-record-NATIVE026-build/bootstrap/factory-cancellation-`: red.log/red-source.swift/red-tests.swift, green.log, fixture-race-frozen-related.log/fixture-race-inputs.json/fixture-race-post.json, inputs.json, frozen-source.swift/frozen-tests.swift/frozen-mailbox-tests.swift, frozen-related.log, post.json and commit-match.json.
+
+| Log | SHA256 |
+| --- | --- |
+| red.log | `0e55288b272c2c92c14db266af47475c5354ce5dbb534be06501412265bdfef7` |
+| green.log | `7773e7dce34ca9ee0d89809757faa35774786ea6e66c406022aecab29a6ebbad` |
+| fixture-race-frozen-related.log | `aeb5d0d3688e516e438bfa12e0617e70d9491fc3d39cb61dd64b736f3c27fca2` |
+| frozen-related.log | `15c156bc4418b7ab1197b406dfedebf03f7ea17d53d5a5fba6a8765f0b0205ca` |
+
+No Release/SDK/App/UI matrix was rerun for this scoped checkpoint. The previous79/0, Composition26/0 and Release host build remain separate layers;36/0 is not whole026 acceptance. Author stops clean for accepted051 dependency handoff, preserving empty .swiftpm/xcode metadata. Material/inbox and control reauthentication assembly, actual Node E2E, whole026 source/final reviews and deferred real account/device/provider tests remain pending.
