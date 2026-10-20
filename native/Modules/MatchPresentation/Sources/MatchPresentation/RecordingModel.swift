@@ -24,7 +24,11 @@ extension MatchSession: SessionCommanding {}
   @ObservationIgnored private var authorityRead = UUID()
   public var authorityTerminal: Bool { authorityStatus == .releasedAbnormal || authorityStatus == .releasedNormal || authorityStatus == .terminationPending || authorityStatus == .terminal }
   public private(set) var history: [SessionSnapshot] = []
-  public var metrics = LiveMetrics()
+  private var retainedMetrics = LiveMetrics()
+  public var metrics: LiveMetrics {
+    get { retainedMetrics }
+    set { if !stopped { retainedMetrics = newValue } }
+  }
   public let development: Bool
   public let developmentPair: Bool
   public let syncStatus: SyncStatusModel
@@ -39,16 +43,30 @@ extension MatchSession: SessionCommanding {}
   @ObservationIgnored private var lifecycle = UUID()
   @ObservationIgnored private var stopped = false
   @ObservationIgnored private var acknowledged = Set<String>()
+  @ObservationIgnored private var operations = 0
+  @ObservationIgnored private var operationDrainers: [CheckedContinuation<Void, Never>] = []
+  @ObservationIgnored private var ownedTasks: [UUID: Task<Void, Never>] = [:]
+  @ObservationIgnored private var shutdownTask: Task<Void, Never>?
+  private func beginOperation() { operations += 1 }
+  private func endOperation() {
+    operations -= 1
+    if operations == 0 {
+      let waiting = operationDrainers; operationDrainers.removeAll()
+      waiting.forEach { $0.resume() }
+    }
+  }
   public var canRecord: Bool {
     guard !stopped, let snapshot else { return false }
     return !authorityTerminal && !busy && !readOnly && pendingRequest == nil && [.running, .paused].contains(snapshot.replay.state)
   }
   public func load() async {
-    guard !busy, !stopped else { return }; busy = true; defer { busy = false }
+    guard !busy, !stopped else { return }; beginOperation(); busy = true; defer { busy = false; endOperation() }
     let lifetime = lifecycle
     await syncStatus.start()
+    guard lifecycle == lifetime, !stopped else { return }
     do {
       try await refreshHistory()
+      guard lifecycle == lifetime, !stopped else { return }
       var recoveredIssue: String? = readOnly ? nil : issue
       let recovery = try await session.recover()
       guard lifecycle == lifetime, !stopped else { return }
@@ -90,34 +108,42 @@ extension MatchSession: SessionCommanding {}
   }
   public func start(starter: Bool) async {
     guard !stopped, !busy, !readOnly, snapshot == nil || canStartNext, pendingRequest == nil else { return }
-    busy = true; defer { busy = false }
-    do { pendingRequest = try await session.prepareStart(starter: starter); await submit() }
-    catch { issue = Self.message(error) }
+    beginOperation(); busy = true; defer { busy = false; endOperation() }
+    do {
+      let request = try await session.prepareStart(starter: starter)
+      guard !stopped else { return }
+      pendingRequest = request; await submit()
+    } catch { if !stopped { issue = Self.message(error) } }
   }
   public func perform(_ action: SessionAction) async {
     guard canRecord, let snapshot else { return }
-    busy = true; defer { busy = false }
+    beginOperation(); busy = true; defer { busy = false; endOperation() }
     do {
-      pendingRequest = try await session.prepare(action, matchID: snapshot.replay.matchID)
-      await submit()
-    } catch { issue = Self.message(error) }
+      let request = try await session.prepare(action, matchID: snapshot.replay.matchID)
+      guard !stopped else { return }
+      pendingRequest = request; await submit()
+    } catch { if !stopped { issue = Self.message(error) } }
   }
   public func retry() async {
-    guard !busy, !readOnly, pendingRequest != nil else { return }
-    busy = true; defer { busy = false }; await submit()
+    guard !stopped, !busy, !readOnly, pendingRequest != nil else { return }
+    beginOperation(); busy = true; defer { busy = false; endOperation() }; await submit()
   }
   private func submit() async {
-    guard let original = pendingRequest else { return }
+    guard !stopped, let original = pendingRequest else { return }
     do { acknowledge(try await session.execute(original)) }
     catch {
+      guard !stopped else { return }
       if error as? StoreError == .staleGeneration, original.startIntent == nil {
         do {
           // Only an explicit stale CAS and a validated lookup miss permit a fresh command.
-          guard try await repository.committedCommandV2(commandID: original.commandID) == nil else {
-            acknowledge(try await session.execute(original)); return
-          }
-          accept(try await session.snapshot(matchID: original.matchID))
+          let saved = try await repository.committedCommandV2(commandID: original.commandID)
+          guard !stopped else { return }
+          if saved != nil { acknowledge(try await session.execute(original)); return }
+          let current = try await session.snapshot(matchID: original.matchID)
+          guard !stopped else { return }
+          accept(current)
           let replacement = try await session.prepare(original.action, matchID: original.matchID)
+          guard !stopped else { return }
           pendingRequest = replacement
           acknowledge(try await session.execute(replacement)); return
         } catch {
@@ -129,6 +155,7 @@ extension MatchSession: SessionCommanding {}
     }
   }
   private func handleFailure(_ error: any Error) {
+    guard !stopped else { return }
     if error as? MatchCommandError == .debounced { pendingRequest = nil }
     // Do not restore a click-time snapshot: a newer committed capture update may already be visible.
     issue = Self.message(error)
@@ -137,7 +164,15 @@ extension MatchSession: SessionCommanding {}
     guard !stopped else { return }
     accept(result.snapshot); pendingRequest = nil; issue = nil
     if acknowledged.insert(result.receipt.commandID).inserted { feedbackCount += 1 }
-    Task { try? await refreshHistory(); await syncStatus.wake() }
+    let id = UUID()
+    ownedTasks[id] = Task { [weak self] in
+      guard let self else { return }
+      defer { self.ownedTasks.removeValue(forKey: id) }
+      guard !self.stopped, !Task.isCancelled else { return }
+      try? await self.refreshHistory()
+      guard !self.stopped, !Task.isCancelled else { return }
+      await self.syncStatus.wake()
+    }
   }
   func accept(_ value: SessionSnapshot) {
     guard !stopped else { return }
@@ -149,16 +184,21 @@ extension MatchSession: SessionCommanding {}
     observation?.cancel(); observedMatch = value.replay.matchID
     syncStatus.observe(matchID: value.replay.matchID)
     let session = session; let id = value.replay.matchID
-    observation = Task { [weak self] in
+    let taskID = UUID()
+    let task = Task { [weak self] in
+      defer { self?.ownedTasks.removeValue(forKey: taskID) }
       let stream = await session.updates(matchID: id)
+      guard !Task.isCancelled else { return }
       for await next in stream {
         guard !Task.isCancelled else { return }
         self?.accept(next)
       }
     }
+    observation = task; ownedTasks[taskID] = task
   }
   public func refreshAuthority() async {
     guard !stopped, let id = snapshot?.replay.matchID, let authority = repository as? any AuthorityRepository else { return }
+    beginOperation(); defer { endOperation() }
     let token = UUID(); authorityRead = token
     do {
       let state = try await authority.authorityStateV4(matchID: id, now: Date())
@@ -166,14 +206,42 @@ extension MatchSession: SessionCommanding {}
       authorityStatus = state.status
     } catch { /* A failed sync query cannot revoke a persisted terminal fence or a legal local command. */ }
   }
+  /// Synchronous first phase: no caller needs to guess whether an async shutdown has started.
+  /// The borrowed Session/repository are retired separately by their owner.
+  public func beginRetirement() {
+    guard !stopped else { return }
+    stopped = true; lifecycle = UUID(); authorityRead = UUID(); readOnly = true
+    observation?.cancel()
+    for task in ownedTasks.values { task.cancel() }
+    syncStatus.beginRetirement()
+  }
   public func shutdown() async {
-    stopped = true; lifecycle = UUID(); readOnly = true
-    observation?.cancel(); observation = nil; observedMatch = nil
+    beginRetirement()
+    if let shutdownTask { await shutdownTask.value; return }
+    let task = Task { await self.drainRetirement() }
+    shutdownTask = task
+    await task.value
+  }
+  private func drainRetirement() async {
     await syncStatus.shutdown()
+    if operations > 0 { await withCheckedContinuation { operationDrainers.append($0) } }
+    let tasks = Array(ownedTasks.values)
+    for task in tasks { await task.value }
+    ownedTasks.removeAll(); observation = nil; observedMatch = nil
+    snapshot = nil; history = []; pendingRequest = nil; issue = nil; authorityStatus = nil
+    retainedMetrics = LiveMetrics(); feedbackCount = 0; acknowledged.removeAll(); busy = false
   }
   private func refreshHistory() async throws {
+    guard !stopped else { return }
+    let lifetime = lifecycle
     var values: [SessionSnapshot] = []
-    for id in try await repository.matchIDs() { values.append(try await session.snapshot(matchID: id)) }
+    let matches = try await repository.matchIDs()
+    guard !stopped, lifecycle == lifetime else { return }
+    for id in matches {
+      let value = try await session.snapshot(matchID: id)
+      guard !stopped, lifecycle == lifetime else { return }
+      values.append(value)
+    }
     history = values.sorted { $0.store.business.descriptor.startIntent.requestedAt > $1.store.business.descriptor.startIntent.requestedAt }
   }
   public static func message(_ error: any Error) -> String {
