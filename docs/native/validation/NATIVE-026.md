@@ -518,3 +518,23 @@ Evidence `/private/tmp/football-record-NATIVE026-build/bootstrap/public-owner-04
 Source `89a70f714fbd0a7fc6c2315601427fca19b6d2eb`: actual Apple and Cloud.save protocol work completes before a DEBUG reply-only hook holds the real original repository's second identityGenerationV4 reply. Quiesce establishes permanent admission stop while that reply is held; releasing it must reject success. Runtime RED2tests/2assertions/0unexpected → frozen related10/0;351 before/post/commit0diff. The original generation and repo identity remain equal before/after; no DB/Session/identity is fabricated. The repair retains original generation equality while adding fresh post-await stop/final-stop/lifetime checks. Controlled HTTP/Saga policy and original join behavior are retained.
 
 Evidence `/private/tmp/football-record-NATIVE026-build/bootstrap/controlled-late-generation-`: red.log/red-source.swift/tests.swift, inputs.json, frozen-related.log, post.json and commit-match.json. Related log SHA256 `03aa17f32cbf934b3ab88e6eaadb9d064ed872d3d48033ec95106bae51affb46`. This exact10 selection contains new Apple/Cloud cases, controlled ownership/isolation and public/identity lifecycle regressions; it is not the historical full58 run or whole026 acceptance.
+
+
+### Formal default App startup remains unavailable before DB opening
+
+Source `45a742336c1dfe2ec5add670d27d8bd9c2a89420` routes the normal iPhone and Watch entry through M4ApplicationBootstrap.production. It returns typed unavailable without reading Debug configuration, adopting legacy files or opening a business DB. A host regression passes both fresh and preexisting-file roots plus development/UI/device flags, preserving file lists and bytes; the preexisting arbitrary bytes are an adoption sentinel, not a claim of valid SQLite data. The no-context App branch displays unavailable/retry without constructing a fake repository or Session. M4ApplicationContext retains one original composition and exposes its throwing final-close owner; the full controlled App assembly/action lifecycle is still a later slice. Existing explicit Debug scenarios and Presentation compatibility factories are retained at this checkpoint.
+
+- New API compile RED is preserved in production-bootstrap-interface-red.log. Frozen exact new host regression:1/0.
+- Two actual unsigned generic **Debug** Simulator App build commands exit0: FootballRecord-iOS and FootballRecord-Watch. Build logs contain minimum iOS17/watch10 targets and BUILD SUCCEEDED, with zero Swift compile errors. No App/UI execution, Release App build or real provider/device/signing acceptance is inferred.
+- All351 product inputs are byte-identical before/after and match the source commit; diff-check passes.
+- An earlier regex unintentionally matched the AppIntegrationTests module and ran188tests/1unexpected. The sole failure is the preserved testConcreteCloudLeafPreservesUnknownLiveLayoutAfterFirstReceipt strict empty-WAL constructor issue awaiting049. This run has no before-input manifest and is explicitly expanded/unfrozen evidence, not whole026 PASS; its raw log and metadata are retained without another full-suite rerun.
+
+Evidence prefix `/private/tmp/football-record-NATIVE026-build/bootstrap/production-bootstrap-`: interface-red.log; related-green.log and expanded-run.json (unfrozen188/1); inputs.json; frozen-assembly.swift/frozen-phone.swift/frozen-watch.swift/frozen-tests.swift/frozen.diff; frozen-selected.log; phone-sim-build.log; watch-sim-build.log; validation-results.json; post.json and commit-match.json.
+
+| Exact log | SHA256 |
+| --- | --- |
+| frozen-selected.log | `878d2421bd00f97ab70f7c461420ab50d1b3e7813b283c30b3f29fff58fb3c62` |
+| phone-sim-build.log | `08ab106a68af4d98b7a270d1af79a5a6baa86f8756d27bd6141399f9d60806f8` |
+| watch-sim-build.log | `2541824ffac556495d5898738ea71057dc3cd78b70a751b10b074ee26707f660` |
+
+This clean handoff is for root to ordinary-merge accepted049. Full controlled App service ownership, independent fresh identity inputs, retained material/Phone inbox seams, Node E2E, whole026 source/final review and deferred real SDK/account/device validation remain separate.
