@@ -127,7 +127,7 @@ export function createDeletionReauthentication(state,{appleVerifier,credential})
    if(saved.raw.request_digest!==r.authRequestDigest)fail('idempotencyConflict');
    const a=saved.value.authorization.body;
    if(a.result!=='ready'){
-    if(a.result!=='knownAbandoned'||!verifySigned(rawPublicKey(config.receiptPrivateKey),saved.value.authorization,'football-record.deletion-control-auth.v1'))fail('unavailable',503);
+    validateClosedProof(saved.value.authorization,r,config,['knownAbandoned']);
     return {authorization:saved.value.authorization,originalAcquire:null,credential:null};
    }
    // Expiry and revocation are facts only after the complete historical chain is
@@ -175,9 +175,13 @@ function validatedControlChain(state,ctx,{historical=false}={}){
  if(resolution){const r={...c,deleteRequest:value.deleteRequest,deleteDigest:value.parentDigest,authRequestID:a.requestID,authRequestDigest:a.requestDigest};validateResolution(resolution,r,value,config);if(!historical)fail('unauthorized',401);}
  return {value,parent:p,session};
 }
+function validateClosedProof(authorization,r,config,results){
+ const b=authorization.body;
+ if(b.version!==1||b.purpose!==purpose||b.environment!==config.environment||b.keyID!==config.receiptKeyID||!results.includes(b.result)||b.requestID!==r.authRequestID||b.requestDigest!==r.authRequestDigest||b.parentRequestID!==r.deleteRequest.requestID||b.parentDigest!==r.deleteDigest||b.recoveryCapabilityDigest!==r.deleteRequest.recoveryCapabilityDigest||b.accountID!==r.accountID||b.deviceID!==r.deviceID||b.deviceKeyID!==r.keyID||b.activationEpoch!==r.activationEpoch||b.cloudSpaceID!==r.cloudSpaceID||b.sessionID!==null||b.reauthenticationID!==null||b.reauthenticationExpiresAt!==null||b.lockState!=='none'||b.lock!==null||b.expiresAt!==b.issuedAt||!Number.isSafeInteger(b.issuedAt)||b.issuedAt<0||b.issuedAt>9007199254740991||typeof b.proofID!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(b.proofID)||!['unreserved','requested','lockReconciled','appleRevocation'].includes(b.stage)||!verifySigned(rawPublicKey(config.receiptPrivateKey),authorization,'football-record.deletion-control-auth.v1'))fail('unavailable',503);
+}
 function validateResolution(saved,r,ready,config){
  const v=saved.value,b=v.authorization.body;
- matchParent(v,r);
+ matchParent(v,r);validateClosedProof(v.authorization,r,config,['knownExpired','knownRevoked']);
  if(saved.raw.request_digest!==r.authRequestDigest||v.authRequestID!==r.authRequestID||v.authRequestDigest!==r.authRequestDigest||v.readyDigest!==sha256(bytes(ready.authorization))||b.requestID!==r.authRequestID||b.requestDigest!==r.authRequestDigest||b.parentRequestID!==r.deleteRequest.requestID||b.parentDigest!==r.deleteDigest||b.recoveryCapabilityDigest!==r.deleteRequest.recoveryCapabilityDigest||b.accountID!==r.accountID||b.deviceID!==r.deviceID||b.deviceKeyID!==r.keyID||b.activationEpoch!==r.activationEpoch||b.cloudSpaceID!==r.cloudSpaceID||b.environment!==config.environment||b.keyID!==config.receiptKeyID||!['knownExpired','knownRevoked'].includes(b.result)||b.sessionID!==null||b.reauthenticationID!==null||b.reauthenticationExpiresAt!==null||b.expiresAt!==b.issuedAt||!Number.isSafeInteger(b.issuedAt)||b.issuedAt<0||!verifySigned(rawPublicKey(config.receiptPrivateKey),v.authorization,'football-record.deletion-control-auth.v1'))fail('unavailable',503);
 }
 export function assertDeletionControlPurpose(state,ctx,operation,r){
