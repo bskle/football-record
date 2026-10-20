@@ -250,3 +250,75 @@ private enum M4BootstrapFile {
     guard fsync(fd) == 0 else { throw M4BootstrapError.storageUnavailable }
   }
 }
+
+#if DEBUG
+/// Borrowed, explicitly controlled observations only. These files are never
+/// synthesized from configuration, credentials, pending requests or local binding.
+actor M4ControlledCurrentIdentity: M4CurrentIdentityObserving {
+  private struct Apple: Codable { let version: Int; let environment, namespace, observationID, accountID: String }
+  private struct Cloud: Codable { let version: Int; let environment, namespace, observationID, cloudSpaceID, zoneID: String }
+  private let directory: URL
+  private let namespace: String
+  private let parents, files: [M4BootstrapAnchor]
+  private let readReplyGate: (@Sendable () async -> Void)?
+  private var generation: Int64 = 0
+  private var lifetime = UUID()
+  init(directory: URL, namespace: String, readReplyGate: (@Sendable () async -> Void)? = nil) throws {
+    let directory = M4BootstrapFile.canonical(directory)
+    guard namespace != SQLiteSessionRepository.productionNamespace else { throw AuthorityError.unavailable }
+    let parents = try M4BootstrapFile.anchors([directory])
+    let files = try ["apple-account.json", "cloud-space.json"].map { try M4BootstrapFile.anchor(directory.appendingPathComponent($0), directory: false) }
+    let first = try Self.read(directory: directory, parents: parents, files: files)
+    _ = try Self.decode(first, namespace: namespace)
+    guard first == (try Self.read(directory: directory, parents: parents, files: files)) else { throw AuthorityError.identityChanged }
+    self.directory = directory; self.namespace = namespace; self.parents = parents; self.files = files; self.readReplyGate = readReplyGate
+  }
+  func advanceIdentityFence(to generation: Int64) throws {
+    guard generation >= self.generation, generation <= 9_007_199_254_740_991 else { throw AuthorityError.identityChanged }
+    if generation > self.generation { self.generation = generation; lifetime = UUID() }
+  }
+  func currentIdentity() async throws -> M4CurrentAccountIdentity {
+    try Task.checkCancellation()
+    let token = lifetime, generation = generation
+    let first = try Self.read(directory: directory, parents: parents, files: files)
+    let observed = try Self.decode(first, namespace: namespace)
+    await readReplyGate?()
+    try Task.checkCancellation()
+    guard token == lifetime, generation == self.generation,
+          first == (try Self.read(directory: directory, parents: parents, files: files)) else { throw AuthorityError.identityChanged }
+    return observed
+  }
+  private static func decode(_ pair: [Data], namespace: String) throws -> M4CurrentAccountIdentity {
+    let apple = try JSONDecoder().decode(Apple.self, from: pair[0]), cloud = try JSONDecoder().decode(Cloud.self, from: pair[1])
+    guard try M4BootstrapFile.encode(apple) == pair[0], try M4BootstrapFile.encode(cloud) == pair[1],
+          apple.version == 1, cloud.version == 1, apple.environment == "development", cloud.environment == "development",
+          Data(apple.namespace.utf8) == Data(namespace.utf8), Data(cloud.namespace.utf8) == Data(namespace.utf8),
+          UUID(uuidString: apple.observationID)?.uuidString == apple.observationID,
+          Data(apple.observationID.utf8) == Data(cloud.observationID.utf8) else { throw AuthorityError.identityChanged }
+    for value in [apple.accountID, cloud.cloudSpaceID, cloud.zoneID] { try AuthorityWire.identifier(value) }
+    return M4CurrentAccountIdentity(accountID: apple.accountID, cloudSpaceID: cloud.cloudSpaceID, zoneID: cloud.zoneID, environment: .development)
+  }
+  private static func read(directory: URL, parents: [M4BootstrapAnchor], files: [M4BootstrapAnchor]) throws -> [Data] {
+    guard try M4BootstrapFile.encode(parents) == M4BootstrapFile.encode(M4BootstrapFile.anchors([directory])) else { throw AuthorityError.identityChanged }
+    var dir = stat()
+    guard lstat(directory.path, &dir) == 0, dir.st_uid == geteuid(), dir.st_mode & 0o7777 == 0o700 else { throw AuthorityError.unavailable }
+    var result: [Data] = []
+    for expected in files {
+      let url = URL(fileURLWithPath: expected.path), actual = try M4BootstrapFile.anchor(url, directory: false)
+      guard try M4BootstrapFile.encode(expected) == M4BootstrapFile.encode(actual) else { throw AuthorityError.identityChanged }
+      let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+      guard fd >= 0 else { throw AuthorityError.unavailable }; defer { Darwin.close(fd) }
+      var held = stat()
+      guard fstat(fd, &held) == 0, held.st_uid == geteuid(), held.st_nlink == 1, held.st_mode & 0o7777 == 0o600,
+            UInt64(UInt32(bitPattern: held.st_dev)) == expected.device, held.st_ino == expected.inode,
+            held.st_size > 0, held.st_size <= 16384 else { throw AuthorityError.unavailable }
+      var bytes = Data(count: Int(held.st_size))
+      let count = bytes.withUnsafeMutableBytes { Darwin.pread(fd, $0.baseAddress, $0.count, 0) }
+      guard count == bytes.count, try M4BootstrapFile.encode(expected) == M4BootstrapFile.encode(M4BootstrapFile.anchor(url, directory: false)) else { throw AuthorityError.identityChanged }
+      result.append(bytes)
+    }
+    guard try M4BootstrapFile.encode(parents) == M4BootstrapFile.encode(M4BootstrapFile.anchors([directory])) else { throw AuthorityError.identityChanged }
+    return result
+  }
+}
+#endif
