@@ -381,3 +381,32 @@ Store dispatch requires an explicit original composition route. The composition 
 | `concrete-leaves-checkpoint-commit-match.json` | `93472a38c935c7210841e9b64f14ffb98bef80b20c42399e3f37473f5d92e27a` |
 
 All-catalog aggregate completion remains unsupported at this checkpoint. It must include every current and retired component and freshly replay historical completed progress. Accepted043 mailbox drain and046 full capture inventory are still pending inputs. Health selection cannot be inferred from empty Store after erasure or from045's post-erasure witness; unknown or extra Store without original Saga/facts stays incomplete. No SDK, account, device, App/UI, power-loss or whole026 acceptance follows from this selection.
+
+
+## Partial retained local aggregate and preserved047 failures
+
+Source `462d11827a13f6f11da309c31726e59b188b430d` adds explicit whole-catalog local composition on the original facade. Before Store erase, an injected copy-drain checker must verify original scope/parent/digest, all Store routes must identify their own original DB capsules, and the existing parent/catalog/choice/child/capacity/retirement gates must pass. The production default checker throws unavailable and preserves Store business while independent Cloud can advance. Its current controlled fixture is a local protocol test only; it does not inspect043's actual mailbox.
+
+Store completion always invokes fresh045 and saves/readbacks stable first bytes. Transport aggregation then invokes every non-Store leaf in the frozen membership, including retired namespaces. Final receipt membership must equal the full catalog, and copy drain is checked again. Historical completed progress is rechecked before and after controller resume; completion updates require the same concrete checks. Missing Store routes and pending DeviceSync drainage remain incomplete. No new Session or business DB is created by these operations.
+
+- Initial aggregate attempt was **5/8**, with two unexpected fixture errors from a noncanonical DeviceSync root name. This log is preserved; the fixture was corrected to the existing public `DeviceSync` layout. The valid actual runtime RED is **five tests /14 failures, zero unexpected**.
+- Aggregate selected GREEN is **5/0**. Cases cover default unavailable copy drain retaining Store with independent Cloud completion; current/retired five-capsule membership spanning four kinds; same-parent retry after pending DeviceSync; unknown additional Store blocking before the original Store erases; and fresh Store/every-leaf replay despite historical completed progress. First receipts, original request/capability and restored unknown data remain preserved.
+- Separate Cloud regressions are **two tests / six failures, zero unexpected**. On the original inode after an external catalog receipt exists, deleting internal fence/receipt and restoring an original canonical upload leads the existing leaf to fresh-erase it again. Restoringv3 additionally causes the ordinary constructor to create/migrate schema before erase. The exact external first bytes still match, proving CAS alone is insufficient. Both tests require original rows/schema/version to remain unchanged and are retained without skip or relaxed assertions for047. No026 product SQL/schema inspector is introduced.
+- Frozen related selection is **34 tests / six failures**, all six assertions in those same two047 cases; the other32 pass, including the five aggregate cases. **346 inputs** remain identical before/post and match the source commit. This is partial related evidence, not a complete host run or acceptance of the Cloud proof-loss boundary. `git diff --check` passes.
+- Health.delete with an otherwise matching raw/prepared/fullseal is explicitly unsupported before Store erase until accepted046's complete original capture inventory is connected. Valid raw facts must follow original writer join; empty Store after erase and045 post-erasure current-zero cannot reconstruct or prove the original selection. Typed missing/source issues still preserve Store and allow independent Cloud.
+
+| Evidence in bootstrap | SHA256 |
+| --- | --- |
+| `local-aggregate-five-red.log` (fixture layer5/8) | `8b8f46b6478fe7c3e16afc8c29b8759aabc704eb6f03db3df2139c95e505a75d` |
+| `local-aggregate-five-red-2.log` (actual5/14) | `e92fe4602449c1d1a3bf354f7e221eb89c17d4daf8810975ce80e3f3db2e219e` |
+| `local-aggregate-red-source.swift` | `23620437f6bb61ab6d85cf8128730f67103dffeed10265d3ae37035c7ddc9b61` |
+| `local-aggregate-red-tests.swift` | `31e9dfed7eec1dfdf6b46512fefef521ca95402606ee4a547e6915f1b821d69a` |
+| `local-aggregate-five-green.log` | `8256b607b003f8133a250a27c217db34d03a27f2f78f560069e71cf79f005a2d` |
+| `cloud-proof-loss-red.log` | `141f2e8353a0867600918b1f5912a3334258a50cf03c6970c3a223e01c424276` |
+| `cloud-proof-loss-red-report.json` | `04466c50b8adc73e601db497c4a80f98d253450f6434f1489a5a2a8e8af5d2e2` |
+| `local-aggregate-frozen-related.log` (single34/6) | `a87e258bb1651291630db6f4184dc4912e16f62c21d3b15a62868928b786a33f` |
+| `local-aggregate-checkpoint-inputs.json` | `1f39cf43f2481a85447c19525a2b4e8b9fdba8a84c7016fd910491d7075cc943` |
+| `local-aggregate-checkpoint-post.json` | `dc7a3caf7184696da2a7fb294a9e969b4670050de63f5c2cb528d1a8d2ed82ed` |
+| `local-aggregate-checkpoint-commit-match.json` | `6e95bb08b3a880c3630c9485f580361f52ec238dbe32ab93b44322668e96f619` |
+
+Independent reviews and accepted043/046/047 inputs are still required. These fixtures do not prove real Apple, CloudKit, Keychain, Health, WC, signing/devices, App/UI, power loss, production drainage or whole026 completion.
