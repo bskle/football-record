@@ -221,6 +221,36 @@ extension M4AccountCompositionTests {
     XCTAssertNil(c.admittedScope); XCTAssertFalse(c.context.account.canEnterRecording)
     try await c.close()
   }
+  func testPublicM4ShutdownRetiresOriginalSessionBeforeHeldPermitReturns() async throws {
+    let (prepared, trust) = try await identityFixture("m4-public-early-owner"), relay = CompositionHeldPermitRelay()
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", authorityRelay: relay)
+    try await c.repository.bindAccountV4(binding(prepared))
+    let originalIdentity = await c.repository.syncRepositoryIdentity(), starting = Task { await c.context.recording.start(starter: true) }
+    await relay.waitForEntry()
+    var closed = false
+    let closing = Task { await c.context.shutdown(); closed = true }
+    let repeated = Task { await c.context.shutdown() }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1)); var retired = false
+    while ContinuousClock.now < deadline {
+      do { _ = try await c.session.prepareStart(starter: false) }
+      catch { if error as? SessionError == .retired { retired = true; break } }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    XCTAssertTrue(retired, "public M4 shutdown must reach the original Session gate before waiting for the held model operation")
+    XCTAssertFalse(closed, "the same original model/Session request must finish before its DB closes")
+    let calls = await relay.calls; XCTAssertEqual(calls, 1, "this integration fixture holds an already dispatched original request; it is not048's held-before-first-permit case")
+    let sessionIdentity = await c.session.syncRepositoryIdentity(); XCTAssertEqual(sessionIdentity, originalIdentity)
+    await relay.release(); await starting.value; await closing.value; await repeated.value
+    XCTAssertNil(c.lastCloseFailure); XCTAssertNil(c.context.recording.snapshot); XCTAssertTrue(c.context.recording.history.isEmpty)
+    do { _ = try await c.session.prepareStart(starter: false); XCTFail("the old Session gate is permanent") }
+    catch { XCTAssertEqual(error as? SessionError, .retired) }
+    let original = try await M4IdentityBootstrap.prepare(root: prepared.seed.root, namespace: prepared.seed.namespace, controlDirectory: prepared.seed.controlDirectory) { _ in prepared.material }
+    let repository = try original.openRepository(authorityTrust: trust)
+    let ids = try await repository.matchIDs(); XCTAssertEqual(ids.count, 1)
+    let saved = try await repository.snapshotV2(matchID: XCTUnwrap(ids.first))
+    XCTAssertNil(saved.business.descriptor.startPermit); XCTAssertTrue(saved.business.events.isEmpty)
+    try await original.close()
+  }
   func testPublicContextShutdownJoinsOriginalHeldCaptureBeforeClosingFacade() async throws {
     let (prepared, trust) = try await identityFixture("m4-public-close-capture"), gateway = CompositionSuspendedGateway()
     let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", workout: gateway)
@@ -322,4 +352,18 @@ private actor CompositionCountingRelay: AuthorityHTTPRelay {
   func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
     calls += 1; throw AuthorityError.unavailable
   }
+}
+
+private actor CompositionHeldPermitRelay: AuthorityHTTPRelay {
+  private var entered = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  private var held: CheckedContinuation<Void, Never>?
+  private(set) var calls = 0
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    calls += 1; entered = true
+    await withCheckedContinuation { held = $0; waiter?.resume(); waiter = nil }
+    throw AuthorityError.unavailable
+  }
+  func waitForEntry() async { if entered { return }; await withCheckedContinuation { waiter = $0 } }
+  func release() { held?.resume(); held = nil }
 }

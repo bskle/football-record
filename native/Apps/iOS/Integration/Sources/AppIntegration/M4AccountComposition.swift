@@ -101,7 +101,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       let account = AccountStatusModel(repository: repository, development: development, action: { _ in throw AuthorityError.unavailable })
       let lifecycle = LifecycleStatusModel(repository: repository, development: development, action: { _ in throw AuthorityError.unavailable })
       let closeBridge = M4CompositionCloseBridge()
-      let context = try await AppBootstrap.accountContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, close: { await closeBridge.closeFromContext() })
+      let context = try await AppBootstrap.accountContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, shutdownOwner: { await closeBridge.closeFromContext() }, close: { await closeBridge.closeFromContext() })
       let value = M4AccountComposition(prepared: prepared, repository: repository, session: session, context: context, client: client, accountService: accountService, phoneRegistration: phone, watchRegistration: watch, cloudBridge: bridge, sync: sync, identity: identity, cloudSpaceID: cloudSpaceID, watchRelay: watchRelay, closeBridge: closeBridge, controlledAdapters: controlledAdapters)
       // The public context retains its resource owner until successful final close.
       // Breaking this link only after success also retains failed-close retry state.
