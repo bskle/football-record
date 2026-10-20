@@ -57,6 +57,13 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
   private let relay: URLSessionAuthorityRelay
   private let mailboxRoot: URL
   private let mailboxInventory: [String: ProtocolClientDirectoryIdentity]
+  private let role: String
+  private let dataset: String
+  private var inbox: Task<Void, Never>?
+  private var inboxClosing: Task<Void, Never>?
+  private var inboxStopped = false
+  private var inboxLifetime = UUID()
+  private var inboxHandlers: [UUID: Pending] = [:]
   private var closed = false
   private var closing: Task<Void, Never>?
   private struct Pending: Sendable {
@@ -77,7 +84,7 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
       guard try protocolClientMailboxEmpty(mailboxRoot) else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
       mailboxInventory = try protocolClientPublishedInventory(mailboxRoot)
     } catch { relay.shutdown(); throw error }
-    self.relay = relay; self.mailboxRoot = mailboxRoot; namespace = configuration.namespace
+    self.relay = relay; self.mailboxRoot = mailboxRoot; namespace = configuration.namespace; role = configuration.role; dataset = configuration.dataset
   }
   func owned<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
     guard !closed else { throw DevelopmentAuthorityProtocolError.closed }
@@ -123,10 +130,76 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
     let driver = DevelopmentFileCloud(mailbox: mailbox)
     try await owned { try await driver.deletePrivateZone(scope: scope) }
   }
+  /// Typed controlled Phone inbox only; caller supplies its original per-request identity/service wrapper.
+  public func startInbox(authorizer: any WatchRegistrationAuthorizing) throws {
+    guard role == "phone", !closed, !inboxStopped else { throw DevelopmentAuthorityProtocolError.closed }
+    try Task.checkCancellation()
+    guard try protocolClientPublishedInventory(mailboxRoot) == mailboxInventory else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+    if inbox != nil { return }
+    let lifetime = inboxLifetime, root = mailboxRoot, dataset = dataset
+    inbox = Task { [weak self] in
+      await DevelopmentInboxPoller.run(root: root, dataset: dataset, bounded: true,
+        active: { [weak self] in await self?.inboxActive(lifetime) ?? false },
+        handle: { [weak self] entry in await self?.handleInbox(entry, authorizer: authorizer, lifetime: lifetime) })
+    }
+  }
+  private func inboxActive(_ lifetime: UUID) -> Bool { !closed && !inboxStopped && inboxLifetime == lifetime }
+  private func currentInbox(_ entry: DevelopmentInboxEntry, lifetime: UUID) throws {
+    guard inboxActive(lifetime), !Task.isCancelled,
+          try protocolClientPublishedInventory(mailboxRoot) == mailboxInventory,
+          let original = entry.anchor else { throw DevelopmentAuthorityProtocolError.closed }
+    let actual = try DevelopmentMaterialIO.read(entry.file, maximum: 1_048_576)
+    guard actual.0 == entry.raw, actual.1 == original else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+  }
+  private func handleInbox(_ entry: DevelopmentInboxEntry, authorizer: any WatchRegistrationAuthorizing, lifetime: UUID) async {
+    do { try currentInbox(entry, lifetime: lifetime) } catch { inboxStopped = true; inboxLifetime = UUID(); return }
+    guard let id = UUID(uuidString: entry.request.id), inboxHandlers[id] == nil else { return }
+    let request = entry.request
+    let task = Task<Data, any Error> {
+      try Task.checkCancellation()
+      switch request.operation {
+      case "phone-context": return try AuthorityWire.encode(await authorizer.registrationContext())
+      case "phone-register":
+        let forward = try JSONDecoder().decode(WatchForward.self, from: request.payload)
+        try forward.attempt.validate()
+        let raw = try await authorizer.authorizeRegistration(forward.attempt, action: forward.action)
+        guard !raw.isEmpty, raw.count <= 65536 else { throw AuthorityError.invalidWire }; return raw
+      default: throw AuthorityError.unavailable
+      }
+    }
+    inboxHandlers[id] = Pending(cancel: { task.cancel() }, join: Task { _ = await task.result })
+    defer { inboxHandlers[id] = nil }
+    let result = await withTaskCancellationHandler { await task.result } onCancel: { task.cancel() }
+    do {
+      // Identical checks for success AND error publication; a stopped or substituted
+      // original request never receives a late response from this owner.
+      try currentInbox(entry, lifetime: lifetime)
+      let reply: MailboxReply
+      switch result { case .success(let raw): reply = MailboxReply(payload: raw, issue: nil)
+      case .failure: reply = MailboxReply(payload: nil, issue: "unavailable") }
+      try DevelopmentMaterialIO.create(JSONEncoder().encode(reply), entry.response)
+    } catch {
+      // Do not reinterpret a replaced request as a new request on the next poll.
+      inboxStopped = true; inboxLifetime = UUID()
+    }
+  }
+  /// Permanent business inbox retirement, without closing original Saga HTTP/Cloud clients.
+  public func stopInbox() async {
+    if let inboxClosing { await inboxClosing.value; return }
+    inboxStopped = true; inboxLifetime = UUID()
+    let poller = inbox, pending = Array(inboxHandlers.values)
+    poller?.cancel(); pending.forEach { $0.cancel() }
+    let task = Task {
+      await poller?.value
+      for call in pending { await call.join.value }
+      self.inbox = nil
+    }
+    inboxClosing = task; await task.value
+  }
   /// Point-in-time inspection only: it neither closes nor cancels clients needed by the original Saga.
   /// Callers must gate business admission before checking; later calls can change this state.
   public func drainState() -> DevelopmentAuthorityProtocolCloseState {
-    guard operations.isEmpty,
+    guard operations.isEmpty, inbox == nil, inboxHandlers.isEmpty,
           (try? protocolClientPublishedInventory(mailboxRoot)) == mailboxInventory,
           (try? protocolClientMailboxEmpty(mailboxRoot)) == true,
           (try? protocolClientPublishedInventory(mailboxRoot)) == mailboxInventory else { return .undrained }
@@ -140,6 +213,7 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
       let pending = Array(operations.values), mailbox = mailbox
       pending.forEach { $0.cancel() }; relay.shutdown()
       closing = Task {
+        await self.stopInbox()
         await mailbox.close()
         for call in pending { await call.join.value }
       }
@@ -189,8 +263,39 @@ private func protocolClientMailboxEmpty(_ root: URL) throws -> Bool {
   } catch { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
 }
 
-private struct MailboxRequest: Codable { let id, operation, dataset: String; let payload: Data }
-private struct MailboxReply: Codable { let payload: Data?; let issue: String? }
+private struct MailboxRequest: Codable, Sendable { let id, operation, dataset: String; let payload: Data }
+private struct MailboxReply: Codable, Sendable { let payload: Data?; let issue: String? }
+private struct DevelopmentInboxEntry: Sendable {
+  let request: MailboxRequest
+  let file, response: URL
+  let raw: Data
+  let anchor: DevelopmentMaterialAnchor?
+}
+/// Same private wire/poll for legacy Runtime and the injected original-client inbox.
+private enum DevelopmentInboxPoller {
+  static func run(root: URL, dataset: String, bounded: Bool,
+    active: @escaping @Sendable () async -> Bool,
+    handle: @escaping @Sendable (DevelopmentInboxEntry) async -> Void) async {
+    while !Task.isCancelled {
+      guard await active() else { return }
+      let directory = root.appendingPathComponent("incoming")
+      for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] where file.pathExtension == "json" {
+        do {
+          let raw: Data, anchor: DevelopmentMaterialAnchor?
+          if bounded { let original = try DevelopmentMaterialIO.read(file, maximum: 1_048_576); raw = original.0; anchor = original.1 }
+          else { raw = try Data(contentsOf: file); anchor = nil }
+          guard raw.count <= 1_048_576 else { continue }
+          let request = try JSONDecoder().decode(MailboxRequest.self, from: raw)
+          guard UUID(uuidString: request.id) != nil, request.dataset == dataset else { continue }
+          let response = root.appendingPathComponent("incoming-responses/" + request.id + ".json")
+          guard !FileManager.default.fileExists(atPath: response.path) else { continue }
+          await handle(DevelopmentInboxEntry(request: request, file: file, response: response, raw: raw, anchor: anchor))
+        } catch { /* Malformed private inputs remain unprocessed, never account actions. */ }
+      }
+      do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
+    }
+  }
+}
 private actor DevelopmentMailbox {
   let root: URL
   let dataset: String
@@ -241,7 +346,7 @@ private struct DevelopmentWatchAuthorizer: WatchRegistrationAuthorizing {
   }
 }
 private struct MigrationTransfer: Codable { let intent: ControlIntentV1; let raw: Data }
-private struct WatchForward: Codable { let attempt: WatchRegistrationAttemptV4; let action: WatchRegistrationAction }
+private struct WatchForward: Codable, Sendable { let attempt: WatchRegistrationAttemptV4; let action: WatchRegistrationAction }
 /// This private Debug control file is not business SQLite or a Keychain SDK claim.
 private actor DevelopmentFileVault: DeviceCredentialVault {
   struct Saved: Codable {
@@ -529,20 +634,19 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
   }
   func startInbox() {
     guard configuration.role == "phone", inbox == nil else { return }
+    let directory = root.appendingPathComponent("development/mailbox"), dataset = configuration.dataset
     inbox = Task { [weak self] in
-      while !Task.isCancelled {
-        guard let self, !self.closed else { return }
-        let directory = self.root.appendingPathComponent("development/mailbox/incoming")
-        for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] where file.pathExtension == "json" {
-          do {
-            let bytes = try Data(contentsOf: file); guard bytes.count <= 1_048_576 else { continue }
-            let request = try JSONDecoder().decode(MailboxRequest.self, from: bytes)
-            guard UUID(uuidString: request.id) != nil, request.dataset == self.configuration.dataset else { continue }
-            let response = self.root.appendingPathComponent("development/mailbox/incoming-responses/" + request.id + ".json")
-            guard !FileManager.default.fileExists(atPath: response.path) else { continue }
-            let reply: MailboxReply
-            do {
-              let data: Data
+      await DevelopmentInboxPoller.run(root: directory, dataset: dataset, bounded: false,
+        active: { [weak self] in await self?.legacyInboxActive() ?? false },
+        handle: { [weak self] entry in await self?.handleLegacyInbox(entry) })
+    }
+  }
+  private func legacyInboxActive() -> Bool { !closed }
+  private func handleLegacyInbox(_ entry: DevelopmentInboxEntry) async {
+    let request = entry.request
+    let reply: MailboxReply
+    do {
+      let data: Data
               if request.operation == "phone-context" { data = try AuthorityWire.encode(await self.phoneService.registrationContext()) }
               else if request.operation == "phone-register" { let forward = try JSONDecoder().decode(WatchForward.self, from: request.payload); data = try await self.phoneService.authorizeRegistration(forward.attempt, action: forward.action) }
               else if request.operation == "phone-migration" {
@@ -559,14 +663,9 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
                 data = try JSONEncoder().encode(transfers)
               }
               else { throw AuthorityError.unavailable }
-              reply = MailboxReply(payload: data, issue: nil)
-            } catch { reply = MailboxReply(payload: nil, issue: "unavailable") }
-            try privateWrite(JSONEncoder().encode(reply), to: response)
-          } catch { /* Malformed private fixture requests never become an account action. */ }
-        }
-        do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
-      }
-    }
+      reply = MailboxReply(payload: data, issue: nil)
+    } catch { reply = MailboxReply(payload: nil, issue: "unavailable") }
+    try? privateWrite(JSONEncoder().encode(reply), to: entry.response)
   }
   func shutdown() async {
     guard !closed else { return }; closed = true
