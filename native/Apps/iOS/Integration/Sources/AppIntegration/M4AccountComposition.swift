@@ -231,6 +231,34 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     return M4StoreCompletionEvidence(requestID: parentID, parentIntentDigest: parentIntentDigest, backendReceiptDigest: witness.backendReceiptDigest,
       scope: scope, database: capsule.root, localProgress: .completed)
   }
+  /// Complete point-in-time046 facts from this one original facade, only after
+  /// every original Session/capture writer has joined. No subset matchIDs query.
+  func captureHealthReservationFacts() async throws -> [M4HealthCaptureFacts] {
+    try await quiesceBusiness()
+    guard await session.syncRepositoryIdentity() == repository.syncRepositoryIdentity() else { throw AuthorityError.identityChanged }
+    return try await repository.captureInventoryV4().map {
+      M4HealthCaptureFacts(binding: $0.binding, revisions: $0.captureRevisions, operations: $0.captureOperations)
+    }
+  }
+  func validateHealthReservationFacts(_ raw: M4HealthRawReservation) async throws {
+    let actual = try await captureHealthReservationFacts()
+    guard try Self.comparableCaptureFacts(actual) == Self.comparableCaptureFacts(raw.facts) else { throw M4HealthBridgeError.identityConflict }
+  }
+  private static func comparableCaptureFacts(_ facts: [M4HealthCaptureFacts]) throws -> Data {
+    // Sort copies by raw keys, preserving every record's original encoded bytes.
+    // Never normalize/mutate the retained artifact, its IDs or first mapping.
+    var bindings = Set<Data>()
+    let ordered = try facts.map { fact -> (Data, M4HealthCaptureFacts) in
+      let key = M4HealthBytes.frame([Data(fact.binding.matchID.utf8), Data(fact.binding.recordingDeviceID.utf8)])
+      guard bindings.insert(key).inserted,
+            Set(fact.revisions.map { Data($0.id.utf8) }).count == fact.revisions.count,
+            Set(fact.operations.map { Data($0.operation.id.utf8) }).count == fact.operations.count else { throw M4HealthBridgeError.identityConflict }
+      return (key, M4HealthCaptureFacts(binding: fact.binding,
+        revisions: fact.revisions.sorted { Data($0.id.utf8).lexicographicallyPrecedes(Data($1.id.utf8)) },
+        operations: fact.operations.sorted { Data($0.operation.id.utf8).lexicographicallyPrecedes(Data($1.operation.id.utf8)) }))
+    }.sorted { $0.0.lexicographicallyPrecedes($1.0) }.map(\.1)
+    return try M4HealthBytes.encode(ordered)
+  }
   func validateOriginalStoreCapsule(_ capsule: M4OwnershipCapsule, scope: CloudScope) throws {
     guard capsule.kind == .businessStore, !capsule.root.directory, capsule.scope == scope,
           try M4CatalogIO.encode(capsule.root) == M4CatalogIO.encode(M4CatalogIO.anchor(prepared.seed.businessDatabaseURL)) else { throw M4CatalogError.identityChanged }

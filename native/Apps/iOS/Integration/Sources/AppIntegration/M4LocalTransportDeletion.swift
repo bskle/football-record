@@ -172,10 +172,18 @@ struct M4UnavailableLocalCopyDrain: M4LocalCopyDrainChecking {
     let actual = try await resume(requestID: requestID), after = try catalog.requireOriginalParentSeal(saga: actual)
     guard try M4CatalogIO.encode(after.fullSeal) == M4CatalogIO.encode(plan.fullSeal),
           try M4CatalogIO.encode(after.preparedHealth) == M4CatalogIO.encode(plan.preparedHealth) else { throw M4HealthBridgeError.identityConflict }
-    // Complete original Store capture inventory is an independent leaf input.
-    // Until accepted046 is connected, a matching artifact is not proof that late
-    // or orphaned positive observations were included before first Store erase.
-    throw M4HealthBridgeError.unsupportedSelection
+    try await localPrerequisites(after)
+    if actual.localProgress == .completed {
+      // Never infer an empty selection from an already-erased Store. Reopen
+      // keeps the original raw/prepared/seal and freshly proves this same Store.
+      guard let store = after.entries.first(where: { $0.capsule.kind == .businessStore }) else { throw M4LocalErasureError.unsupportedComponent }
+      _ = try await composition.localStoreEvidence(capsule: store.capsule, parentID: requestID, parentIntentDigest: try requiredDigest(after), scope: scope)
+    } else {
+      // quiesceBusiness has joined the real original capture writer. Complete046
+      // validates canonical reverse closure, including orphan/diagnostic facts.
+      try await composition.validateHealthReservationFacts(raw)
+    }
+    return actual
   }
   private func localPrerequisites(_ plan: M4FrozenDeletionPlan) async throws {
     guard let leaves = localLeaves, leaves.catalog === catalog else { throw M4LocalErasureError.unsupportedComponent }

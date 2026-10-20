@@ -380,6 +380,7 @@ import HealthKitDeletion
   }
   private func controlledAggregateAdmission(_ f: GateFixture, deviceDriver: any DeviceSyncErasureDriving = LocalControlledDrain()) -> M4DeletionAdmission {
     M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger,
+      healthArtifacts: f.healthArtifacts, healthLedger: f.healthLedger, allowedHealthSourceOrigin: .controlledFixture,
       localLeaves: aggregateLeaves(f, deviceDriver: deviceDriver), copyDrain: GateControlledCopyDrain(scope: f.scope, parent: f.saga.intent.requestID, digest: f.saga.intent.digest))
   }
   func testAggregateDefaultCopyDrainPreservesStoreAndAllowsIndependentCloud() async throws {
@@ -539,9 +540,15 @@ import HealthKitDeletion
     let scope: CloudScope
     let saga: DeletionSagaV4
     let database: URL
-    func close() async throws { try await composition.close(); try catalog.close(); try await ledger.close() }
+    var healthRaw: M4HealthRawReservation? = nil
+    var healthArtifacts: M4RetainedHealthArtifactStore? = nil
+    var healthLedger: SQLiteHealthDeletionLedger? = nil
+    func close() async throws {
+      try await composition.close(); try catalog.close(); try await ledger.close()
+      try await healthArtifacts?.close(); try await healthLedger?.close()
+    }
   }
-  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil) async throws -> GateFixture {
+  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil, completeHealth: Bool = false, lateGateway: GateHeldLinkedCapture? = nil) async throws -> GateFixture {
     let root = try root(), namespace = "guard-fixture", key = Curve25519.Signing.PrivateKey()
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["guard-key": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
     let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("identity-control")) { seed in
@@ -549,7 +556,33 @@ import HealthKitDeletion
       let credential = hasCredential ? DeviceCredential(token: AuthorityWire.base64URL(Data(repeating: 5, count: 32)), sessionID: "guard-control-session", accountID: "account", deviceID: seed.installationID, keyID: try AuthorityWire.deviceKeyID(publicKey: signer.publicKey), activationEpoch: 2, expiresAt: 9_007_199_254_740_990) : nil
       return M4IdentityMaterial(signer: signer, vault: MemoryDeviceCredentialVault(credential))
     }
-    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud", authorityRelay: authorityRelay)
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud", authorityRelay: authorityRelay, workout: lateGateway)
+    var retainedRaw: M4HealthRawReservation?
+    if completeHealth {
+      try await seedHealthCanonicalMatch(c, device: prepared.seed.installationID, id: "facts-original", linked: true)
+      if lateGateway == nil { try await c.quiesceBusiness() }
+      let inventory = try await c.repository.captureInventoryV4()
+      retainedRaw = try M4HealthRawReservation(parentID: "guard-parent", scope: CloudScopeV1(accountID: "account", cloudSpaceID: "cloud", zoneID: "zone", activationEpoch: 2), cloud: .delete, local: .delete, health: .delete, healthConfirmed: true, createdAt: 10, confirmedAt: 11,
+        facts: inventory.map { M4HealthCaptureFacts(binding: $0.binding, revisions: $0.captureRevisions, operations: $0.captureOperations) },
+        sources: [M4HealthSourceEvidence(recordingDeviceID: prepared.seed.installationID, bundleID: "app.fixture.phone", platform: .iOS, origin: .controlledFixture, evidenceID: "original-control-source")])
+      if let lateGateway {
+        // Intentional stale-artifact regression: freeze before another original
+        // writer's linked observation. This is not the valid production order.
+        try await seedHealthCanonicalMatch(c, device: prepared.seed.installationID, id: "facts-late", linked: false)
+        await c.context.recording.load(); await lateGateway.waitForEntry()
+        // Complete the original unbound-development writer before binding the
+        // account. Binding mid-capture would invalidate this seed's authority
+        // provenance rather than exercise the retained selection comparison.
+        let retiring = Task { try await c.quiesceBusiness() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2)); var retired = false
+        while ContinuousClock.now < deadline {
+          do { _ = try await c.session.prepareStart(starter: false) } catch { if error as? SessionError == .retired { retired = true; break } }
+          try await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertTrue(retired, "the same original Session gates before joining its held gateway")
+        await lateGateway.release(); try await retiring.value
+      }
+    }
     try await c.repository.bindAccountV4(AccountBindingV4(accountID: "account", cloudSpaceID: "cloud", deviceID: prepared.seed.installationID, activationEpoch: 2, role: .phone, environment: .development))
     let scope = try scope(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog")), ledgerURL = root.appendingPathComponent("cloud-ledger.sqlite"), ledger = try SQLiteCloudLedger(url: ledgerURL)
     let database = prepared.seed.businessDatabaseURL
@@ -576,14 +609,25 @@ import HealthKitDeletion
       let database = await extraStore.repository.databaseURL
       try catalog.record(M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "routed-extra-store", kind: .businessStore, scope: scope, root: database, retainedControls: []))
     }
-    let health: ClientDeletionChoiceV4 = healthIssue == nil ? .keep : .delete
+    let health: ClientDeletionChoiceV4 = completeHealth || healthIssue != nil ? .delete : .keep
     let choices = M4DeletionChoices(cloud: .delete, local: .delete, health: health, healthConfirmed: health == .delete)
-    _ = try catalog.reserve(requestID: "guard-parent", scope: scope, choices: choices, health: M4HealthReservation(selections: [], issue: healthIssue))
+    var artifacts: M4RetainedHealthArtifactStore?, healthLedger: SQLiteHealthDeletionLedger?, healthBridge: M4HealthDeletionBridge?
+    if let raw = retainedRaw {
+      let store = try M4RetainedHealthArtifactStore(directory: root.appendingPathComponent("health-artifacts"), owner: M4HealthArtifactOwner(installationID: prepared.seed.installationID, namespace: namespace, scope: raw.scope), removableRoots: [prepared.seed.namespaceDirectory], fullSealProvider: { try catalog.healthFullSeal(parentID: $0) })
+      let selection = try SQLiteHealthDeletionLedger(url: root.appendingPathComponent("health-selection/selection.sqlite"), businessDataDirectory: prepared.seed.namespaceDirectory)
+      let bridge = M4HealthDeletionBridge(mapping: store, parents: c.repository, ledger: selection, allowedSourceOrigin: .controlledFixture, clock: { 12 })
+      try await bridge.reserve(raw); artifacts = store; healthLedger = selection; healthBridge = bridge
+    }
+    _ = try catalog.reserve(requestID: "guard-parent", scope: scope, choices: choices, health: M4HealthReservation(selections: [], issue: healthIssue, rawArtifactDigest: try retainedRaw.map { try $0.digest() }))
     let capability = AuthorityWire.base64URL(Data(repeating: 7, count: 32)); var fields = AuthorityFields(); fields.reauthenticationID = "guard-reauth"; fields.recoveryCapabilityDigest = AuthorityWire.hash(Data(capability.utf8))
     let saga = try DeletionSagaV4(intent: ControlIntentV1(requestID: "guard-parent", operation: .deleteAccount, fields: fields), accountID: scope.accountID, activationEpoch: scope.activationEpoch, recoveryCapability: capability, cloudChoice: choices.cloud, localChoice: choices.local, healthChoice: choices.health, healthConfirmed: choices.healthConfirmed, originalScope: CloudScopeV1(accountID: scope.accountID, cloudSpaceID: scope.cloudSpaceID, zoneID: scope.zoneID, activationEpoch: scope.activationEpoch))
     try await c.session.setAnalyticsEnabled(true)
     try await c.session.createDeletionSaga(saga)
     if sealParent { _ = try catalog.seal(requestID: saga.intent.requestID, parentIntentDigest: saga.intent.digest) }
+    if let raw = retainedRaw, let bridge = healthBridge, let selection = healthLedger {
+      let prepared = try await bridge.prepare(parentID: raw.parentID), entry = try await selection.entry(prepared.request.requestID)
+      try catalog.sealFullControls(saga: saga, raw: raw, prepared: prepared, entry: entry)
+    }
     let body: [String: Any] = ["version": 1, "environment": "development", "keyID": "guard-key", "receiptID": "guard-receipt", "requestID": saga.intent.requestID, "requestDigest": saga.intent.digest, "operation": "deleteAccount", "accountID": scope.accountID, "activationEpoch": scope.activationEpoch, "matchID": "", "lockID": "", "recordingDeviceID": "", "result": "deleted", "issuedAt": Int64(Date().timeIntervalSince1970), "deletion": ["backend": "backendDeleted", "apple": "revoked", "cloud": "clientManaged", "local": "clientManaged", "health": "separateConfirmation"]]
     let bodyBytes = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
     let raw = try JSONSerialization.data(withJSONObject: ["body": body, "signature": AuthorityWire.base64URL(key.signature(for: AuthorityWire.signedInput("football-record.authority.receipt.v1", body: bodyBytes)))], options: [.sortedKeys, .withoutEscapingSlashes])
@@ -594,7 +638,89 @@ import HealthKitDeletion
     var sql: OpaquePointer?; XCTAssertEqual(sqlite3_open(database.path, &sql), SQLITE_OK); defer { sqlite3_close(sql) }
     let witness = try M4CatalogIO.encode("original-business-witness"), hex = witness.map { String(format: "%02x", $0) }.joined()
     XCTAssertEqual(sqlite3_exec(sql, "INSERT INTO lifecycle_steps_v4 VALUES('normal-intent:guard-witness',X'" + hex + "','" + M4CatalogIO.hash(witness) + "')", nil, nil, nil), SQLITE_OK)
-    return GateFixture(root: root, composition: c, prepared: prepared, catalog: catalog, ledger: ledger, scope: scope, saga: accepted, database: database)
+    var result = GateFixture(root: root, composition: c, prepared: prepared, catalog: catalog, ledger: ledger, scope: scope, saga: accepted, database: database)
+    result.healthRaw = retainedRaw; result.healthArtifacts = artifacts; result.healthLedger = healthLedger
+    return result
+  }
+  private func seedHealthCanonicalMatch(_ c: M4AccountComposition, device: String, id: String, linked: Bool) async throws {
+    // Public canonical StoreCommit fixture on this one original M4 facade,
+    // before account binding. It is not authenticated account capture or E2E.
+    let date = Date(timeIntervalSince1970: 20), intent = StartIntent(id: id + "/intent", matchID: id, recordingDeviceID: device, requestedAt: date)
+    _ = try await c.repository.commitV2(StoreCommitV2(commandID: intent.id, expectedGeneration: 0, descriptor: MatchDescriptor(startIntent: intent, starter: true), events: [], captureRevisions: [], newCaptureOperations: [], captureOperationUpdates: [], businessOutbox: []))
+    let descriptor = MatchDescriptor(startIntent: intent, starter: true, startPermit: DevelopmentStartFixture.permit(for: intent), backendLockState: .held)
+    var recorder = LiveMatchRecorder(descriptor: descriptor); try recorder.start(eventID: id + "/event", sourceDeviceID: device, now: date)
+    if linked { try recorder.transition(.matchEnded, eventID: id + "/end", sourceDeviceID: device, now: date.addingTimeInterval(1)) }
+    let binding = try CaptureBinding(matchID: id, recordingDeviceID: device), command = id + "/start", token = id + "/capture/start"
+    let operation = try CaptureOperation(id: token, binding: binding, associatedCommandID: command, action: .start, requestedAt: date, externalToken: token)
+    let delta = try BusinessOutboxItem(id: id + "/delta", matchID: id, sourceDeviceID: device, payload: BusinessDeltaV2(descriptor: descriptor, events: recorder.events, captureRevisions: []))
+    _ = try await c.repository.commitV2(StoreCommitV2(commandID: command, expectedGeneration: 1, descriptor: descriptor, events: recorder.events, captureRevisions: [], newCaptureOperations: [operation], captureOperationUpdates: [], businessOutbox: [delta]))
+    guard linked else { return }
+    _ = try await c.repository.commitV2(StoreCommitV2(commandID: id + "/dispatch", expectedGeneration: 2, descriptor: descriptor, events: [], captureRevisions: [], newCaptureOperations: [], captureOperationUpdates: [CaptureOperationUpdate(operationID: token, expectedState: .pending, state: .needsReconciliation, observation: nil)], businessOutbox: []))
+    let window = try CaptureWindow(start: date, end: date.addingTimeInterval(1)), workout = UUID().uuidString
+    let observation = try WorkoutObservation(operationID: token, binding: binding, externalToken: token, observedAt: date.addingTimeInterval(1), outcome: .linked(workoutID: workout), window: window)
+    let segment = try CaptureSegment(id: token + "/segment", binding: binding, workoutID: workout, window: window)
+    let revision = try CaptureRevision(id: id + "/revision", binding: binding, parentID: nil, revision: 1, observedAt: observation.observedAt, metadata: CaptureMetadata(binding: binding, segments: [segment], gaps: []))
+    let revisionDelta = try BusinessOutboxItem(id: id + "/revision-delta", matchID: id, sourceDeviceID: device, payload: BusinessDeltaV2(descriptor: descriptor, events: [], captureRevisions: [revision]))
+    _ = try await c.repository.commitV2(StoreCommitV2(commandID: id + "/observe", expectedGeneration: 3, descriptor: descriptor, events: [], captureRevisions: [revision], newCaptureOperations: [], captureOperationUpdates: [CaptureOperationUpdate(operationID: token, expectedState: .needsReconciliation, state: .settled, observation: observation)], businessOutbox: [revisionDelta]))
+  }
+  func testFullHealthInventoryAllowsFirstStoreEraseAndReplaysOriginalRawAfterErasure() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, completeHealth: true), admission = controlledAggregateAdmission(f), cloud = GateControlledCloud()
+    let raw = try XCTUnwrap(f.healthRaw), originalBytes = try raw.canonicalBytes()
+    let before = try await f.composition.repository.captureInventoryV4(); XCTAssertEqual(before.count, 1)
+    let controller = M4DeletionResumeController(admission: admission, cloudDeletion: cloud)
+    let result = try await controller.resume(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(result.cloudProgress, .completed); XCTAssertEqual(result.localProgress, .completed); XCTAssertEqual(result.localTransportProgress, .completed)
+    XCTAssertEqual(try businessWitnessCount(f.database), 0)
+    let after = try await f.composition.repository.captureInventoryV4(); XCTAssertTrue(after.isEmpty)
+    let retry = try await controller.resume(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(retry.localProgress, .completed); XCTAssertEqual(retry.localTransportProgress, .completed)
+    let actualRaw = try await f.healthArtifacts?.readReservation(parentID: raw.parentID)
+    XCTAssertEqual(try actualRaw?.canonicalBytes(), originalBytes, "empty erased Store must never replace the retained original selection")
+    let firstReceipts = try M4CatalogIO.encode(f.catalog.receipts(requestID: raw.parentID))
+    try await f.close()
+    // Real close/reopen of original controls and DB; never a parallel facade.
+    let prepared = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }
+    let composition = try await M4AccountComposition.make(prepared: prepared, trust: f.composition.client.trust, cloudSpaceID: f.scope.cloudSpaceID)
+    let catalog = try M4OwnedDataCatalog(directory: f.root.appendingPathComponent("catalog")), ledger = try SQLiteCloudLedger(url: f.root.appendingPathComponent("cloud-ledger.sqlite"))
+    let artifacts = try M4RetainedHealthArtifactStore(directory: f.root.appendingPathComponent("health-artifacts"), owner: M4HealthArtifactOwner(installationID: prepared.seed.installationID, namespace: prepared.seed.namespace, scope: raw.scope), removableRoots: [prepared.seed.namespaceDirectory], fullSealProvider: { try catalog.healthFullSeal(parentID: $0) })
+    let selection = try SQLiteHealthDeletionLedger(url: f.root.appendingPathComponent("health-selection/selection.sqlite"), businessDataDirectory: prepared.seed.namespaceDirectory)
+    var reopened = GateFixture(root: f.root, composition: composition, prepared: prepared, catalog: catalog, ledger: ledger, scope: f.scope, saga: result, database: f.database)
+    reopened.healthRaw = raw; reopened.healthArtifacts = artifacts; reopened.healthLedger = selection
+    let resumed = try await M4DeletionResumeController(admission: controlledAggregateAdmission(reopened), cloudDeletion: cloud).resume(requestID: raw.parentID)
+    XCTAssertEqual(resumed.intent, result.intent); XCTAssertEqual(resumed.localProgress, .completed); XCTAssertEqual(resumed.localTransportProgress, .completed)
+    XCTAssertEqual(try M4CatalogIO.encode(catalog.receipts(requestID: raw.parentID)), firstReceipts)
+    let reopenedRaw = try await artifacts.readReservation(parentID: raw.parentID); XCTAssertEqual(try reopenedRaw?.canonicalBytes(), originalBytes)
+    try await reopened.close()
+  }
+  func testStaleHealthRawBeforeHeldLinkedObservationPreservesStoreAndIndependentCloud() async throws {
+    let gateway = GateHeldLinkedCapture(), f = try await deletionGuardFixture(healthIssue: nil, completeHealth: true, lateGateway: gateway)
+    let admission = controlledAggregateAdmission(f), raw = try XCTUnwrap(f.healthRaw), bytes = try raw.canonicalBytes(), cloud = GateControlledCloud()
+    // The fixture froze raw, held the original gateway, established the real
+    // original Session gate, then released/joined its linked observation before
+    // binding the account and sealing this same parent. Selection is now stale.
+    XCTAssertEqual(try businessWitnessCount(f.database), 1)
+    let controller = M4DeletionResumeController(admission: admission, cloudDeletion: cloud)
+    _ = try await controller.resume(requestID: f.saga.intent.requestID)
+    let actual = try await f.composition.repository.deletionSagaV4(requestID: raw.parentID)
+    XCTAssertEqual(actual?.cloudProgress, .completed); XCTAssertEqual(actual?.localProgress, .failed)
+    XCTAssertNotEqual(actual?.localTransportProgress, .completed); XCTAssertEqual(try businessWitnessCount(f.database), 1)
+    let inventory = try await f.composition.repository.captureInventoryV4(); XCTAssertEqual(inventory.count, 2)
+    XCTAssertTrue(inventory.contains { $0.captureOperations.contains { if case .linked = $0.observation?.outcome { true } else { false } } && $0.binding.matchID == "facts-late" })
+    do { _ = try await admission.localErase(requestID: raw.parentID); XCTFail("old immutable raw cannot omit the joined original linked fact") }
+    catch { XCTAssertEqual(error as? M4HealthBridgeError, .identityConflict) }
+    let actualRaw = try await f.healthArtifacts?.readReservation(parentID: raw.parentID); XCTAssertEqual(try actualRaw?.canonicalBytes(), bytes)
+    XCTAssertTrue(try f.catalog.receipts(requestID: raw.parentID).isEmpty); try await f.close()
+  }
+  func testFullHealthInventoryRejectsCanonicalOrphanBeforeFirstErase() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, completeHealth: true), admission = controlledAggregateAdmission(f)
+    try executeSQL(f.database, "DELETE FROM matches WHERE match_id='facts-original'")
+    let oldIDs = try await f.composition.repository.matchIDs(); XCTAssertTrue(oldIDs.isEmpty)
+    let rawBytes = try XCTUnwrap(f.healthRaw).canonicalBytes()
+    do { _ = try await admission.localErase(requestID: f.saga.intent.requestID); XCTFail("an orphan invisible to matchIDs must block first Store erase") }
+    catch { XCTAssertTrue(error is StoreError, "must surface the actual complete046 inventory failure, got \(error)") }
+    XCTAssertEqual(try businessWitnessCount(f.database), 1)
+    let retained = try await f.healthArtifacts?.readReservation(parentID: f.saga.intent.requestID); XCTAssertEqual(try retained?.canonicalBytes(), rawBytes)
+    XCTAssertTrue(try f.catalog.receipts(requestID: f.saga.intent.requestID).isEmpty); try await f.close()
   }
   private func businessWitnessCount(_ database: URL) throws -> Int {
     var sql: OpaquePointer?, query: OpaquePointer?; guard sqlite3_open_v2(database.path, &sql, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { throw M4CatalogError.storageBlocked }; defer { sqlite3_close(sql) }
@@ -671,5 +797,19 @@ private actor GateHeldAuthorityRelay: AuthorityHTTPRelay {
     await withCheckedContinuation { held = $0; waiter?.resume(); waiter = nil }
     throw URLError(.networkConnectionLost)
   }
+  func release() { held?.resume(); held = nil }
+}
+
+private actor GateHeldLinkedCapture: WorkoutGateway {
+  private var entered = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  private var held: CheckedContinuation<Void, Never>?
+  func waitForEntry() async { if entered { return }; await withCheckedContinuation { waiter = $0 } }
+  func perform(_ operation: CaptureOperation) async -> WorkoutObservation {
+    entered = true
+    await withCheckedContinuation { held = $0; waiter?.resume(); waiter = nil }
+    return try! WorkoutObservation(operationID: operation.id, binding: operation.binding, externalToken: operation.externalToken, observedAt: operation.requestedAt.addingTimeInterval(2), outcome: .linked(workoutID: UUID().uuidString), window: CaptureWindow(start: operation.requestedAt, end: operation.requestedAt.addingTimeInterval(2)))
+  }
+  func reconcile(_ operation: CaptureOperation) async -> WorkoutObservation { await perform(operation) }
   func release() { held?.resume(); held = nil }
 }
