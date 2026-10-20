@@ -37,9 +37,27 @@ extension SQLiteCloudLedger: CloudLocalTransportErasing {
     func requireNotLocallyErased(_ scope: CloudScope) throws {
         guard try !locallyErased(scope) else { throw CloudError(.accountChanged) }
     }
+    /// An external first receipt authorizes only replay of the original internal proof.
+    /// Missing controls or restored canonical copies never fall through to fresh erasure.
+    public func replayLocalTransportErasure(_ request: CloudLocalTransportEraseRequest, expectedReceipt: CloudLocalTransportEraseReceipt) throws -> CloudLocalTransportEraseReceipt {
+        let digest = try request.digest, stable = request.scope.stableZoneKey
+        guard expectedReceipt.requestID.utf8.elementsEqual(request.requestID.utf8),
+              expectedReceipt.requestDigest == digest, expectedReceipt.stableZoneKey == stable else { throw CloudError(.identityConflict) }
+        return try transaction(forLocalErasure: true) {
+            try validateLocalErasureLayout(sql)
+            guard let row = try sql.rows("SELECT request_digest,stable_zone FROM cloud_local_erase_receipts WHERE request_id=?", [.text(request.requestID)]).first,
+                  let oldDigest = row[0].string, let oldStable = row[1].string else { throw CloudError(.invalidPayload) }
+            let receipt = try CloudLocalTransportEraseReceipt(requestID: request.requestID, requestDigest: oldDigest, stableZoneKey: oldStable)
+            guard receipt == expectedReceipt else { throw CloudError(.identityConflict) }
+            guard try locallyErased(request.scope) else { throw CloudError(.invalidPayload) }
+            let current = try validateErasureCanonicalRows(sql, version: 4)
+            guard !current.contains(where: { $0.stableZoneKey == stable }) else { throw CloudError(.invalidPayload) }
+            return receipt
+        }
+    }
     public func eraseLocalTransport(_ request: CloudLocalTransportEraseRequest) throws -> CloudLocalTransportEraseReceipt {
         let digest = try request.digest, stable = request.scope.stableZoneKey
-        return try transaction {
+        return try transaction(forLocalErasure: true) {
             try validateLocalErasureLayout(sql)
             // Replay first: a lost COMMIT response never turns into a new operation.
             if let row = try sql.rows("SELECT request_digest,stable_zone FROM cloud_local_erase_receipts WHERE request_id=?", [.text(request.requestID)]).first {
@@ -70,7 +88,7 @@ extension SQLiteCloudLedger: CloudLocalTransportErasing {
 
 // Exact schema emitted by the ledger's v1-v4 migrations. Erasure never interprets,
 // repairs or migrates an unknown layout, including on an already-open connection.
-private func validateLocalErasureLayout(_ sql: CloudSQL) throws {
+func validateLocalErasureLayout(_ sql: CloudSQL) throws {
     guard try sql.rows("PRAGMA user_version").first?.first?.number == 4 else { throw CloudError(.unsupportedSchema) }
     let layout = [
         ("cloud_uploads", "CREATE TABLE cloud_uploads(id TEXT PRIMARY KEY, scope TEXT NOT NULL, digest TEXT NOT NULL, original BLOB NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, issue TEXT, retry_ms INTEGER, attempted_ms INTEGER) STRICT"),
