@@ -362,6 +362,23 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
   }
   /// Capacity only, not proof that identity/quiescence/full-seal admission passed.
   /// Every aggregate erase entrance must call this before invoking any mutating leaf.
+  func requireOriginalParentSeal(saga: DeletionSagaV4) throws -> M4FrozenDeletionPlan { try requireOriginalPlan(saga: saga, sealed: true) }
+  func requireOriginalReservation(saga: DeletionSagaV4) throws -> M4FrozenDeletionPlan { try requireOriginalPlan(saga: saga, sealed: false) }
+  private func requireOriginalPlan(saga: DeletionSagaV4, sealed: Bool) throws -> M4FrozenDeletionPlan {
+    try journal.transaction { state in
+      guard let plan = state.plans.first, M4CatalogIO.raw(plan.requestID, saga.intent.requestID), saga.intent.operation == .deleteAccount,
+            saga.originalScope == (try CloudScopeV1(accountID: plan.scope.accountID, cloudSpaceID: plan.scope.cloudSpaceID, zoneID: plan.scope.zoneID, activationEpoch: plan.scope.activationEpoch)),
+            M4CatalogIO.raw(saga.accountID, plan.scope.accountID), saga.activationEpoch == plan.scope.activationEpoch,
+            saga.cloudChoice == plan.choices.cloud, saga.localChoice == plan.choices.local,
+            saga.healthChoice == plan.choices.health, saga.healthConfirmed == plan.choices.healthConfirmed,
+            !sealed || plan.parentIntentDigest == saga.intent.digest,
+            plan.parentIntentDigest == nil || plan.parentIntentDigest == saga.intent.digest else { throw M4CatalogError.intentMismatch }
+      if plan.choices.health == .delete, plan.health.rawArtifactDigest == nil, plan.health.issue == nil { throw M4CatalogError.unsupportedSchema }
+      try state.requireCompletionCapacity()
+      for entry in plan.entries { try entry.capsule.verifyCurrent() }
+    }
+    return try requiredPlan(saga.intent.requestID)
+  }
   func sealFullControls(saga: DeletionSagaV4, raw: M4HealthRawReservation? = nil, prepared: M4HealthPreparedMapping? = nil, entry: HealthDeletionEntry? = nil) throws {
     try journal.transaction { state in
       guard var plan = state.plans.first, M4CatalogIO.raw(plan.requestID, saga.intent.requestID),
