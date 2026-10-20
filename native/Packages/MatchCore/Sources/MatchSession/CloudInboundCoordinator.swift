@@ -11,11 +11,13 @@ public protocol CloudInboundCoordinator:Sendable {
 extension MatchSession:CloudInboundCoordinator {
     func cloudRepository()throws->any CloudImportRepository {guard let value=store as? any CloudImportRepository else {throw CloudImportError.proofUnavailable};return value}
     public func importCloudBatch(_ batch:ValidatedCloudBatchV1) async throws->CloudImportReceiptV4 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment(allowSuspendedRead:true);let repository=try cloudRepository()
         let matches=try Set(batch.records.map {try $0.payload.matchID}).sorted()
         let keys=Array(Set(matches+["_cloud-cursor:"+(try batch.scope.key)])).sorted()
         for key in keys {await acquire(key)}
         defer {for key in keys.reversed(){release(key)}}
+        try requireBusinessActive()
         let receipt=try await repository.commitCloudBatchV4(batch)
         let binding=try await (store as? any AuthorityRepository)?.accountBindingV4()
         let canPublish=binding.map {!$0.suspended && $0.accountID==batch.scope.accountID && $0.activationEpoch==batch.scope.activationEpoch} ?? false
@@ -27,20 +29,25 @@ extension MatchSession:CloudInboundCoordinator {
         };return receipt
     }
     public func acceptCloudSave(_ proof:VerifiedCloudSaveV1) async throws->CloudCheckpointReceiptV4 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();let repository=try cloudRepository(),match=try proof.input.record.payload.matchID
         await acquire(match);defer {release(match)}
+        try requireBusinessActive()
         let receipt=try await repository.saveCloudCheckpointV4(proof)
         try await completeNormallyLocked(match)
         publish(try projected(await store.snapshotV2(matchID:match)));return receipt
     }
     public func resetCloudCursor(scope:CloudScopeV1,expectedGeneration:Int64) async throws->CloudCursorV4 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();let repository=try cloudRepository(),key="_cloud-cursor:"+(try scope.key)
         await acquire(key);defer {release(key)}
+        try requireBusinessActive()
         return try await repository.resetCloudCursorV4(scope:scope,expectedGeneration:expectedGeneration)
     }
     public func authorizeCloudHistory(_ grant:VerifiedCloudHistoryGrantV1) async throws {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();let repository=try cloudRepository(),match=grant.originalAcquire.body.matchID
-        await acquire(match);defer {release(match)};try await repository.authorizeCloudHistoryV4(grant)
+        await acquire(match);defer {release(match)};try requireBusinessActive();try await repository.authorizeCloudHistoryV4(grant)
     }
     func completeNormallyLocked(_ match:String) async throws {
         guard let repository=store as? any CloudImportRepository,let authority=store as? any AuthorityRepository else {return}

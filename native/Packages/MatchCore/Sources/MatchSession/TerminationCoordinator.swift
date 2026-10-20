@@ -7,11 +7,14 @@ public protocol AuthorityControlCoordinator:AuthorityInboundCoordinator {
 }
 extension MatchSession:AuthorityControlCoordinator {
     public func prepareNormalTermination(matchID:String,requestID:String) async throws->ControlIntentV1 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();guard let repository=store as? any AuthorityTerminationRepository else {throw AuthorityError.unavailable}
         await acquire(matchID);defer {release(matchID)}
+        try requireBusinessActive()
         return try await repository.prepareNormalTerminationV4(matchID:matchID,requestID:requestID,now:clock.now())
     }
     public func prepareAbnormalTermination(_ intent:ControlIntentV1) async throws->ControlIntentReceiptV4 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateEnvironment();guard let repository=store as? any AuthorityTerminationRepository else {throw AuthorityError.unavailable}
         await acquire(intent.matchID);defer {release(intent.matchID)}
         let authority=try authorityRepository()
@@ -23,6 +26,7 @@ extension MatchSession:AuthorityControlCoordinator {
             let event=try PostMatchEditor.terminateAbnormally(terminationID:intent.requestID,descriptor:s.business.descriptor,events:s.business.events,sourceDeviceID:b.deviceID,now:clock.now())
             commit=try makeCommit(command:intent.requestID,generation:s.business.generation,descriptor:s.business.descriptor,events:[event],operations:[],outboxID:intent.requestID+"/outbox")
         }
+        try requireBusinessActive()
         let result=try await repository.prepareAbnormalTerminationV4(intent:intent,request:commit)
         authorityTerminalMatches.insert(intent.matchID)
         publish(try projected(await store.snapshotV2(matchID:intent.matchID)));scheduleCapture(intent.matchID)

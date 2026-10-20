@@ -227,11 +227,12 @@ import SQLite3
     await source.holdNextState()
     let retrying = Task { await status.retry() }
     await source.waitForHeldState()
-    await status.shutdown()
+    let stopping = Task { await status.shutdown() }
+    for _ in 0..<100 { await Task.yield() }
+    await source.releaseState(); await retrying.value; await stopping.value
     await status.start(); status.observe(matchID: "m")
     for _ in 0..<100 { if status.unavailable != nil { break }; await Task.yield() }
     XCTAssertNil(status.state)
-    await source.releaseState(); await retrying.value
     XCTAssertNil(status.state, "Old lifecycle success must not overwrite new unavailable")
     XCTAssertFalse(status.projection(terminal: false).peerPersisted)
     await status.shutdown()
@@ -243,8 +244,9 @@ import SQLite3
     await client.holdNextRecovery()
     let loading = Task { await model.load() }
     await client.waitForRecovery()
-    await model.shutdown()
-    await client.releaseRecovery(); await loading.value
+    model.beginRetirement()
+    let stopping = Task { await model.shutdown() }
+    await client.releaseRecovery(); await loading.value; await stopping.value
     XCTAssertNil(model.syncStatus.matchID)
     XCTAssertFalse(model.canRecord)
     XCTAssertNil(model.snapshot)
