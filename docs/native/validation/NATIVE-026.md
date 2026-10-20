@@ -538,3 +538,23 @@ Evidence prefix `/private/tmp/football-record-NATIVE026-build/bootstrap/producti
 | watch-sim-build.log | `2541824ffac556495d5898738ea71057dc3cd78b70a751b10b074ee26707f660` |
 
 This clean handoff is for root to ordinary-merge accepted049. Full controlled App service ownership, independent fresh identity inputs, retained material/Phone inbox seams, Node E2E, whole026 source/final review and deferred real SDK/account/device validation remain separate.
+
+
+### Complete original account and Phone service task ownership
+
+Source `e84c224368d6481a0a450fd4aa554b9835a4d404`, based on accepted050 actualmerge0e7292df9b1f4eef2edc31d3d7954eee92ceb892. The one original facade/Session and real AccountService accept a fixture-authority signed original pending recovery reply. Before the first local binding, independent account/cloud/environment/generation observation is required; after the original service and credential tail finish, another fresh observation and existing checked038 admission are required. No configured subject or retained credential stands in for current identity. The first-local-binding fixture is explicit pending AuthAttempt recovery, not a new Node signup. Positive verified SQL and original attempt bytes remain retained on later mismatch.
+
+- Placeholder Model callback RED:4tests/8assertions/0unexpected. Its initial missing-try fixture compilation log remains separate.
+- After minimal service wiring, actual held vault.replace (signature verified and original Session SQL already committed) reveals premature quiesce and public/throwing close releasing the original DB:5tests/3assertions/0unexpected. An earlier timing-insufficient4/0 log is preserved separately, not relabeled as meaningful owner RED.
+- Minimal direct Phone forwarding plus a held real original signed HTTP request reveals premature business acknowledgement; a failed new current cloud observation also left the old ready UI admitted:3tests/2assertions/0unexpected. The initial wrong endpoint type compile log is separately retained. The accurate accepted040 type is M4PhoneWatchRegistrationEndpoint.
+- The same eight final cases pass8/0. They prove original credential-tail join, public Void/throwing shared owner, DB retention and reopen, same repository/Session identity, fresh pre/post identity, prior admission removal, Phone context/retired rejection and complete Phone call join. The Phone fixture returns an explicit unavailable HTTP error after release; it is not a successful backend registration. Callback errors return before the outer caller invokes drain, so tracked callbacks never await their own business join.
+- Frozen related **79/0** in one command: Composition23, Recovery38, Context7, Identity10, DevicePair1. Separate non-DEBUG Release macOS14 host AppIntegration product build exits0. All **353 inputs** remain unchanged before/post and match the source commit; diff-check passes. This does not repeat or absorb root's earlier188/0/Session66 evidence, minimum mobile SDK/App/UI, real provider or Node E2E validation.
+
+Evidence prefix `/private/tmp/football-record-NATIVE026-build/bootstrap/service-owner-`: unwired-initial-compile.log; unwired-red.log/source.swift/tests.swift; unowned-initial-green.log (timing layer); vault-tail-red.log/source.swift/tests.swift; vault-tail-green.log; phone-initial-compile.log; phone-red.log/source.swift/tests.swift; eight-green.log; inputs.json; frozen-source.swift/frozen-tests.swift; frozen-related.log; release-host-build.log; validation-results.json; post.json and commit-match.json.
+
+| Frozen log | SHA256 |
+| --- | --- |
+| frozen-related.log | `f74c1acc124b5ed2f0d10de835cecd8543865af0adf0444321409f5e8038f2bf` |
+| release-host-build.log | `51723bf6a952b7fde545644df4adcd25b3bc27a25a665e12c44eef881e68b388` |
+
+identityChanged and Lifecycle action callbacks remain explicitly unavailable here; no blanket business gate is applied to original Saga/Lifecycle controls. The existing registered deletion resume/reconcile owners still drain only at final close. Full control action ownership, new signIn/Watch protocol coverage,051 material/inbox assembly,052 pending-deletion fresh reauth and whole026 source/final review remain subsequent work; no unreviewed APIs or new DB/Session are used.
