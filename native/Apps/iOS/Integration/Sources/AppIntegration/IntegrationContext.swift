@@ -68,7 +68,22 @@ import MatchPresentation
 /// A sequential replacement boundary shared by the App and host lifecycle tests.
 @MainActor final class IntegrationLifecycle {
   private(set) var current: IntegrationContext?
+  private var replacing = false
+  private var replacements: [CheckedContinuation<Void, Never>] = []
+  private func acquireReplacement() async {
+    if !replacing { replacing = true; return }
+    await withCheckedContinuation { replacements.append($0) }
+  }
+  private func releaseReplacement() {
+    if replacements.isEmpty { replacing = false }
+    else { replacements.removeFirst().resume() }
+  }
   func replace(_ build: () async throws -> IntegrationContext) async throws -> IntegrationContext {
+    // MainActor reentrancy must not treat the temporarily empty current as a
+    // vacant environment while the previous facade is still draining.
+    await acquireReplacement()
+    defer { releaseReplacement() }
+    try Task.checkCancellation()
     var old = current; current = nil
     do { try await old?.shutdown() }
     catch { current = old; throw error }
