@@ -88,6 +88,7 @@ import MatchPresentation
     do { try await old?.shutdown() }
     catch { current = old; throw error }
     old = nil
+    try Task.checkCancellation()
     // No factory/capture/transport for the next environment exists before old shutdown joins.
     let next = try await build(); current = next
     return next

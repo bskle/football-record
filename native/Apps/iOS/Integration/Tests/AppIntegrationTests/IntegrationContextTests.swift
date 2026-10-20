@@ -131,6 +131,39 @@ import DeviceSync
     XCTAssertTrue(firstResult.model.readOnly)
     try await firstResult.shutdown(); try await secondResult.shutdown()
   }
+  func testCancelledReplacementJoinsOriginalDrainWithoutBuildingAndReleasesQueuedCaller() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), gateway = ContextHeldGateway(), lifecycle = IntegrationLifecycle()
+    let original = try await lifecycle.replace { try await IntegrationContext.make(root: root, namespace: DeviceDatasetGate.namespace, development: true, workout: gateway, transport: ContextTransport(), trust: UnavailableRevocableTrust()) }
+    await original.model.start(starter: true); _ = await gateway.waitForEntry()
+    var firstBegan = false, cancelledFactoryCalls = 0, queuedFactoryCalls = 0, cancelledReturned = false
+    let cancelled = Task {
+      firstBegan = true
+      defer { cancelledReturned = true }
+      return try await lifecycle.replace {
+        cancelledFactoryCalls += 1
+        return try await IntegrationContext.make(root: root, namespace: "cancelled-overlap", development: true, transport: ContextTransport(), trust: UnavailableRevocableTrust())
+      }
+    }
+    while !firstBegan { await Task.yield() }; try await Task.sleep(for: .milliseconds(20)); cancelled.cancel()
+    let queued = Task {
+      try await lifecycle.replace {
+        queuedFactoryCalls += 1
+        return try await IntegrationContext.make(root: root, namespace: "valid-after-cancel", development: true, transport: ContextTransport(), trust: UnavailableRevocableTrust())
+      }
+    }
+    try await Task.sleep(for: .milliseconds(20))
+    XCTAssertFalse(cancelledReturned, "cancellation still joins the original positive fact before releasing replacement ownership")
+    XCTAssertEqual(cancelledFactoryCalls, 0); XCTAssertEqual(queuedFactoryCalls, 0)
+    await gateway.release()
+    var escaped: IntegrationContext?
+    do { escaped = try await cancelled.value; XCTFail("cancelled caller cannot build after its awaited shutdown") }
+    catch { XCTAssertTrue(error is CancellationError) }
+    let next = try await queued.value
+    XCTAssertEqual(cancelledFactoryCalls, 0); XCTAssertEqual(queuedFactoryCalls, 1); XCTAssertTrue(lifecycle.current === next)
+    XCTAssertTrue(original.model.readOnly)
+    do { _ = try await XCTUnwrap(original.repository).matchIDs(); XCTFail("original facade must close after its joined positive observation") } catch {}
+    try await escaped?.shutdown(); try await next.shutdown()
+  }
   func testOverlappingReplacementFailureKeepsOriginalAndBlocksBothFactories() async throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), gateway = ContextHeldGateway(), lifecycle = IntegrationLifecycle()
     let original = try await lifecycle.replace { try await IntegrationContext.make(root: root, namespace: DeviceDatasetGate.namespace, development: true, workout: gateway, transport: ContextTransport(), trust: UnavailableRevocableTrust()) }
