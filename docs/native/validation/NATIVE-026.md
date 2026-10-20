@@ -340,3 +340,20 @@ Source `ef557edd01bb099b145b57ce1980c9fd11ccba9d` adds a MainActor FIFO replacem
 | `replacement-overlap-checkpoint-commit-match.json` | `1bf340c1188a1749f778cea5218794337059311d35053ff9f36a58e2bdb35b22` |
 
 Independent review still controls finding closure. Remaining aggregate work must use accepted045 concrete read-only original Store witnesses and always invoke accepted044 Cloud replay, preserve first receipt bytes, and verify all owned components. Final Health selection must follow original capture writer join and match all retained original facts; an earlier immutable raw artifact that omits late positive facts cannot authorize Store erasure. Accepted043 mailbox drain inspection is still unavailable at this checkpoint. Default providers remain unavailable; real SDK, device/account, App/UI, power-loss and whole026 checks are pending.
+
+
+### Cancellation during original shutdown
+
+Follow-up source `47559320f844f2d30f29309f7542c6a373497335` checks cancellation again after original shutdown joins and before the next factory. A held original capture still delays the cancelled caller's return and all queued factories. Once its positive observation is durable and the original facade closes, the cancelled caller throws CancellationError without constructing a replacement; the queued valid caller then builds exactly once.
+
+The added runtime regression is **RED1/2**, followed by one frozen related **16/0** (Context7, Composition8, DevicePair1). All346 inputs are unchanged before/post and match the exact source commit; previous15/0,148/0 and16/0 guard selections retain their own layers. No real SDK/account/device/App/UI or whole026 check is claimed.
+
+| Evidence in bootstrap | SHA256 |
+| --- | --- |
+| `replacement-cancellation-red.log` | `509c9287c7db3cc8af9e10e19b3006512f775e5f53db857f9c3537644f25744f` |
+| `replacement-cancellation-red-source.swift` | `b539ba5fee4d9f3ee717816a4fef8da1a0e17c86c6af220ffaa49fc2ea9df319` |
+| `replacement-cancellation-red-tests.swift` | `93484223910fde29cbe9637060468d3a5775eeb3057799bd37f6171cc5860706` |
+| `replacement-cancellation-related-green.log` | `765b4e7ba3f7afa558ea1a412127a6179852984e8630d9dbb215d46a607a5b10` |
+| `replacement-cancellation-checkpoint-inputs.json` | `15964f582ae09eedd5376c367917b058c2015cc0ab5ab10efd553b44338eb3fb` |
+| `replacement-cancellation-checkpoint-post.json` | `dc7a3caf7184696da2a7fb294a9e969b4670050de63f5c2cb528d1a8d2ed82ed` |
+| `replacement-cancellation-checkpoint-commit-match.json` | `19971b6189dde1095cb99ec23c9a8e01ff4d6d61b5b89d7f2c5f7a740d0b52bf` |
