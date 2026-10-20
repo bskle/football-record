@@ -9,6 +9,7 @@ import MatchStore
 import MatchSession
 import AccountKit
 import HealthKitDeletion
+import MatchPresentation
 @testable import AppIntegration
 
 @MainActor final class M4DeletionRecoveryTests: XCTestCase {
@@ -543,20 +544,32 @@ import HealthKitDeletion
     var healthRaw: M4HealthRawReservation? = nil
     var healthArtifacts: M4RetainedHealthArtifactStore? = nil
     var healthLedger: SQLiteHealthDeletionLedger? = nil
+    var controlledAdapters: M4ControlledAdapters? = nil
+    var protocolRoot: URL? = nil
     func close() async throws {
       try await composition.close(); try catalog.close(); try await ledger.close()
       try await healthArtifacts?.close(); try await healthLedger?.close()
     }
   }
-  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil, completeHealth: Bool = false, lateGateway: GateHeldLinkedCapture? = nil) async throws -> GateFixture {
-    let root = try root(), namespace = "guard-fixture", key = Curve25519.Signing.PrivateKey()
+  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil, completeHealth: Bool = false, lateGateway: GateHeldLinkedCapture? = nil, controlledClients: Bool = false) async throws -> GateFixture {
+    let root = try root(), namespace = controlledClients ? "m4-ui-integration-phone" : "guard-fixture", key = Curve25519.Signing.PrivateKey()
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["guard-key": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
     let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("identity-control")) { seed in
       let signer = try DevelopmentDeviceSigner(namespace: namespace, rawRepresentation: Data(repeating: 21, count: 32))
       let credential = hasCredential ? DeviceCredential(token: AuthorityWire.base64URL(Data(repeating: 5, count: 32)), sessionID: "guard-control-session", accountID: "account", deviceID: seed.installationID, keyID: try AuthorityWire.deviceKeyID(publicKey: signer.publicKey), activationEpoch: 2, expiresAt: 9_007_199_254_740_990) : nil
       return M4IdentityMaterial(signer: signer, vault: MemoryDeviceCredentialVault(credential))
     }
-    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud", authorityRelay: authorityRelay, workout: lateGateway)
+    var controlled: M4ControlledAdapters?, protocolRoot: URL?
+    if controlledClients {
+      #if DEBUG
+      let directory = root.appendingPathComponent("protocol-clients"); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+      let configuration = DevelopmentAuthorityConfiguration(dataset: "integration", namespace: namespace, baseURL: "http://127.0.0.1:1", keyID: "guard-key", publicKey: AuthorityWire.base64URL(key.publicKey.rawRepresentation), cloudSpaceID: "cloud", subject: "controlled-fixture", role: "phone")
+      controlled = try M4ControlledAdapters.make(configuration: configuration, rootDirectory: directory); protocolRoot = directory
+      #else
+      throw M4LocalErasureError.unavailable
+      #endif
+    }
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud", authorityRelay: authorityRelay, workout: lateGateway, controlledAdapters: controlled)
     var retainedRaw: M4HealthRawReservation?
     if completeHealth {
       try await seedHealthCanonicalMatch(c, device: prepared.seed.installationID, id: "facts-original", linked: true)
@@ -640,7 +653,68 @@ import HealthKitDeletion
     XCTAssertEqual(sqlite3_exec(sql, "INSERT INTO lifecycle_steps_v4 VALUES('normal-intent:guard-witness',X'" + hex + "','" + M4CatalogIO.hash(witness) + "')", nil, nil, nil), SQLITE_OK)
     var result = GateFixture(root: root, composition: c, prepared: prepared, catalog: catalog, ledger: ledger, scope: scope, saga: accepted, database: database)
     result.healthRaw = retainedRaw; result.healthArtifacts = artifacts; result.healthLedger = healthLedger
+    result.controlledAdapters = controlled; result.protocolRoot = protocolRoot
     return result
+  }
+  func testControlledQuiescenceJoinsOriginalAppleButKeepsParentCloudClientOpen() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, controlledClients: true), adapters = try XCTUnwrap(f.controlledAdapters), root = try XCTUnwrap(f.protocolRoot)
+    let authorization = Task { try await adapters.authorize(nonceSHA256: AuthorityWire.hash(Data("original-nonce".utf8))) }
+    let pending = try await protocolRequest(root, operation: "apple")
+    try await f.composition.quiesceBusiness()
+    var drained = false
+    do { try await adapters.assertDrained(scope: f.scope, requestID: f.saga.intent.requestID, parentIntentDigest: f.saga.intent.digest); drained = true }
+    catch { XCTFail("composition quiesce did not join original protocol operations: \(error)") }
+    // Old unwired ownership is released by the fixture, preserving a runtime
+    // RED rather than waiting a mailbox timeout. Green uses actual cancellation.
+    if !drained { try protocolReply(pending, payload: JSONSerialization.data(withJSONObject: ["identityToken": "late-token", "authorizationCode": "late-code"])) }
+    do { _ = try await authorization.value; XCTFail("a quiesced original Apple result cannot escape") } catch {}
+    // This is the original client and exact parent, still open for Saga control.
+    let driver = adapters.deletionDriver(parentID: f.saga.intent.requestID, parentIntentDigest: f.saga.intent.digest, scope: f.scope)
+    let cloud = Task { try await driver.deletePrivateZone(scope: f.scope) }
+    let deletion = try await protocolRequest(root, operation: "cloud-delete")
+    XCTAssertEqual(try JSONDecoder().decode(CloudScope.self, from: deletion.payload), f.scope)
+    try protocolReply(deletion, payload: Data()); try await cloud.value
+    do { try await adapters.assertDrained(scope: f.scope, requestID: f.saga.intent.requestID, parentIntentDigest: f.saga.intent.digest) }
+    catch { XCTFail("original control completion must leave a readable drain state: \(error)") }
+    do { try await adapters.assertDrained(scope: f.scope, requestID: "foreign-parent", parentIntentDigest: f.saga.intent.digest); XCTFail("a foreign parent cannot borrow original mailbox zero") } catch { XCTAssertEqual(error as? M4LocalErasureError, .intentMismatch) }
+    try await f.close()
+  }
+  func testControlledFinalCloseUndrainedPreservesOriginalDBAndLeaseForRetry() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, controlledClients: true), root = try XCTUnwrap(f.protocolRoot), adapters = try XCTUnwrap(f.controlledAdapters)
+    try await f.composition.quiesceBusiness()
+    let file = root.appendingPathComponent("development/mailbox/incoming/fixture-foreign"), bytes = Data([0,255,7]); try bytes.write(to: file)
+    do { try await adapters.assertDrained(scope: f.scope, requestID: f.saga.intent.requestID, parentIntentDigest: f.saga.intent.digest); XCTFail("unknown mailbox payload cannot authorize local erasure") } catch { XCTAssertEqual(error as? M4LocalErasureError, .pendingTransfer) }
+    do { try await f.composition.close(); XCTFail("undrained client final close must preserve the original DB") } catch { XCTAssertEqual(error as? M4LocalErasureError, .pendingTransfer) }
+    let retained = try? await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(retained?.intent, f.saga.intent); XCTAssertEqual(retained?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(try Data(contentsOf: file), bytes); XCTAssertNotNil(f.composition.lastCloseFailure)
+    do { _ = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }; XCTFail("failed final close retains original identity lease") } catch { XCTAssertEqual(error as? M4BootstrapError, .leaseInUse) }
+    // Only this fixture removes its own exact byte-matched test file.
+    try FileManager.default.removeItem(at: file)
+    try await f.composition.close(); XCTAssertNil(f.composition.lastCloseFailure)
+    let prepared = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }
+    let repository = try prepared.openRepository(authorityTrust: f.composition.client.trust), original = try await repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(original?.intent, f.saga.intent); XCTAssertEqual(original?.recoveryCapability, f.saga.recoveryCapability)
+    try await prepared.close(); try f.catalog.close(); try await f.ledger.close()
+  }
+  private struct ProtocolRequest {
+    let response: URL
+    let payload: Data
+  }
+  private func protocolRequest(_ root: URL, operation: String) async throws -> ProtocolRequest {
+    let directory = root.appendingPathComponent("development/mailbox/outgoing"), deadline = ContinuousClock.now.advanced(by: .seconds(3))
+    while ContinuousClock.now < deadline {
+      for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any], value["operation"] as? String == operation,
+              let id = value["id"] as? String, let base64 = value["payload"] as? String, let payload = Data(base64Encoded: base64) else { continue }
+        return ProtocolRequest(response: root.appendingPathComponent("development/mailbox/responses/" + id + ".json"), payload: payload)
+      }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    throw M4LocalErasureError.unavailable
+  }
+  private func protocolReply(_ request: ProtocolRequest, payload: Data) throws {
+    try JSONSerialization.data(withJSONObject: ["payload": payload.base64EncodedString()], options: [.sortedKeys]).write(to: request.response, options: .atomic)
   }
   private func seedHealthCanonicalMatch(_ c: M4AccountComposition, device: String, id: String, linked: Bool) async throws {
     // Public canonical StoreCommit fixture on this one original M4 facade,

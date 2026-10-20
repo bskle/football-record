@@ -45,6 +45,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private let identity: any M4CurrentIdentityObserving
   private let cloudSpaceID: String
   private let watchRelay: M4WatchRegistrationRelay
+  private let controlledAdapters: M4ControlledAdapters?
   private var lifetime = UUID()
   private var closed = false
   private var finalClosing: Task<Void, any Error>?
@@ -58,45 +59,50 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private var quiescing: Task<Void, any Error>?
   private var identityTasks: [UUID: Task<Void, any Error>] = [:]
   private(set) var admittedScope: CloudScope?
-  private init(prepared: M4PreparedIdentity, repository: SQLiteSessionRepository, session: MatchSession, context: AccountAppContext, client: AuthorityClient, accountService: AccountService, phoneRegistration: PhoneWatchRegistrationService, watchRegistration: WatchRegistrationService, cloudBridge: CloudSessionBridge, sync: MatchSyncService, identity: any M4CurrentIdentityObserving, cloudSpaceID: String, watchRelay: M4WatchRegistrationRelay, closeBridge: M4CompositionCloseBridge) {
+  private init(prepared: M4PreparedIdentity, repository: SQLiteSessionRepository, session: MatchSession, context: AccountAppContext, client: AuthorityClient, accountService: AccountService, phoneRegistration: PhoneWatchRegistrationService, watchRegistration: WatchRegistrationService, cloudBridge: CloudSessionBridge, sync: MatchSyncService, identity: any M4CurrentIdentityObserving, cloudSpaceID: String, watchRelay: M4WatchRegistrationRelay, closeBridge: M4CompositionCloseBridge, controlledAdapters: M4ControlledAdapters?) {
     self.prepared = prepared; self.repository = repository; self.session = session; self.context = context; self.client = client
-    self.accountService = accountService; self.phoneRegistration = phoneRegistration; self.watchRegistration = watchRegistration; self.cloudBridge = cloudBridge; self.sync = sync; self.identity = identity; self.cloudSpaceID = cloudSpaceID; self.watchRelay = watchRelay; self.closeBridge = closeBridge
+    self.accountService = accountService; self.phoneRegistration = phoneRegistration; self.watchRegistration = watchRegistration; self.cloudBridge = cloudBridge; self.sync = sync; self.identity = identity; self.cloudSpaceID = cloudSpaceID; self.watchRelay = watchRelay; self.closeBridge = closeBridge; self.controlledAdapters = controlledAdapters
   }
-  static func make(prepared: M4PreparedIdentity, trust: AuthorityTrustConfiguration, cloudSpaceID: String, identity: any M4CurrentIdentityObserving = M4UnavailableCurrentIdentity(), authorityRelay: (any AuthorityHTTPRelay)? = nil, workout: (any WorkoutGateway)? = nil) async throws -> M4AccountComposition {
+  static func make(prepared: M4PreparedIdentity, trust: AuthorityTrustConfiguration, cloudSpaceID: String, identity: any M4CurrentIdentityObserving = M4UnavailableCurrentIdentity(), authorityRelay: (any AuthorityHTTPRelay)? = nil, workout: (any WorkoutGateway)? = nil, controlledAdapters: M4ControlledAdapters? = nil) async throws -> M4AccountComposition {
     try AuthorityWire.identifier(cloudSpaceID)
     let development = trust.environment == .development
     guard development ? prepared.seed.namespace != SQLiteSessionRepository.productionNamespace : prepared.seed.namespace == SQLiteSessionRepository.productionNamespace else { throw AuthorityError.identityChanged }
     #if !DEBUG
     guard !development else { throw AuthorityError.identityChanged }
     #endif
-    if authorityRelay != nil || workout != nil {
+    if authorityRelay != nil || workout != nil || controlledAdapters != nil {
       #if DEBUG
       guard development else { throw AuthorityError.identityChanged }
       #else
       throw AuthorityError.identityChanged
       #endif
     }
+    if let controlledAdapters { try await controlledAdapters.claim(namespace: prepared.seed.namespace, trust: trust, cloudSpaceID: cloudSpaceID) }
     let policy: CloudSaveProofPolicy = development ? .development(databaseNamespace: prepared.seed.namespace) : .unavailable
     let repository = try prepared.openRepository(authorityTrust: trust, cloudSavePolicy: policy)
     do {
+      try await controlledAdapters?.attach(repository)
       let device = PersistentDeviceIdentityProvider(url: prepared.seed.namespaceDirectory.appendingPathComponent("device.identity"), repository: repository)
       guard try await device.localDeviceID() == prepared.seed.installationID else { throw AuthorityError.identityChanged }
-      let client = AuthorityClient(relay: authorityRelay ?? M4UnavailableAuthorityRelay(), vault: prepared.material.vault, signer: prepared.material.signer, trust: trust)
+      let relay: any AuthorityHTTPRelay = authorityRelay ?? controlledAdapters ?? M4UnavailableAuthorityRelay()
+      let apple: any AppleSignInDriver = controlledAdapters ?? M4UnavailableAppleAuthorization()
+      let client = AuthorityClient(relay: relay, vault: prepared.material.vault, signer: prepared.material.signer, trust: trust)
       let permits = AuthorityStartPermitProvider(client: client, repository: repository)
       let session = MatchSession(store: repository, deviceIdentity: device, clock: SystemSessionClock(), ids: UUIDSessionIDFactory(), permits: permits, workout: workout ?? UnavailableWorkoutGateway(), environment: development ? .development(databaseNamespace: prepared.seed.namespace) : .production)
       try await permits.attach(session)
       let sync = MatchSyncService(repository: repository, inbound: session)
       let recording = RecordingModel(session: session, repository: repository, development: development, sync: sync)
-      let accountService = AccountService(client: client, repository: repository, coordinator: session, deviceID: prepared.seed.installationID, cloudSpaceID: cloudSpaceID, apple: M4UnavailableAppleAuthorization())
+      let accountService = AccountService(client: client, repository: repository, coordinator: session, deviceID: prepared.seed.installationID, cloudSpaceID: cloudSpaceID, apple: apple)
       let phone = PhoneWatchRegistrationService(client: client, repository: repository, coordinator: session)
-      let watchRelay = M4WatchRegistrationRelay()
+      let channel: any M4WatchRegistrationChannel = controlledAdapters ?? M4UnavailableWatchRegistrationChannel()
+      let watchRelay = M4WatchRegistrationRelay(channel: channel)
       let watch = WatchRegistrationService(client: client, repository: repository, coordinator: session, deviceID: prepared.seed.installationID, cloudSpaceID: cloudSpaceID, authorizer: watchRelay)
       let bridge = CloudSessionBridge(repository: repository, client: client, policy: policy); try await bridge.attach(session)
       let account = AccountStatusModel(repository: repository, development: development, action: { _ in throw AuthorityError.unavailable })
       let lifecycle = LifecycleStatusModel(repository: repository, development: development, action: { _ in throw AuthorityError.unavailable })
       let closeBridge = M4CompositionCloseBridge()
       let context = try await AppBootstrap.accountContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, close: { await closeBridge.closeFromContext() })
-      let value = M4AccountComposition(prepared: prepared, repository: repository, session: session, context: context, client: client, accountService: accountService, phoneRegistration: phone, watchRegistration: watch, cloudBridge: bridge, sync: sync, identity: identity, cloudSpaceID: cloudSpaceID, watchRelay: watchRelay, closeBridge: closeBridge)
+      let value = M4AccountComposition(prepared: prepared, repository: repository, session: session, context: context, client: client, accountService: accountService, phoneRegistration: phone, watchRegistration: watch, cloudBridge: bridge, sync: sync, identity: identity, cloudSpaceID: cloudSpaceID, watchRelay: watchRelay, closeBridge: closeBridge, controlledAdapters: controlledAdapters)
       // The public context retains its resource owner until successful final close.
       // Breaking this link only after success also retains failed-close retry state.
       closeBridge.owner = value
@@ -161,7 +167,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     if let quiescing { return try await quiescing.value }
     businessStopped = true; lifetime = UUID(); admittedScope = nil
     context.account.pauseIdentity(); context.recording.beginRetirement()
-    let session = session, recording = context.recording, observations = Array(identityTasks.values)
+    let session = session, recording = context.recording, observations = Array(identityTasks.values), controlledAdapters = controlledAdapters
     observations.forEach { $0.cancel() }
     let task = Task {
       // Establish the original Session's permanent business gate before any
@@ -169,6 +175,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       let retirement: Result<Void, any Error>
       do { try await Self.retireBusiness(session: session, recording: recording); retirement = .success(()) }
       catch { retirement = .failure(error) }
+      await controlledAdapters?.quiesceBusiness()
       // A failed durable retirement still joins every cancelled identity task;
       // preserve the original failure and facade for the owner's SQL-only retry.
       for observation in observations { _ = await observation.result }
@@ -196,6 +203,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       try await self.quiesceBusiness()
       for owner in owners { await owner.stopAndJoin() }
       await self.watchRelay.close()
+      try await self.controlledAdapters?.finalClose()
       // close() verifies the original lease and throws before releasing that
       // lease or closing its DB when original identity provenance has changed.
       try await self.prepared.close()

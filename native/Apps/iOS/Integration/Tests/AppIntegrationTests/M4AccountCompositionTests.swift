@@ -89,6 +89,37 @@ extension M4AccountCompositionTests {
     XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
     try await prepared.close()
   }
+  #if DEBUG
+  func testControlledNamespaceAndProductionRejectionHappenBeforeOpeningDB() async throws {
+    for production in [false, true] {
+      let (prepared, developmentTrust) = try await identityFixture(production ? SQLiteSessionRepository.productionNamespace : "m4-controlled-wrong-namespace", signerNamespace: "m4-client-isolation")
+      let directory = location(); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      let config = DevelopmentAuthorityConfiguration(dataset: "adapters", namespace: "m4-ui-adapters-phone", baseURL: "http://127.0.0.1:1", keyID: "authority-fixture", publicKey: try XCTUnwrap(developmentTrust.publicKeys["authority-fixture"]), cloudSpaceID: "cloud-fixture", subject: "controlled-subject", role: "phone")
+      let adapters = try M4ControlledAdapters.make(configuration: config, rootDirectory: directory)
+      let trust = production ? try AuthorityTrustConfiguration(environment: .production, publicKeys: developmentTrust.publicKeys) : developmentTrust
+      XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
+      do { _ = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", controlledAdapters: adapters); XCTFail("controlled clients must reject this original namespace/environment before opening storage") }
+      catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+      XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
+      try await adapters.finalClose(); try await prepared.close()
+    }
+  }
+  func testControlledClientsCannotBeReattachedToASecondFacade() async throws {
+    let (prepared, trust) = try await identityFixture("m4-ui-adapters-phone")
+    let directory = location(); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let config = DevelopmentAuthorityConfiguration(dataset: "adapters", namespace: prepared.seed.namespace, baseURL: "http://127.0.0.1:1", keyID: "authority-fixture", publicKey: try XCTUnwrap(trust.publicKeys["authority-fixture"]), cloudSpaceID: "cloud-fixture", subject: "controlled-subject", role: "phone")
+    let adapters = try M4ControlledAdapters.make(configuration: config, rootDirectory: directory)
+    let original = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", controlledAdapters: adapters)
+    let (other, _) = try await identityFixture(prepared.seed.namespace)
+    XCTAssertFalse(FileManager.default.fileExists(atPath: other.seed.businessDatabaseURL.path))
+    do { _ = try await M4AccountComposition.make(prepared: other, trust: trust, cloudSpaceID: "cloud-fixture", controlledAdapters: adapters); XCTFail("the original clients cannot be adopted by another facade") }
+    catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: other.seed.businessDatabaseURL.path))
+    let repositoryID = await original.repository.syncRepositoryIdentity(), sessionID = await original.session.syncRepositoryIdentity(); XCTAssertEqual(repositoryID, sessionID)
+    XCTAssertTrue(original.context.repository === original.repository); XCTAssertTrue(original.context.session === original.session)
+    try await other.close(); try await original.close()
+  }
+  #endif
   func testDefaultCurrentIdentityRemainsUnavailableDespiteStoredBindingAndCredential() async throws {
     let (prepared, trust) = try await identityFixture("m4-compose-two")
     let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture")
