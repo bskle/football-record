@@ -53,12 +53,19 @@ struct M4LocalTransportLeaves: Sendable {
       payload = try M4CatalogIO.encode(receipt); digest = receipt.intentDigest
     case .cloudLedger:
       guard !capsule.root.directory else { throw M4LocalErasureError.intentMismatch }
-      let ledger = try SQLiteCloudLedger(url: URL(fileURLWithPath: capsule.root.path))
+      let retained = try catalog.receipts(requestID: parentID).first(where: { M4CatalogIO.raw($0.componentID, componentID) })
+      if let retained { try retained.validate(plan: plan) }
+      // This accepted047 constructor cannot create or migrate a restored DB.
+      let ledger = try SQLiteCloudLedger(existingLocalErasureURL: URL(fileURLWithPath: capsule.root.path))
       do {
         try capsule.verifyCurrent()
-        // Always invoke the concrete leaf, including cached receipt replay. Its
-        // current all-epoch canonical inventory is the authority for this read.
-        let receipt = try await ledger.eraseLocalTransport(CloudLocalTransportEraseRequest(requestID: child.requestID, scope: capsule.scope))
+        let request = try CloudLocalTransportEraseRequest(requestID: child.requestID, scope: capsule.scope)
+        let receipt: CloudLocalTransportEraseReceipt
+        if let retained {
+          let expected: CloudLocalTransportEraseReceipt = try M4CatalogIO.decode(retained.canonicalReceipt)
+          // Missing internal proof is an error, never permission to re-erase.
+          receipt = try await ledger.replayLocalTransportErasure(request, expectedReceipt: expected)
+        } else { receipt = try await ledger.eraseLocalTransport(request) }
         payload = try M4CatalogIO.encode(receipt); digest = receipt.requestDigest
         try await ledger.close()
       } catch { try? await ledger.close(); throw error }
