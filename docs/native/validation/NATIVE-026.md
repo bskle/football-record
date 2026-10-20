@@ -293,3 +293,29 @@ The old IntegrationContext uses the same three phases and a shared throwing shut
 | `retirement-owners-full-host.log` (single148/0) | `ee856b9dca830e392bb8299b539778b34ac2efc0f2d3cab7e0aff980306125f5` |
 
 This is source/host retirement integration only. Every composition deletion resume still needs the original general parent/catalog/choice/child/capacity/quiescence guard. Health.delete additionally requires real039/041/028 fullHealthSeal at Store/transport erasure, while typed missing/source issues preserve Store and allow independent Cloud progress. Full current-zero aggregate interfaces, App wiring and real SDK/device/account/signing/App/UI/power-loss checks remain incomplete.
+
+## Original resume guard and independent Health issue components
+
+Source `df6e4eb52c206d67262344508b1bb2376c63bdcb` adds guarded original-parent/catalog admission and forwards every Lifecycle/control-queue operation through the same original Session/sync identity. It creates no replacement facade or Session. A resume requires durable original parent digest, whole frozen membership and deterministic children, scope/choices, existing capsule identities, capacity and business/identity quiescence. A valid raw artifact is read back from the actual041 store; an honest typed Health issue remains retained with original Store business. Analytics-off and transport fence are restored idempotently rather than assuming requestDeletion's prior-saga return performed them.
+
+Store and local-transport entrances apply the extra Health.delete condition: actual retained raw/prepared bytes, the catalog's persisted fullHealthSeal, stable028 request/confirmation and exact entry readback. Health.keep needs no artificial Health mapping. Health issues fail dependent local/Health progress while independent Cloud can complete. New transport completion remains typed unsupported pending accepted044/045 current-zero aggregate; health completion updates require the actual028 local receipt.
+
+- First intended four-case runtime RED: **4/11**. Without the forwarding gate, three typed Health issue fixtures erased their actual original Store witness, raw service/coordinator calls bypassed an unsealed parent, and generic delete did not yield unknownOriginal. A prior fixture attempt missed the receipt signature domain and is preserved separately. Correct fixtures use the existing domain and actual verified backendDeleted receipts.
+- Expanded actual RED: **seven tests / 14 failures (two unexpected)**. It includes a real close/reopen of original identity lease, SQLite facade, catalog and ledger before recovering the original pre-backend saga; original request/capability survive. The red source/catalog/tests are preserved exactly.
+- First green attempt retained one real unavailable failure because the forwarding object omitted the original public ControlQueueInboundCoordinator capability. Forwarding that same Session capability corrected pre-backend recovery, without no-op protocol conformance or leaf changes.
+- Final frozen selected AppIntegration recovery run: **16 tests / zero failures**, containing the seven new cases plus nine previous actual leaf/fullseal cases, with **344 inputs unchanged before/post and matching the exact source commit**. Direct transport calls also verify the same typed Health-seal rejection. `git diff --check` passed. This is a related selection, not a complete155 run or whole026 PASS. Parent requested the minimum clean dependency handoff; prior148/0 stays a separate source layer.
+- Independent Cloud uses an explicit controlled protocol fixture; it proves call ordering/component states, not a real CloudKit zone deletion. Actual local signed saga state, persisted minimal capability, catalog, Store witness and SQL ownership are used. Health executes no actual driver, no real SDK services are constructed and production defaults remain unavailable.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `deletion-guard-seven-red-2.log` | `d6c3c1a67d390bb776c833147c4f7951f8fbae46ee5f915ac1eea470523137ee` |
+| `deletion-guard-red-catalog.swift` | `57f942f2cd670713c8a68a744b044f1aebe99da2b4a65c49084e925e8746bb4f` |
+| `deletion-guard-red-source.swift` | `752936f8a51e4ba903c8ce00c33a0bd6a2cc8a213be2f661fcd07e243dbb4003` |
+| `deletion-guard-red-tests.swift` | `e5d76ed13c4fc00c1c97d016941eb40caec6f755d77ba796a19369d1a52b0620` |
+| `deletion-guard-seven-green.log` (intermediate7/1) | `5d1a828b08995d4249be7ef7a6b223ab46c72392b780eef25f13f3fd582e83bf` |
+| `deletion-guard-frozen-green.log` (single16/0) | `e40b7fc8ce5d6d500221e7220db5f12e5a429663c195102e27e0104a6169c758` |
+| `deletion-guard-checkpoint-inputs.json` | `4b8a7164497041cbe79a46727954aca016c6dd4848eddc6cc661165a0d45e140` |
+| `deletion-guard-checkpoint-post.json` | `5bade929294b6fcaa7fb3ebc44eb1fb92b132e8b68e44b79b8b4c449a3ea5296` |
+| `deletion-guard-checkpoint-commit-match.json` | `d8c36c3a541dcbc01b8958927a60b0aa84ec56b4eb3d00148ff1c2163c471bac` |
+
+Root's newly reported S26-lifecycle-replace-overlap remains open: current=nil across awaited shutdown can let another MainActor replace build early and overwrite the first result. Its real RED/serial fix will follow root's044/045 dependency merge. The existing148/0 did not cover that overlap and is not treated as its closure. App action/AccountService task ownership, true full-Health aggregate admission/execution, creation-to-seal crash windows, final close and complete owned current-zero composition remain pending. No device/account/signing/App/UI/power-loss or whole-candidate acceptance is established.
