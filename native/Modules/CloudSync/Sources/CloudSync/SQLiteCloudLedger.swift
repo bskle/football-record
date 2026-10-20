@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import Darwin
+import CryptoKit
 
 // One actor owns one transport-only connection. No SQL transaction contains a network await.
 enum CloudSQLValue {
@@ -19,9 +20,11 @@ enum CloudSQLValue {
         }
     }
 }
-enum CloudSQLAccess { case createOrOpen, readOnlyExisting, readWriteExisting }
+enum CloudSQLAccess { case createOrOpen, readOnlyExisting, readWriteExisting, immutableReadOnlyExisting }
+struct CloudSQLiteFailure { let code: Int32; let system: Int32 }
 final class CloudSQL: @unchecked Sendable {
     private var handle: OpaquePointer?
+    private(set) var lastSQLiteFailure: CloudSQLiteFailure?
     init(url: URL, access: CloudSQLAccess = .createOrOpen) throws {
         guard url.isFileURL else { throw CloudError(.invalidPayload) }
         let flags: Int32
@@ -29,8 +32,10 @@ final class CloudSQL: @unchecked Sendable {
         case .createOrOpen: flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         case .readOnlyExisting: flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
         case .readWriteExisting: flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        case .immutableReadOnlyExisting: flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX
         }
-        guard sqlite3_open_v2(url.path, &handle, flags, nil) == SQLITE_OK else { if let handle { sqlite3_close_v2(handle) }; handle = nil; throw CloudError(.storageUnavailable) }
+        let filename = access == .immutableReadOnlyExisting ? URL(fileURLWithPath: url.path).absoluteString + "?mode=ro&immutable=1" : url.path
+        guard sqlite3_open_v2(filename, &handle, flags, nil) == SQLITE_OK else { if let handle { sqlite3_close_v2(handle) }; handle = nil; throw CloudError(.storageUnavailable) }
         do { guard sqlite3_busy_timeout(handle, 5000) == SQLITE_OK else { throw CloudError(.storageUnavailable) } }
         catch { try? close(); throw error }
     }
@@ -44,8 +49,15 @@ final class CloudSQL: @unchecked Sendable {
     func execute(_ sql: String, _ args: [CloudSQLValue] = []) throws { _ = try rows(sql, args) }
     func rows(_ sql: String, _ args: [CloudSQLValue] = []) throws -> [[CloudSQLValue]] {
         guard let handle else { throw CloudError(.closed) }
+        lastSQLiteFailure = nil
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK, let statement else { throw CloudError(.storageUnavailable) }
+        let prepared = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepared == SQLITE_OK, let statement else {
+            // Capture before finalize/close can replace SQLite's error state.
+            lastSQLiteFailure = CloudSQLiteFailure(code: sqlite3_extended_errcode(handle), system: sqlite3_system_errno(handle))
+            if let statement { sqlite3_finalize(statement) }
+            throw CloudError(.storageUnavailable)
+        }
         defer { sqlite3_finalize(statement) }
         guard sqlite3_bind_parameter_count(statement) == Int32(args.count) else { throw CloudError(.invalidPayload) }
         let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -63,7 +75,10 @@ final class CloudSQL: @unchecked Sendable {
         while true {
             let code = sqlite3_step(statement)
             if code == SQLITE_DONE { return output }
-            guard code == SQLITE_ROW else { throw CloudError(.storageUnavailable) }
+            guard code == SQLITE_ROW else {
+                lastSQLiteFailure = CloudSQLiteFailure(code: sqlite3_extended_errcode(handle), system: sqlite3_system_errno(handle))
+                throw CloudError(.storageUnavailable)
+            }
             output.append(try (0..<sqlite3_column_count(statement)).map { index in
                 switch sqlite3_column_type(statement, index) {
                 case SQLITE_INTEGER: return .integer(sqlite3_column_int64(statement, index))
@@ -91,11 +106,120 @@ private func existingCloudErasureIdentity(_ url: URL) throws -> CloudErasureFile
     guard Int(info.st_mode) & Int(S_IFMT) == Int(S_IFREG) else { throw CloudError(.invalidPayload) }
     return CloudErasureFileIdentity(device: info.st_dev, inode: info.st_ino)
 }
-private func validateExistingCloudErasure(_ sql: CloudSQL) throws {
+private func validateExistingCloudErasure(_ sql: CloudSQL, requireWAL: Bool = true) throws {
     guard try sql.rows("PRAGMA quick_check(1)").first?.first?.string == "ok" else { throw CloudError(.storageUnavailable) }
     try validateLocalErasureLayout(sql)
     _ = try validateErasureCanonicalRows(sql, version: 4)
-    guard try sql.rows("PRAGMA journal_mode").first?.first?.string?.lowercased() == "wal" else { throw CloudError(.unsupportedSchema) }
+    if requireWAL { guard try sql.rows("PRAGMA journal_mode").first?.first?.string?.lowercased() == "wal" else { throw CloudError(.unsupportedSchema) } }
+}
+
+// Only a missing-WAL read failure may use this provisional, sidecar-free main-file parse.
+// This is a point-in-time check after the caller joins its writers, not a cross-process lease.
+private struct CloudErasureMainVersion: Equatable {
+    let device: dev_t, inode: ino_t, size: off_t
+    let modifiedSeconds: Int, modifiedNanos: Int, changedSeconds: Int, changedNanos: Int
+    let header: Data
+}
+private func cloudErasureSidecarsPresent(_ url: URL) throws -> Bool {
+    var present = false
+    for suffix in ["-wal", "-shm", "-journal"] {
+        var info = stat()
+        if lstat(url.path + suffix, &info) == 0 {
+            guard Int(info.st_mode) & Int(S_IFMT) == Int(S_IFREG) else { throw CloudError(.invalidPayload) }
+            present = true
+        } else if errno != ENOENT { throw CloudError(.storageUnavailable) }
+    }
+    return present
+}
+private func cloudErasureMainVersion(_ fd: Int32, _ url: URL) throws -> CloudErasureMainVersion {
+    var info = stat(), path = stat()
+    guard fstat(fd, &info) == 0, lstat(url.path, &path) == 0,
+          Int(info.st_mode) & Int(S_IFMT) == Int(S_IFREG), Int(path.st_mode) & Int(S_IFMT) == Int(S_IFREG),
+          info.st_dev == path.st_dev, info.st_ino == path.st_ino, info.st_size >= 100 else { throw CloudError(.identityConflict) }
+    var header = Data(count: 100)
+    let count = header.withUnsafeMutableBytes { pread(fd, $0.baseAddress, 100, 0) }
+    guard count == 100 else { throw CloudError(.storageUnavailable) }
+    return CloudErasureMainVersion(device: info.st_dev, inode: info.st_ino, size: info.st_size,
+        modifiedSeconds: info.st_mtimespec.tv_sec, modifiedNanos: info.st_mtimespec.tv_nsec,
+        changedSeconds: info.st_ctimespec.tv_sec, changedNanos: info.st_ctimespec.tv_nsec, header: header)
+}
+private func cloudErasureFingerprint(_ fd: Int32, size: off_t) throws -> Data {
+    var hasher = SHA256(), offset: off_t = 0
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while offset < size {
+        let requested = Int(min(off_t(buffer.count), size - offset))
+        let count = buffer.withUnsafeMutableBytes { pread(fd, $0.baseAddress, requested, offset) }
+        if count < 0, errno == EINTR { continue }
+        guard count > 0 else { throw CloudError(.storageUnavailable) }
+        hasher.update(data: Data(buffer.prefix(count))); offset += off_t(count)
+    }
+    return Data(hasher.finalize())
+}
+private final class CloudErasureStaticMain {
+    let fd: Int32, url: URL, version: CloudErasureMainVersion, fingerprint: Data
+    init?(url: URL) throws {
+        guard try !cloudErasureSidecarsPresent(url) else { return nil }
+        // Empty/short originals retain the accepted unsupported-schema handling without a static read.
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else { throw CloudError(.storageUnavailable) }
+        guard info.st_size >= 100 else { return nil }
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw CloudError(.storageUnavailable) }
+        var retained = false; defer { if !retained { Darwin.close(fd) } }
+        let version = try cloudErasureMainVersion(fd, url)
+        guard version.header.prefix(16) == Data("SQLite format 3\0".utf8),
+              version.header[18] == 2, version.header[19] == 2 else { return nil }
+        let fingerprint = try cloudErasureFingerprint(fd, size: version.size)
+        guard try cloudErasureMainVersion(fd, url) == version, try !cloudErasureSidecarsPresent(url) else { throw CloudError(.identityConflict) }
+        self.fd = fd; self.url = url; self.version = version; self.fingerprint = fingerprint; retained = true
+    }
+    deinit { Darwin.close(fd) }
+    func verify(requireNoSidecars: Bool = true) throws {
+        guard try cloudErasureMainVersion(fd, url) == version,
+              try cloudErasureFingerprint(fd, size: version.size) == fingerprint,
+              try cloudErasureMainVersion(fd, url) == version else { throw CloudError(.identityConflict) }
+        if requireNoSidecars { guard try !cloudErasureSidecarsPresent(url) else { throw CloudError(.identityConflict) } }
+    }
+}
+
+enum CloudErasureReadOnlyStage: Sendable, Equatable { case afterStaticValidation, beforeReadWriteOpen }
+private func openExistingCloudErasure(_ existingLocalErasureURL: URL,
+    checkpoint: (@Sendable (CloudErasureReadOnlyStage) throws -> Void)? = nil) throws -> CloudSQL {
+    let original = try existingCloudErasureIdentity(existingLocalErasureURL)
+    let provisional = try CloudErasureStaticMain(url: existingLocalErasureURL)
+    let readonly = try CloudSQL(url: existingLocalErasureURL, access: .readOnlyExisting)
+    var usedStaticRead = false
+    do {
+        try validateExistingCloudErasure(readonly)
+        try readonly.close()
+        guard try existingCloudErasureIdentity(existingLocalErasureURL) == original else { throw CloudError(.identityConflict) }
+    } catch {
+        let failure = readonly.lastSQLiteFailure
+        try? readonly.close()
+        guard failure?.code == SQLITE_CANTOPEN, failure?.system == ENOENT, let provisional else { throw error }
+        try provisional.verify()
+        let immutable = try CloudSQL(url: existingLocalErasureURL, access: .immutableReadOnlyExisting)
+        do {
+            // This handle is only a provisional parser; its journal_mode is not source evidence.
+            try validateExistingCloudErasure(immutable, requireWAL: false)
+            try immutable.close()
+        } catch { try? immutable.close(); throw error }
+        try checkpoint?(.afterStaticValidation)
+        try provisional.verify()
+        usedStaticRead = true
+    }
+    if usedStaticRead { try checkpoint?(.beforeReadWriteOpen); try provisional?.verify() }
+    let existing = try CloudSQL(url: existingLocalErasureURL, access: .readWriteExisting)
+    do {
+        guard try existingCloudErasureIdentity(existingLocalErasureURL) == original else { throw CloudError(.identityConflict) }
+        if usedStaticRead { try provisional?.verify() }
+        // A normal SQLite lock/current read, never the immutable parse, admits the actor.
+        try existing.transaction { try validateExistingCloudErasure(existing) }
+        guard try existingCloudErasureIdentity(existingLocalErasureURL) == original else { throw CloudError(.identityConflict) }
+        if usedStaticRead { try provisional?.verify(requireNoSidecars: false) }
+        try existing.execute("PRAGMA synchronous=FULL")
+    } catch { try? existing.close(); throw error }
+    return existing
 }
 
 public actor SQLiteCloudLedger: CloudLedger {
@@ -153,21 +277,11 @@ public actor SQLiteCloudLedger: CloudLedger {
     /// Existing-file local erasure only: never CREATE, migrate or reconstruct lost proof.
     /// The caller still proves catalog ownership; known SQLite WAL coordination is allowed.
     public init(existingLocalErasureURL: URL, fault: CloudLedgerFault? = nil) throws {
-        let original = try existingCloudErasureIdentity(existingLocalErasureURL)
-        let readonly = try CloudSQL(url: existingLocalErasureURL, access: .readOnlyExisting)
-        do {
-            try validateExistingCloudErasure(readonly)
-            try readonly.close()
-            guard try existingCloudErasureIdentity(existingLocalErasureURL) == original else { throw CloudError(.identityConflict) }
-        } catch { try? readonly.close(); throw error }
-        let existing = try CloudSQL(url: existingLocalErasureURL, access: .readWriteExisting)
-        do {
-            guard try existingCloudErasureIdentity(existingLocalErasureURL) == original else { throw CloudError(.identityConflict) }
-            try validateExistingCloudErasure(existing)
-            guard try existingCloudErasureIdentity(existingLocalErasureURL) == original else { throw CloudError(.identityConflict) }
-            try existing.execute("PRAGMA synchronous=FULL")
-        } catch { try? existing.close(); throw error }
-        sql = existing; self.fault = fault; erasureOnly = true
+        sql = try openExistingCloudErasure(existingLocalErasureURL); self.fault = fault; erasureOnly = true
+    }
+    // Internal, synchronous fault seam: no production caller or global fault/VFS state.
+    init(existingLocalErasureURL: URL, readOnlyCheckpoint: @escaping @Sendable (CloudErasureReadOnlyStage) throws -> Void) throws {
+        sql = try openExistingCloudErasure(existingLocalErasureURL, checkpoint: readOnlyCheckpoint); fault = nil; erasureOnly = true
     }
     public func close() throws { try sql.close() }
     func transaction<T>(forLocalErasure: Bool = false, _ body: () throws -> T) throws -> T {
