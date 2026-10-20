@@ -164,3 +164,25 @@ import DeviceSync
   }
 }
 #endif
+
+// M4's formal App boundary is available to the host verifier as well as the two
+// Apps. The legacy SDK assembly above stays isolated until its real gate passes.
+import Foundation
+import MatchPresentation
+
+public enum M4ApplicationBootstrapError: Error, Sendable, Equatable { case unavailable }
+@MainActor public final class M4ApplicationContext {
+  public let context: AccountAppContext
+  private let original: M4AccountComposition
+  init(original: M4AccountComposition) { self.original = original; context = original.context }
+  /// Formal App/replacement callers receive actual owner failures and retain the
+  /// original context. The public Void context callback uses the same owner.
+  public func shutdown() async throws { try await original.close() }
+}
+@MainActor public enum M4ApplicationBootstrap {
+  /// Production providers/vault are intentionally unavailable. Do not inspect a
+  /// private Debug config, adopt legacy files, or open a DB before that boundary.
+  public static func production(arguments: [String] = ProcessInfo.processInfo.arguments, rootDirectory: URL? = nil) async throws -> M4ApplicationContext {
+    throw M4ApplicationBootstrapError.unavailable
+  }
+}

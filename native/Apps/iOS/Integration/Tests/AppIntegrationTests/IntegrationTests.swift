@@ -8,6 +8,24 @@ import WorkoutCapture
 @testable import AppIntegration
 
 @MainActor final class IntegrationTests: XCTestCase {
+  func testM4ProductionBootstrapIgnoresDevelopmentInputsWithoutOpeningOrAdoptingDB() async throws {
+    for existing in [false, true] {
+      let root = FileManager.default.temporaryDirectory.appendingPathComponent("m4-production-unavailable-" + UUID().uuidString)
+      let privateConfig = root.appendingPathComponent("development/m4-fixture.json")
+      try FileManager.default.createDirectory(at: privateConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
+      let configBytes = Data("private development configuration must not be read by production".utf8); try configBytes.write(to: privateConfig)
+      let database = root.appendingPathComponent("production/matches.sqlite"), original = Data([0,255,17,0,42])
+      if existing { try FileManager.default.createDirectory(at: database.deletingLastPathComponent(), withIntermediateDirectories: true); try original.write(to: database) }
+      let before = try FileManager.default.subpathsOfDirectory(atPath: root.path).sorted()
+      let arguments = ["--m4-development", "--m4-auto-signin", "--ui-testing", "--ui-dataset", "production", "--device-acceptance"]
+      do { _ = try await M4ApplicationBootstrap.production(arguments: arguments, rootDirectory: root); XCTFail("unconfigured production provider cannot create an M4 context") }
+      catch { XCTAssertEqual(error as? M4ApplicationBootstrapError, .unavailable) }
+      XCTAssertEqual(try FileManager.default.subpathsOfDirectory(atPath: root.path).sorted(), before)
+      XCTAssertEqual(try Data(contentsOf: privateConfig), configBytes)
+      if existing { XCTAssertEqual(try Data(contentsOf: database), original) }
+      else { XCTAssertFalse(FileManager.default.fileExists(atPath: database.path)) }
+    }
+  }
   func testEnvironmentPreferenceReopensSameDatasetAndInvalidDataNeverFallsBack() throws {
     let defaults = UserDefaults(suiteName: "football-record-integration-test-" + UUID().uuidString)!
     let preferences = EnvironmentPreferences(defaults: defaults)
