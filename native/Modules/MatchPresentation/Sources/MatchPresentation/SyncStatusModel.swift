@@ -66,12 +66,31 @@ public struct SyncStatusProjection: Sendable, Equatable {
   @ObservationIgnored private var startup: Task<Void, Never>?
   @ObservationIgnored private var started = false
   @ObservationIgnored private var shuttingDown = false
+  @ObservationIgnored private var retired = false
+  @ObservationIgnored private var ownedTasks: [UUID: Task<Void, Never>] = [:]
+  @ObservationIgnored private var operations = 0
+  @ObservationIgnored private var drainers: [CheckedContinuation<Void, Never>] = []
+  @ObservationIgnored private var shutdownTask: Task<Void, Never>?
+  private func endOperation() {
+    operations -= 1
+    if operations == 0 { let waiting = drainers; drainers.removeAll(); waiting.forEach { $0.resume() } }
+  }
+  func beginRetirement() {
+    retired = true; invalidateLifecycle()
+  }
+  private func invalidateLifecycle() {
+    shuttingDown = true; lifecycle = UUID(); generation = UUID()
+    startup?.cancel(); observation?.cancel()
+    for task in ownedTasks.values { task.cancel() }
+  }
   public init(service: (any SyncStatusServing)?) { self.service = service }
   /// Scheduling sync cannot hold the local recovery/recording path behind a transport await.
   public func start() async {
-    guard !started, startup == nil, !shuttingDown, let service else { return }
+    guard !retired, !started, startup == nil, !shuttingDown, let service else { return }
     let lifetime = lifecycle
-    startup = Task { [weak self] in
+    let id = UUID()
+    let task = Task { [weak self] in
+      defer { self?.ownedTasks.removeValue(forKey: id) }
       guard !Task.isCancelled else { return }
       do {
         try await service.start()
@@ -99,23 +118,28 @@ public struct SyncStatusProjection: Sendable, Equatable {
         self.startup = nil; self.unavailable = .blockedIntegrity; self.state = nil
       }
     }
+    startup = task; ownedTasks[id] = task
   }
   public func observe(matchID: String) {
-    guard self.matchID != matchID else { return }
+    guard !retired, !shuttingDown, self.matchID != matchID else { return }
     observation?.cancel(); generation = UUID(); self.matchID = matchID
     state = nil; unavailable = nil
     guard let service else { unavailable = .transportUnavailable; return }
     let generation = generation
-    observation = Task { [weak self] in
+    let id = UUID()
+    let task = Task { [weak self] in
+      defer { self?.ownedTasks.removeValue(forKey: id) }
       let stream = await service.states(matchID: matchID)
+      guard !Task.isCancelled else { return }
       for await update in stream {
         guard !Task.isCancelled, let self, self.generation == generation else { return }
         self.accept(update, expectedMatchID: matchID)
       }
     }
+    observation = task; ownedTasks[id] = task
   }
   func accept(_ update: SyncStateUpdate, expectedMatchID: String) {
-    guard matchID == expectedMatchID else { return }
+    guard !retired, !shuttingDown, matchID == expectedMatchID else { return }
     switch update {
     case .state(let value):
       guard value.matchID == expectedMatchID else { return }
@@ -126,7 +150,7 @@ public struct SyncStatusProjection: Sendable, Equatable {
     }
   }
   public func retry() async {
-    guard !retrying, !shuttingDown else { return }; retrying = true; defer { retrying = false }
+    guard !retired, !retrying, !shuttingDown else { return }; operations += 1; retrying = true; defer { retrying = false; endOperation() }
     let lifetime = lifecycle, observationGeneration = generation
     await service?.retry()
     guard lifecycle == lifetime, generation == observationGeneration, !shuttingDown, let matchID, let service else { return }
@@ -139,15 +163,27 @@ public struct SyncStatusProjection: Sendable, Equatable {
       accept(.unavailable(matchID: matchID, issue: .blockedIntegrity), expectedMatchID: matchID)
     }
   }
-  public func wake() async { await service?.wake() }
+  public func wake() async {
+    guard !retired, !shuttingDown else { return }
+    operations += 1; defer { endOperation() }; await service?.wake()
+  }
   public func shutdown() async {
-    shuttingDown = true; lifecycle = UUID(); generation = UUID()
-    let starting = startup; startup = nil; started = false; starting?.cancel()
-    observation?.cancel(); observation = nil
+    if let shutdownTask { await shutdownTask.value; return }
+    invalidateLifecycle()
+    let task = Task { await self.drainShutdown() }
+    shutdownTask = task
+    await task.value
+    shutdownTask = nil
+    shuttingDown = false
+  }
+  private func drainShutdown() async {
+    let tasks = Array(ownedTasks.values)
+    startup = nil; started = false; observation = nil
     matchID = nil; state = nil; unavailable = nil
     await service?.stop()
-    await starting?.value
-    shuttingDown = false
+    for task in tasks { await task.value }
+    if operations > 0 { await withCheckedContinuation { drainers.append($0) } }
+    ownedTasks.removeAll(); retrying = false
   }
   public func projection(terminal: Bool) -> SyncStatusProjection { SyncStatusProjection(state: state, unavailable: unavailable, terminal: terminal) }
 }

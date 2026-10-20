@@ -4,7 +4,7 @@ import MatchStore
 
 public enum SessionError: Error, Sendable, Equatable {
   case permitUnavailable, identityUnavailable, wrongRecordingDevice, multipleCandidates,
-    terminalMatch
+    terminalMatch, retired
   case blockedDiagnostics, requestInFlight, invalidRequest, developmentIsolationRequired
 }
 public enum SessionAction: Codable, Sendable, Equatable {

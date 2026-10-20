@@ -13,16 +13,20 @@ extension MatchSession:ProductionPeerInboundCoordinator {
         try await validateEnvironment();guard case .production=environment,await store.databaseNamespace()==SQLiteSessionRepository.productionNamespace else {throw StoreError.trustUnavailable}
     }
     public func authorizeProductionMatch(intent:ControlIntentV1,receipt:VerifiedAuthorityReceiptV1) async throws {
+        try beginBusiness(); defer { endBusiness() }
         try await validateProductionEnvironment();let repository=try productionPeerRepository()
         await acquire(intent.matchID);defer {release(intent.matchID)}
+        try requireBusinessActive()
         try await repository.authorizeProductionMatchV4(intent:intent,receipt:receipt)
     }
     public func receiveProductionPeer(_ envelope:VerifiedPeerEnvelopeV1,matchID:String) async throws->InboundReceiptV3 {
+        try beginBusiness(); defer { endBusiness() }
         try await validateProductionEnvironment();let repository=try productionPeerRepository(),local=try await identity()
         guard envelope.envelope.body.targetDeviceID==local else {throw StoreError.invalidPeerAuthorization}
         let packet=try JSONDecoder().decode(MatchPacketV2.self,from:envelope.payload)
         await acquire(matchID)
         defer {release(matchID);if packet.body.descriptor.recordingDeviceID==local {scheduleCapture(matchID)}}
+        try requireBusinessActive()
         let receipt=try await repository.receiveProductionEnvelopeV4(envelope,matchID:matchID,now:clock.now()),snapshot=try await store.snapshotV2(matchID:matchID)
         try await updateAuthorityFence(snapshot);publish(try projected(snapshot))
         if snapshot.business.descriptor.recordingDeviceID==local {
@@ -32,8 +36,10 @@ extension MatchSession:ProductionPeerInboundCoordinator {
         return receipt
     }
     public func acknowledgeProductionPeer(_ envelope:VerifiedPeerEnvelopeV1) async throws {
+        try beginBusiness(); defer { endBusiness() }
         try await validateProductionEnvironment();let repository=try productionPeerRepository(),ack=try JSONDecoder().decode(DurableACKV2.self,from:envelope.payload)
         await acquire(ack.body.matchID);defer {release(ack.body.matchID)}
+        try requireBusinessActive()
         try await repository.acknowledgeProductionEnvelopeV4(envelope,now:clock.now())
     }
 }
