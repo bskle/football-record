@@ -87,6 +87,7 @@ public actor SQLiteSessionRepository: SessionRepository {
   }
   public func databaseNamespace() async -> String { namespace }
   public func matchIDs() async throws -> [String] { try await store.matchIDs() }
+  public func captureInventoryV4() async throws -> [CaptureInventoryMatchV4] { try await store.captureInventoryV4() }
   public func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 {
     try await store.snapshotV2(matchID: matchID)
   }
