@@ -57,6 +57,13 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
   private let relay: URLSessionAuthorityRelay
   private let mailboxRoot: URL
   private let mailboxInventory: [String: ProtocolClientDirectoryIdentity]
+  private let role: String
+  private let dataset: String
+  private var inbox: Task<Void, Never>?
+  private var inboxClosing: Task<Void, Never>?
+  private var inboxStopped = false
+  private var inboxLifetime = UUID()
+  private var inboxHandlers: [UUID: Pending] = [:]
   private var closed = false
   private var closing: Task<Void, Never>?
   private struct Pending: Sendable {
@@ -77,7 +84,7 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
       guard try protocolClientMailboxEmpty(mailboxRoot) else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
       mailboxInventory = try protocolClientPublishedInventory(mailboxRoot)
     } catch { relay.shutdown(); throw error }
-    self.relay = relay; self.mailboxRoot = mailboxRoot; namespace = configuration.namespace
+    self.relay = relay; self.mailboxRoot = mailboxRoot; namespace = configuration.namespace; role = configuration.role; dataset = configuration.dataset
   }
   func owned<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
     guard !closed else { throw DevelopmentAuthorityProtocolError.closed }
@@ -123,10 +130,76 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
     let driver = DevelopmentFileCloud(mailbox: mailbox)
     try await owned { try await driver.deletePrivateZone(scope: scope) }
   }
+  /// Typed controlled Phone inbox only; caller supplies its original per-request identity/service wrapper.
+  public func startInbox(authorizer: any WatchRegistrationAuthorizing) throws {
+    guard role == "phone", !closed, !inboxStopped else { throw DevelopmentAuthorityProtocolError.closed }
+    try Task.checkCancellation()
+    guard try protocolClientPublishedInventory(mailboxRoot) == mailboxInventory else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+    if inbox != nil { return }
+    let lifetime = inboxLifetime, root = mailboxRoot, dataset = dataset
+    inbox = Task { [weak self] in
+      await DevelopmentInboxPoller.run(root: root, dataset: dataset, bounded: true,
+        active: { [weak self] in await self?.inboxActive(lifetime) ?? false },
+        handle: { [weak self] entry in await self?.handleInbox(entry, authorizer: authorizer, lifetime: lifetime) })
+    }
+  }
+  private func inboxActive(_ lifetime: UUID) -> Bool { !closed && !inboxStopped && inboxLifetime == lifetime }
+  private func currentInbox(_ entry: DevelopmentInboxEntry, lifetime: UUID) throws {
+    guard inboxActive(lifetime), !Task.isCancelled,
+          try protocolClientPublishedInventory(mailboxRoot) == mailboxInventory,
+          let original = entry.anchor else { throw DevelopmentAuthorityProtocolError.closed }
+    let actual = try DevelopmentMaterialIO.read(entry.file, maximum: 1_048_576)
+    guard actual.0 == entry.raw, actual.1 == original else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+  }
+  private func handleInbox(_ entry: DevelopmentInboxEntry, authorizer: any WatchRegistrationAuthorizing, lifetime: UUID) async {
+    do { try currentInbox(entry, lifetime: lifetime) } catch { inboxStopped = true; inboxLifetime = UUID(); return }
+    guard let id = UUID(uuidString: entry.request.id), inboxHandlers[id] == nil else { return }
+    let request = entry.request
+    let task = Task<Data, any Error> {
+      try Task.checkCancellation()
+      switch request.operation {
+      case "phone-context": return try AuthorityWire.encode(await authorizer.registrationContext())
+      case "phone-register":
+        let forward = try JSONDecoder().decode(WatchForward.self, from: request.payload)
+        try forward.attempt.validate()
+        let raw = try await authorizer.authorizeRegistration(forward.attempt, action: forward.action)
+        guard !raw.isEmpty, raw.count <= 65536 else { throw AuthorityError.invalidWire }; return raw
+      default: throw AuthorityError.unavailable
+      }
+    }
+    inboxHandlers[id] = Pending(cancel: { task.cancel() }, join: Task { _ = await task.result })
+    defer { inboxHandlers[id] = nil }
+    let result = await withTaskCancellationHandler { await task.result } onCancel: { task.cancel() }
+    do {
+      // Identical checks for success AND error publication; a stopped or substituted
+      // original request never receives a late response from this owner.
+      try currentInbox(entry, lifetime: lifetime)
+      let reply: MailboxReply
+      switch result { case .success(let raw): reply = MailboxReply(payload: raw, issue: nil)
+      case .failure: reply = MailboxReply(payload: nil, issue: "unavailable") }
+      try DevelopmentMaterialIO.create(JSONEncoder().encode(reply), entry.response)
+    } catch {
+      // Do not reinterpret a replaced request as a new request on the next poll.
+      inboxStopped = true; inboxLifetime = UUID()
+    }
+  }
+  /// Permanent business inbox retirement, without closing original Saga HTTP/Cloud clients.
+  public func stopInbox() async {
+    if let inboxClosing { await inboxClosing.value; return }
+    inboxStopped = true; inboxLifetime = UUID()
+    let poller = inbox, pending = Array(inboxHandlers.values)
+    poller?.cancel(); pending.forEach { $0.cancel() }
+    let task = Task {
+      await poller?.value
+      for call in pending { await call.join.value }
+      self.inbox = nil
+    }
+    inboxClosing = task; await task.value
+  }
   /// Point-in-time inspection only: it neither closes nor cancels clients needed by the original Saga.
   /// Callers must gate business admission before checking; later calls can change this state.
   public func drainState() -> DevelopmentAuthorityProtocolCloseState {
-    guard operations.isEmpty,
+    guard operations.isEmpty, inbox == nil, inboxHandlers.isEmpty,
           (try? protocolClientPublishedInventory(mailboxRoot)) == mailboxInventory,
           (try? protocolClientMailboxEmpty(mailboxRoot)) == true,
           (try? protocolClientPublishedInventory(mailboxRoot)) == mailboxInventory else { return .undrained }
@@ -140,6 +213,7 @@ public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHT
       let pending = Array(operations.values), mailbox = mailbox
       pending.forEach { $0.cancel() }; relay.shutdown()
       closing = Task {
+        await self.stopInbox()
         await mailbox.close()
         for call in pending { await call.join.value }
       }
@@ -189,8 +263,39 @@ private func protocolClientMailboxEmpty(_ root: URL) throws -> Bool {
   } catch { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
 }
 
-private struct MailboxRequest: Codable { let id, operation, dataset: String; let payload: Data }
-private struct MailboxReply: Codable { let payload: Data?; let issue: String? }
+private struct MailboxRequest: Codable, Sendable { let id, operation, dataset: String; let payload: Data }
+private struct MailboxReply: Codable, Sendable { let payload: Data?; let issue: String? }
+private struct DevelopmentInboxEntry: Sendable {
+  let request: MailboxRequest
+  let file, response: URL
+  let raw: Data
+  let anchor: DevelopmentMaterialAnchor?
+}
+/// Same private wire/poll for legacy Runtime and the injected original-client inbox.
+private enum DevelopmentInboxPoller {
+  static func run(root: URL, dataset: String, bounded: Bool,
+    active: @escaping @Sendable () async -> Bool,
+    handle: @escaping @Sendable (DevelopmentInboxEntry) async -> Void) async {
+    while !Task.isCancelled {
+      guard await active() else { return }
+      let directory = root.appendingPathComponent("incoming")
+      for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] where file.pathExtension == "json" {
+        do {
+          let raw: Data, anchor: DevelopmentMaterialAnchor?
+          if bounded { let original = try DevelopmentMaterialIO.read(file, maximum: 1_048_576); raw = original.0; anchor = original.1 }
+          else { raw = try Data(contentsOf: file); anchor = nil }
+          guard raw.count <= 1_048_576 else { continue }
+          let request = try JSONDecoder().decode(MailboxRequest.self, from: raw)
+          guard UUID(uuidString: request.id) != nil, request.dataset == dataset else { continue }
+          let response = root.appendingPathComponent("incoming-responses/" + request.id + ".json")
+          guard !FileManager.default.fileExists(atPath: response.path) else { continue }
+          await handle(DevelopmentInboxEntry(request: request, file: file, response: response, raw: raw, anchor: anchor))
+        } catch { /* Malformed private inputs remain unprocessed, never account actions. */ }
+      }
+      do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
+    }
+  }
+}
 private actor DevelopmentMailbox {
   let root: URL
   let dataset: String
@@ -241,7 +346,7 @@ private struct DevelopmentWatchAuthorizer: WatchRegistrationAuthorizing {
   }
 }
 private struct MigrationTransfer: Codable { let intent: ControlIntentV1; let raw: Data }
-private struct WatchForward: Codable { let attempt: WatchRegistrationAttemptV4; let action: WatchRegistrationAction }
+private struct WatchForward: Codable, Sendable { let attempt: WatchRegistrationAttemptV4; let action: WatchRegistrationAction }
 /// This private Debug control file is not business SQLite or a Keychain SDK claim.
 private actor DevelopmentFileVault: DeviceCredentialVault {
   struct Saved: Codable {
@@ -253,13 +358,35 @@ private actor DevelopmentFileVault: DeviceCredentialVault {
   struct State: Codable { var generation: Int64 = 0; var credential: Saved? }
   let url: URL
   var state: State
-  init(url: URL) throws { self.url = url; state = FileManager.default.fileExists(atPath: url.path) ? try JSONDecoder().decode(State.self, from: Data(contentsOf: url)) : State() }
-  func credential() throws -> DeviceCredential { guard let value = state.credential else { throw AuthorityError.unavailable }; return value.value }
+  private let strict: DevelopmentMaterialBinding?
+  init(url: URL, strict: DevelopmentMaterialBinding? = nil) throws {
+    self.url = url; self.strict = strict
+    if let strict { state = try strict.loadVault() }
+    else { state = FileManager.default.fileExists(atPath: url.path) ? try JSONDecoder().decode(State.self, from: Data(contentsOf: url)) : State() }
+  }
+  func credential() throws -> DeviceCredential {
+    if let strict { return try strict.gate.lock.withLock { guard let value = try strict.loadVault().credential else { throw AuthorityError.unavailable }; return value.value } }
+    guard let value = state.credential else { throw AuthorityError.unavailable }; return value.value
+  }
   func advanceIdentityFence(to generation: Int64) throws {
+    if let strict {
+      try strict.gate.lock.withLock {
+        var next = try strict.loadVault()
+        guard generation >= next.generation, generation <= 9_007_199_254_740_991 else { throw AuthorityError.identityChanged }
+        if generation > next.generation { next.generation = generation; next.credential = nil; try strict.persist(next); state = next }
+      }; return
+    }
     guard generation >= state.generation else { throw AuthorityError.identityChanged }
     if generation > state.generation { var next = state; next.generation = generation; next.credential = nil; try save(next) }
   }
   func replace(_ credential: DeviceCredential?, expectedIdentityGeneration: Int64) throws {
+    if let strict {
+      try strict.gate.lock.withLock {
+        var next = try strict.loadVault()
+        guard expectedIdentityGeneration == next.generation else { throw AuthorityError.identityChanged }
+        next.credential = credential.map(Saved.init); try strict.validate(next); try strict.persist(next); state = next
+      }; return
+    }
     guard expectedIdentityGeneration == state.generation else { throw AuthorityError.identityChanged }
     var next = state; next.credential = credential.map(Saved.init); try save(next)
   }
@@ -507,20 +634,19 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
   }
   func startInbox() {
     guard configuration.role == "phone", inbox == nil else { return }
+    let directory = root.appendingPathComponent("development/mailbox"), dataset = configuration.dataset
     inbox = Task { [weak self] in
-      while !Task.isCancelled {
-        guard let self, !self.closed else { return }
-        let directory = self.root.appendingPathComponent("development/mailbox/incoming")
-        for file in (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? [] where file.pathExtension == "json" {
-          do {
-            let bytes = try Data(contentsOf: file); guard bytes.count <= 1_048_576 else { continue }
-            let request = try JSONDecoder().decode(MailboxRequest.self, from: bytes)
-            guard UUID(uuidString: request.id) != nil, request.dataset == self.configuration.dataset else { continue }
-            let response = self.root.appendingPathComponent("development/mailbox/incoming-responses/" + request.id + ".json")
-            guard !FileManager.default.fileExists(atPath: response.path) else { continue }
-            let reply: MailboxReply
-            do {
-              let data: Data
+      await DevelopmentInboxPoller.run(root: directory, dataset: dataset, bounded: false,
+        active: { [weak self] in await self?.legacyInboxActive() ?? false },
+        handle: { [weak self] entry in await self?.handleLegacyInbox(entry) })
+    }
+  }
+  private func legacyInboxActive() -> Bool { !closed }
+  private func handleLegacyInbox(_ entry: DevelopmentInboxEntry) async {
+    let request = entry.request
+    let reply: MailboxReply
+    do {
+      let data: Data
               if request.operation == "phone-context" { data = try AuthorityWire.encode(await self.phoneService.registrationContext()) }
               else if request.operation == "phone-register" { let forward = try JSONDecoder().decode(WatchForward.self, from: request.payload); data = try await self.phoneService.authorizeRegistration(forward.attempt, action: forward.action) }
               else if request.operation == "phone-migration" {
@@ -537,20 +663,163 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
                 data = try JSONEncoder().encode(transfers)
               }
               else { throw AuthorityError.unavailable }
-              reply = MailboxReply(payload: data, issue: nil)
-            } catch { reply = MailboxReply(payload: nil, issue: "unavailable") }
-            try privateWrite(JSONEncoder().encode(reply), to: response)
-          } catch { /* Malformed private fixture requests never become an account action. */ }
-        }
-        do { try await Task.sleep(for: .milliseconds(30)) } catch { return }
-      }
-    }
+      reply = MailboxReply(payload: data, issue: nil)
+    } catch { reply = MailboxReply(payload: nil, issue: "unavailable") }
+    try? privateWrite(JSONEncoder().encode(reply), to: entry.response)
   }
   func shutdown() async {
     guard !closed else { return }; closed = true
     let tasks = Array(operations.values); tasks.forEach { $0.cancel() }; inbox?.cancel(); relay.shutdown(); await mailbox.close()
     for task in tasks { _ = try? await task.value }; await inbox?.value; inbox = nil
     try? await ledger.close(); try? await repository.close()
+  }
+}
+public struct DevelopmentAuthorityDeviceMaterial: Sendable {
+  public let namespace: String
+  public let deviceID: String
+  public let signer: any DeviceProofSigner
+  public let vault: any DeviceCredentialVault
+}
+public extension DevelopmentAuthorityScenario {
+  static func deviceMaterial(configuration: DevelopmentAuthorityConfiguration, namespaceDirectory: URL, installationID: String) throws -> DevelopmentAuthorityDeviceMaterial {
+    try configuration.validate()
+    _ = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
+    let directory = DevelopmentMaterialIO.canonical(namespaceDirectory)
+    guard directory.isFileURL, Data(directory.lastPathComponent.utf8) == Data(configuration.namespace.utf8), UUID(uuidString: installationID)?.uuidString == installationID else { throw SessionError.identityUnavailable }
+    let anchor = try DevelopmentMaterialIO.directory(directory), gate = DevelopmentMaterialGates.shared.gate(anchor)
+    return try gate.lock.withLock {
+      guard try DevelopmentMaterialIO.directory(directory) == anchor else { throw SessionError.identityUnavailable }
+      let identity = directory.appendingPathComponent("device.identity"), expectedIdentity = Data(("football-record.identity.v1:" + installationID).utf8)
+      guard try DevelopmentMaterialIO.read(identity, maximum: 256).0 == expectedIdentity else { throw SessionError.identityUnavailable }
+      let names = ["development.key", "authority.fixture", "development.vault"]
+      let present = try names.map { try DevelopmentMaterialIO.exists(directory.appendingPathComponent($0)) }
+      let pin = Data((configuration.keyID + "\n" + configuration.publicKey + "\n" + configuration.cloudSpaceID + "\n" + configuration.subject).utf8)
+      guard pin.count <= 16384 else { throw SessionError.identityUnavailable }
+      if present.allSatisfy({ !$0 }) {
+        for name in ["matches.sqlite", "matches.sqlite-wal", "matches.sqlite-shm", "matches.sqlite-journal"] {
+          guard try !DevelopmentMaterialIO.exists(directory.appendingPathComponent(name)) else { throw SessionError.identityUnavailable }
+        }
+        try DevelopmentMaterialIO.create(Curve25519.Signing.PrivateKey().rawRepresentation, directory.appendingPathComponent(names[0]))
+        try DevelopmentMaterialIO.create(pin, directory.appendingPathComponent(names[1]))
+        try DevelopmentMaterialIO.create(JSONEncoder().encode(DevelopmentFileVault.State()), directory.appendingPathComponent(names[2]))
+      } else { guard present.allSatisfy({ $0 }) else { throw SessionError.identityUnavailable } }
+      let key = try DevelopmentMaterialIO.read(directory.appendingPathComponent(names[0]), maximum: 32).0
+      guard key.count == 32, try DevelopmentMaterialIO.read(directory.appendingPathComponent(names[1]), maximum: 16384).0 == pin else { throw SessionError.identityUnavailable }
+      let signer = try DevelopmentDeviceSigner(namespace: configuration.namespace, rawRepresentation: key)
+      let binding = try DevelopmentMaterialBinding(directory: directory, anchor: anchor, gate: gate, deviceID: installationID, keyID: AuthorityWire.deviceKeyID(publicKey: signer.publicKey), expected: ["device.identity": expectedIdentity, "development.key": key, "authority.fixture": pin])
+      let vault = try DevelopmentFileVault(url: directory.appendingPathComponent(names[2]), strict: binding)
+      _ = try binding.loadVault()
+      return DevelopmentAuthorityDeviceMaterial(namespace: configuration.namespace, deviceID: installationID, signer: signer, vault: vault)
+    }
+  }
+}
+
+private struct DevelopmentMaterialAnchor: Hashable, Sendable { let device: dev_t; let inode: ino_t }
+private final class DevelopmentMaterialGate: @unchecked Sendable { let lock = NSRecursiveLock() }
+private final class DevelopmentMaterialGates: @unchecked Sendable {
+  static let shared = DevelopmentMaterialGates()
+  private final class Weak { weak var value: DevelopmentMaterialGate?; init(_ value: DevelopmentMaterialGate) { self.value = value } }
+  private let lock = NSLock()
+  private var values: [DevelopmentMaterialAnchor: Weak] = [:]
+  func gate(_ anchor: DevelopmentMaterialAnchor) -> DevelopmentMaterialGate {
+    lock.withLock {
+      values = values.filter { $0.value.value != nil }
+      if let value = values[anchor]?.value { return value }
+      let value = DevelopmentMaterialGate(); values[anchor] = Weak(value); return value
+    }
+  }
+}
+private final class DevelopmentMaterialBinding: Sendable {
+  let directory: URL, anchor: DevelopmentMaterialAnchor, gate: DevelopmentMaterialGate
+  private let deviceID: String, keyID: String
+  private let originals: [String: (Data, DevelopmentMaterialAnchor)]
+  init(directory: URL, anchor: DevelopmentMaterialAnchor, gate: DevelopmentMaterialGate, deviceID: String, keyID: String, expected: [String: Data]) throws {
+    self.directory = directory; self.anchor = anchor; self.gate = gate; self.deviceID = deviceID; self.keyID = keyID
+    var actual: [String: (Data, DevelopmentMaterialAnchor)] = [:]
+    for (name, data) in expected {
+      let read = try DevelopmentMaterialIO.read(directory.appendingPathComponent(name), maximum: name == "authority.fixture" ? 16384 : 256)
+      guard read.0 == data else { throw SessionError.identityUnavailable }; actual[name] = read
+    }
+    self.originals = actual
+  }
+  func loadVault() throws -> DevelopmentFileVault.State {
+    guard try DevelopmentMaterialIO.directory(directory) == anchor else { throw SessionError.identityUnavailable }
+    for (name, original) in originals {
+      let current = try DevelopmentMaterialIO.read(directory.appendingPathComponent(name), maximum: name == "authority.fixture" ? 16384 : 256)
+      guard current.0 == original.0, current.1 == original.1 else { throw SessionError.identityUnavailable }
+    }
+    let raw = try DevelopmentMaterialIO.read(directory.appendingPathComponent("development.vault"), maximum: 65536).0
+    guard let object = try JSONSerialization.jsonObject(with: raw) as? [String: Any], object["generation"] != nil, Set(object.keys).isSubset(of: ["generation", "credential"]) else { throw SessionError.identityUnavailable }
+    if let credential = object["credential"], !(credential is NSNull) {
+      guard let saved = credential as? [String: Any], Set(saved.keys) == ["token", "sessionID", "accountID", "deviceID", "keyID", "activationEpoch", "expiresAt"] else { throw SessionError.identityUnavailable }
+    }
+    let value = try JSONDecoder().decode(DevelopmentFileVault.State.self, from: raw); try validate(value); return value
+  }
+  func validate(_ value: DevelopmentFileVault.State) throws {
+    guard value.generation >= 0, value.generation <= 9_007_199_254_740_991 else { throw SessionError.identityUnavailable }
+    if let c = value.credential {
+      guard Data(c.deviceID.utf8) == Data(deviceID.utf8), Data(c.keyID.utf8) == Data(keyID.utf8), c.activationEpoch > 0, c.activationEpoch <= 9_007_199_254_740_991, c.expiresAt > 0, c.expiresAt <= 9_007_199_254_740_991 else { throw SessionError.identityUnavailable }
+      try AuthorityWire.identifier(c.accountID); try AuthorityWire.identifier(c.sessionID); _ = try AuthorityWire.decodeBase64URL(c.token, count: 32)
+    }
+  }
+  func persist(_ state: DevelopmentFileVault.State) throws {
+    _ = try loadVault(); try validate(state)
+    let bytes = try JSONEncoder().encode(state); guard bytes.count <= 65536 else { throw SessionError.identityUnavailable }
+    let url = directory.appendingPathComponent("development.vault")
+    try privateWrite(bytes, to: url); try DevelopmentMaterialIO.sync(url); try DevelopmentMaterialIO.sync(directory)
+    guard try DevelopmentMaterialIO.read(url, maximum: 65536).0 == bytes else { throw SessionError.identityUnavailable }
+    _ = try loadVault()
+  }
+}
+private enum DevelopmentMaterialIO {
+  static func canonical(_ url: URL) -> URL {
+    let path = url.standardizedFileURL.path
+    if path.hasPrefix("/var/") || path.hasPrefix("/tmp/") { return URL(fileURLWithPath: "/private" + path, isDirectory: true) }
+    return url.standardizedFileURL
+  }
+  static func directory(_ url: URL) throws -> DevelopmentMaterialAnchor {
+    var cursor = url
+    while true {
+      var value = stat(); guard lstat(cursor.path, &value) == 0, value.st_mode & S_IFMT == S_IFDIR else { throw SessionError.identityUnavailable }
+      if cursor.path == url.path {
+        if cursor.path == "/" { return DevelopmentMaterialAnchor(device: value.st_dev, inode: value.st_ino) }
+      }
+      if cursor.path == "/" { break }; cursor.deleteLastPathComponent()
+    }
+    var value = stat(); guard lstat(url.path, &value) == 0 else { throw SessionError.identityUnavailable }
+    return DevelopmentMaterialAnchor(device: value.st_dev, inode: value.st_ino)
+  }
+  static func exists(_ url: URL) throws -> Bool {
+    var value = stat(); if lstat(url.path, &value) == 0 { return true }
+    guard errno == ENOENT else { throw SessionError.identityUnavailable }; return false
+  }
+  static func read(_ url: URL, maximum: Int) throws -> (Data, DevelopmentMaterialAnchor) {
+    var before = stat(); guard lstat(url.path, &before) == 0, before.st_mode & S_IFMT == S_IFREG, before.st_size >= 0, before.st_size <= maximum else { throw SessionError.identityUnavailable }
+    let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); guard fd >= 0 else { throw SessionError.identityUnavailable }; defer { Darwin.close(fd) }
+    var actual = stat(); guard fstat(fd, &actual) == 0, actual.st_dev == before.st_dev, actual.st_ino == before.st_ino else { throw SessionError.identityUnavailable }
+    var bytes = Data(), buffer = [UInt8](repeating: 0, count: min(maximum + 1, 4096))
+    while true {
+      let amount = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+      guard amount >= 0 else { throw SessionError.identityUnavailable }; if amount == 0 { break }
+      guard bytes.count + amount <= maximum else { throw SessionError.identityUnavailable }; bytes.append(contentsOf: buffer.prefix(amount))
+    }
+    var after = stat(), path = stat()
+    guard fstat(fd, &after) == 0, lstat(url.path, &path) == 0, after.st_dev == before.st_dev, after.st_ino == before.st_ino, path.st_dev == before.st_dev, path.st_ino == before.st_ino, after.st_size == bytes.count, after.st_size == before.st_size, after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec, after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec else { throw SessionError.identityUnavailable }
+    return (bytes, DevelopmentMaterialAnchor(device: before.st_dev, inode: before.st_ino))
+  }
+  static func create(_ bytes: Data, _ url: URL) throws {
+    let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { throw SessionError.identityUnavailable }; defer { Darwin.close(fd) }
+    var offset = 0
+    while offset < bytes.count {
+      let amount = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), $0.count - offset) }
+      guard amount > 0 else { throw SessionError.identityUnavailable }; offset += amount
+    }
+    guard fsync(fd) == 0 else { throw SessionError.identityUnavailable }; try sync(url.deletingLastPathComponent())
+  }
+  static func sync(_ url: URL) throws {
+    let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); guard fd >= 0 else { throw SessionError.identityUnavailable }; defer { Darwin.close(fd) }
+    guard fsync(fd) == 0 else { throw SessionError.identityUnavailable }
   }
 }
 #endif
