@@ -28,6 +28,20 @@ struct Identity: DeviceIdentityProvider {
 actor TestRepository: SessionRepository {
   let syncIdentity = try! SyncRepositoryIdentity(instanceID: UUID().uuidString, databaseNamespace: "test-development")
   let store: MatchStore
+  var retirementReadHeld = false
+  var retirementReadEntered = false
+  var retirementReadWaiter: CheckedContinuation<Void, Never>?
+  var retirementReadRelease: CheckedContinuation<Void, Never>?
+  func holdNextSnapshotForRetirement() { retirementReadHeld = true; retirementReadEntered = false }
+  func waitForRetirementSnapshot() async { if !retirementReadEntered { await withCheckedContinuation { retirementReadWaiter = $0 } } }
+  func releaseRetirementSnapshot() { retirementReadRelease?.resume(); retirementReadRelease = nil }
+  var retirementIntentReplyHeld = false
+  var retirementIntentReplyEntered = false
+  var retirementIntentWaiter: CheckedContinuation<Void, Never>?
+  var retirementIntentRelease: CheckedContinuation<Void, Never>?
+  func holdIntentReplyForRetirement() { retirementIntentReplyHeld = true }
+  func waitForRetirementIntent() async { if !retirementIntentReplyEntered { await withCheckedContinuation { retirementIntentWaiter = $0 } } }
+  func releaseRetirementIntent() { retirementIntentRelease?.resume(); retirementIntentRelease = nil }
   var holdFaultProjection = false
   var holdTail = false
   var snapshotsAfterObservation: Int?
@@ -77,6 +91,11 @@ actor TestRepository: SessionRepository {
   func databaseNamespace() async -> String { "test-development" }
   func matchIDs() async throws -> [String] { try await store.matchIDs() }
   func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 {
+    if retirementReadHeld {
+      retirementReadHeld = false; retirementReadEntered = true
+      retirementReadWaiter?.resume(); retirementReadWaiter = nil
+      await withCheckedContinuation { retirementReadRelease = $0 }
+    }
     if failInboundReload {
       failInboundReload = false
       throw StoreError.responseLost
@@ -147,6 +166,11 @@ actor TestRepository: SessionRepository {
       throw StoreError.injectedFailure
     }
     let r = try await store.commitV2(request)
+    if request.commandID.hasSuffix("/intent"), retirementIntentReplyHeld {
+      retirementIntentReplyHeld = false; retirementIntentReplyEntered = true
+      retirementIntentWaiter?.resume(); retirementIntentWaiter = nil
+      await withCheckedContinuation { retirementIntentRelease = $0 }
+    }
     if terminalFault == "after" { throw StoreError.responseLost }
     if isObservation {
       if holdTail { snapshotsAfterObservation = 0 }

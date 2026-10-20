@@ -14,6 +14,7 @@ extension MatchSession: SyncInboundCoordinator {
         return local
     }
     public func receiveSyncPacket(_ bytes: Data, peer: PeerAuthorization, matchID: String) async throws -> InboundReceiptV3 {
+        try beginBusiness(); defer { endBusiness() }
         let local = try await validateSyncAuthorization(peer)
         guard bytes.count <= 8 * 1024 * 1024 else { throw StoreError.syncQuotaExceeded }
         let packet = try JSONDecoder().decode(MatchPacketV2.self, from: bytes)
@@ -25,6 +26,7 @@ extension MatchSession: SyncInboundCoordinator {
             // Includes responseLost and a failure after COMMIT but before reload/cleanup.
             if packet.body.descriptor.recordingDeviceID == local { scheduleCapture(matchID) }
         }
+        try requireBusinessActive()
         let receipt = try await store.receiveV2(bytes, peer: peer, expectedMatchID: matchID, now: clock.now())
         publish(try projected(await store.snapshotV2(matchID: matchID)))
         if packet.body.descriptor.recordingDeviceID == local {
@@ -33,10 +35,12 @@ extension MatchSession: SyncInboundCoordinator {
         return receipt
     }
     public func receiveSyncACK(_ bytes: Data, peer: PeerAuthorization) async throws {
+        try beginBusiness(); defer { endBusiness() }
         _ = try await validateSyncAuthorization(peer)
         guard bytes.count <= 8 * 1024 * 1024 else { throw StoreError.syncQuotaExceeded }
         let ack = try JSONDecoder().decode(DurableACKV2.self, from: bytes)
         await acquire(ack.body.matchID); defer { release(ack.body.matchID) }
+        try requireBusinessActive()
         try await store.acknowledgeV2(bytes, peer: peer, now: clock.now())
     }
 }
