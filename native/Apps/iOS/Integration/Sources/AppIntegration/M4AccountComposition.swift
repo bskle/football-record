@@ -56,19 +56,26 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     self.prepared = prepared; self.repository = repository; self.session = session; self.context = context; self.client = client
     self.accountService = accountService; self.phoneRegistration = phoneRegistration; self.watchRegistration = watchRegistration; self.cloudBridge = cloudBridge; self.sync = sync; self.identity = identity; self.cloudSpaceID = cloudSpaceID; self.watchRelay = watchRelay
   }
-  static func make(prepared: M4PreparedIdentity, trust: AuthorityTrustConfiguration, cloudSpaceID: String, identity: any M4CurrentIdentityObserving = M4UnavailableCurrentIdentity()) async throws -> M4AccountComposition {
+  static func make(prepared: M4PreparedIdentity, trust: AuthorityTrustConfiguration, cloudSpaceID: String, identity: any M4CurrentIdentityObserving = M4UnavailableCurrentIdentity(), authorityRelay: (any AuthorityHTTPRelay)? = nil) async throws -> M4AccountComposition {
     try AuthorityWire.identifier(cloudSpaceID)
     let development = trust.environment == .development
     guard development ? prepared.seed.namespace != SQLiteSessionRepository.productionNamespace : prepared.seed.namespace == SQLiteSessionRepository.productionNamespace else { throw AuthorityError.identityChanged }
     #if !DEBUG
     guard !development else { throw AuthorityError.identityChanged }
     #endif
+    if authorityRelay != nil {
+      #if DEBUG
+      guard development else { throw AuthorityError.identityChanged }
+      #else
+      throw AuthorityError.identityChanged
+      #endif
+    }
     let policy: CloudSaveProofPolicy = development ? .development(databaseNamespace: prepared.seed.namespace) : .unavailable
     let repository = try prepared.openRepository(authorityTrust: trust, cloudSavePolicy: policy)
     do {
       let device = PersistentDeviceIdentityProvider(url: prepared.seed.namespaceDirectory.appendingPathComponent("device.identity"), repository: repository)
       guard try await device.localDeviceID() == prepared.seed.installationID else { throw AuthorityError.identityChanged }
-      let client = AuthorityClient(relay: M4UnavailableAuthorityRelay(), vault: prepared.material.vault, signer: prepared.material.signer, trust: trust)
+      let client = AuthorityClient(relay: authorityRelay ?? M4UnavailableAuthorityRelay(), vault: prepared.material.vault, signer: prepared.material.signer, trust: trust)
       let permits = AuthorityStartPermitProvider(client: client, repository: repository)
       let session = MatchSession(store: repository, deviceIdentity: device, clock: SystemSessionClock(), ids: UUIDSessionIDFactory(), permits: permits, workout: UnavailableWorkoutGateway(), environment: development ? .development(databaseNamespace: prepared.seed.namespace) : .production)
       try await permits.attach(session)

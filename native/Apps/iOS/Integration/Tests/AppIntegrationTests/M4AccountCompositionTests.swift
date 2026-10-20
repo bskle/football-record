@@ -80,6 +80,15 @@ extension M4AccountCompositionTests {
     let observations = await observer.reads; XCTAssertEqual(observations, 0, "opening storage is not current identity admission")
     try await prepared.close()
   }
+  func testProductionRejectsExplicitHTTPFixtureBeforeOpeningBusinessDB() async throws {
+    let (prepared, _) = try await identityFixture(SQLiteSessionRepository.productionNamespace, signerNamespace: "m4-production-http-fixture")
+    let key = Curve25519.Signing.PrivateKey(), trust = try AuthorityTrustConfiguration(environment: .production, publicKeys: ["production-fixture": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
+    XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
+    do { _ = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", authorityRelay: CompositionUnavailableRelay()); XCTFail("production cannot enable an explicit development protocol client") }
+    catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
+    try await prepared.close()
+  }
   func testDefaultCurrentIdentityRemainsUnavailableDespiteStoredBindingAndCredential() async throws {
     let (prepared, trust) = try await identityFixture("m4-compose-two")
     let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture")
@@ -155,11 +164,11 @@ extension M4AccountCompositionTests {
   private func binding(_ prepared: M4PreparedIdentity) throws -> AccountBindingV4 {
     try AccountBindingV4(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", deviceID: prepared.seed.installationID, activationEpoch: 1, role: .phone, environment: .development)
   }
-  private func identityFixture(_ namespace: String) async throws -> (M4PreparedIdentity, AuthorityTrustConfiguration) {
+  private func identityFixture(_ namespace: String, signerNamespace: String? = nil) async throws -> (M4PreparedIdentity, AuthorityTrustConfiguration) {
     let root = location(), trustKey = Curve25519.Signing.PrivateKey()
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["authority-fixture": AuthorityWire.base64URL(trustKey.publicKey.rawRepresentation)])
     let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("retained")) { seed in
-      let signer = try DevelopmentDeviceSigner(namespace: namespace, rawRepresentation: Data(repeating: 21, count: 32))
+      let signer = try DevelopmentDeviceSigner(namespace: signerNamespace ?? namespace, rawRepresentation: Data(repeating: 21, count: 32))
       let credential = DeviceCredential(token: AuthorityWire.base64URL(Data(repeating: 5, count: 32)), sessionID: "session-fixture", accountID: "account-fixture", deviceID: seed.installationID, keyID: try AuthorityWire.deviceKeyID(publicKey: signer.publicKey), activationEpoch: 1, expiresAt: 9_007_199_254_740_990)
       return M4IdentityMaterial(signer: signer, vault: MemoryDeviceCredentialVault(credential))
     }
@@ -183,4 +192,8 @@ private actor CompositionIdentityFixture: M4CurrentIdentityObserving {
   func setCloud(_ value: String) { cloud = value }
   func waitForEntry() async { if entered { return }; await withCheckedContinuation { entry = $0 } }
   func release() { held?.resume(); held = nil }
+}
+
+private struct CompositionUnavailableRelay: AuthorityHTTPRelay {
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse { throw AuthorityError.unavailable }
 }

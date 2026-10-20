@@ -441,6 +441,61 @@ import HealthKitDeletion
     XCTAssertEqual(try businessWitnessCount(f.database), 1); XCTAssertEqual(try M4CatalogIO.encode(f.catalog.receipts(requestID: completed.intent.requestID)), first)
     try await f.close()
   }
+  func testAggregateRoutedAdditionalStoreWithoutOriginalSagaBlocksBeforeFirstErase() async throws {
+    let other = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false)
+    try executeSQL(other.database, "DELETE FROM lifecycle_steps_v4 WHERE id='deletion:guard-parent'")
+    let missing = try await other.composition.repository.deletionSagaV4(requestID: other.saga.intent.requestID); XCTAssertNil(missing)
+    let f = try await deletionGuardFixture(healthIssue: nil, extraStore: other.composition), cloud = GateControlledCloud()
+    let leaves = M4LocalTransportLeaves(catalog: f.catalog, storeRoutes: ["guard-store": f.composition, "routed-extra-store": other.composition])
+    let admission = M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger, localLeaves: leaves,
+      copyDrain: GateControlledCopyDrain(scope: f.scope, parent: f.saga.intent.requestID, digest: f.saga.intent.digest))
+    do { _ = try await M4DeletionResumeController(admission: admission, cloudDeletion: cloud).resume(requestID: f.saga.intent.requestID) } catch {}
+    let actual = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(actual?.cloudProgress, .completed, "independent Cloud can progress despite an unsupported multi-Store provenance")
+    XCTAssertNotEqual(actual?.localProgress, .completed)
+    XCTAssertEqual(try businessWitnessCount(f.database), 1, "valid extra route/inode alone is not same-parent Store provenance")
+    XCTAssertEqual(try businessWitnessCount(other.database), 1)
+    XCTAssertTrue(try f.catalog.receipts(requestID: f.saga.intent.requestID).isEmpty)
+    try await f.close(); try await other.close()
+  }
+  func testControllerFinalStopJoinsHeldOriginalCloudTaskAndRetainsSagaFacade() async throws {
+    let f = try await deletionGuardFixture(healthIssue: .missingMapping), cloud = GateHeldCloud(), admission = M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger)
+    let controller = M4DeletionResumeController(admission: admission, cloudDeletion: cloud)
+    let running = Task { try await controller.resume(requestID: f.saga.intent.requestID) }
+    await cloud.waitForEntry()
+    var stopping = false, done = false
+    let stop = Task { stopping = true; await controller.stopAndJoin(); done = true }
+    while !stopping { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
+    XCTAssertFalse(done, "final stop must join the original cancellation-insensitive control task")
+    let pending = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(pending?.intent, f.saga.intent); XCTAssertEqual(pending?.recoveryCapability, f.saga.recoveryCapability)
+    do { _ = try await controller.resume(requestID: f.saga.intent.requestID); XCTFail("stopped controller cannot admit a later resume") } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    await cloud.release(); _ = await running.result; await stop.value
+    let actual = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(actual?.cloudProgress, .completed); XCTAssertEqual(actual?.localProgress, .failed)
+    XCTAssertEqual(actual?.intent, f.saga.intent); XCTAssertEqual(actual?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(try businessWitnessCount(f.database), 1)
+    do { _ = try await controller.recover(); XCTFail("stopped automatic recovery is closed") } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    try await f.close()
+  }
+  func testControllerFinalStopJoinsGenericReconcileOnSameOriginalRelay() async throws {
+    let relay = GateHeldAuthorityRelay(), f = try await deletionGuardFixture(healthIssue: .missingMapping, acceptBackend: false, authorityRelay: relay, hasCredential: true)
+    let admission = M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger), controller = M4DeletionResumeController(admission: admission)
+    let running = Task { try await controller.reconcile(f.saga.intent) }
+    await relay.waitForEntry()
+    var stopping = false, done = false
+    let stop = Task { stopping = true; await controller.stopAndJoin(); done = true }
+    while !stopping { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
+    XCTAssertFalse(done, "generic reconciliation owns its same original HTTP operation until it returns")
+    let current = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(current?.intent, f.saga.intent); XCTAssertFalse(current?.backendDeleted ?? true)
+    do { _ = try await controller.reconcile(f.saga.intent); XCTFail("final stop closes generic control admission") } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    await relay.release(); _ = await running.result; await stop.value
+    let actual = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID), calls = await relay.calls
+    XCTAssertEqual(calls, 1); XCTAssertEqual(actual?.intent, f.saga.intent); XCTAssertEqual(actual?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertFalse(actual?.backendDeleted ?? true); XCTAssertEqual(try businessWitnessCount(f.database), 1)
+    try await f.close()
+  }
   private struct GateFixture {
     let root: URL
     let composition: M4AccountComposition
@@ -452,14 +507,15 @@ import HealthKitDeletion
     let database: URL
     func close() async throws { try await composition.quiesceBusiness(); try catalog.close(); try await ledger.close(); try await prepared.close() }
   }
-  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false) async throws -> GateFixture {
+  private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil) async throws -> GateFixture {
     let root = try root(), namespace = "guard-fixture", key = Curve25519.Signing.PrivateKey()
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["guard-key": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
     let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("identity-control")) { seed in
       let signer = try DevelopmentDeviceSigner(namespace: namespace, rawRepresentation: Data(repeating: 21, count: 32))
-      return M4IdentityMaterial(signer: signer, vault: MemoryDeviceCredentialVault())
+      let credential = hasCredential ? DeviceCredential(token: AuthorityWire.base64URL(Data(repeating: 5, count: 32)), sessionID: "guard-control-session", accountID: "account", deviceID: seed.installationID, keyID: try AuthorityWire.deviceKeyID(publicKey: signer.publicKey), activationEpoch: 2, expiresAt: 9_007_199_254_740_990) : nil
+      return M4IdentityMaterial(signer: signer, vault: MemoryDeviceCredentialVault(credential))
     }
-    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud")
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud", authorityRelay: authorityRelay)
     try await c.repository.bindAccountV4(AccountBindingV4(accountID: "account", cloudSpaceID: "cloud", deviceID: prepared.seed.installationID, activationEpoch: 2, role: .phone, environment: .development))
     let scope = try scope(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog")), ledgerURL = root.appendingPathComponent("cloud-ledger.sqlite"), ledger = try SQLiteCloudLedger(url: ledgerURL)
     let database = prepared.seed.businessDatabaseURL
@@ -481,6 +537,10 @@ import HealthKitDeletion
     if additionalStore {
       let extra = root.appendingPathComponent("unproven-store.sqlite"); try Data("unproven original Store without same-parent Saga".utf8).write(to: extra)
       try catalog.record(M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "unproven-store", kind: .businessStore, scope: scope, root: extra, retainedControls: []))
+    }
+    if let extraStore {
+      let database = await extraStore.repository.databaseURL
+      try catalog.record(M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "routed-extra-store", kind: .businessStore, scope: scope, root: database, retainedControls: []))
     }
     let health: ClientDeletionChoiceV4 = healthIssue == nil ? .keep : .delete
     let choices = M4DeletionChoices(cloud: .delete, local: .delete, health: health, healthConfirmed: health == .delete)
@@ -553,4 +613,29 @@ private struct GateControlledCopyDrain: M4LocalCopyDrainChecking {
   func assertDrained(scope: CloudScope, requestID: String, parentIntentDigest: String) async throws {
     guard scope == self.scope, requestID.utf8.elementsEqual(parent.utf8), parentIntentDigest == digest else { throw M4LocalErasureError.intentMismatch }
   }
+}
+
+private actor GateHeldCloud: CloudAccountDeletionDriver {
+  private var entered = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  private var held: CheckedContinuation<Void, Never>?
+  func waitForEntry() async { if entered { return }; await withCheckedContinuation { waiter = $0 } }
+  func deletePrivateZone(scope: CloudScope) async throws {
+    entered = true
+    await withCheckedContinuation { held = $0; waiter?.resume(); waiter = nil }
+  }
+  func release() { held?.resume(); held = nil }
+}
+private actor GateHeldAuthorityRelay: AuthorityHTTPRelay {
+  private(set) var calls = 0
+  private var entered = false
+  private var waiter: CheckedContinuation<Void, Never>?
+  private var held: CheckedContinuation<Void, Never>?
+  func waitForEntry() async { if entered { return }; await withCheckedContinuation { waiter = $0 } }
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    calls += 1; entered = true
+    await withCheckedContinuation { held = $0; waiter?.resume(); waiter = nil }
+    throw URLError(.networkConnectionLost)
+  }
+  func release() { held?.resume(); held = nil }
 }

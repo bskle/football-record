@@ -175,10 +175,13 @@ struct M4UnavailableLocalCopyDrain: M4LocalCopyDrainChecking {
     try await copyDrain.assertDrained(scope: scope, requestID: plan.requestID, parentIntentDigest: try requiredDigest(plan))
     // Every business Store needs its own original facade and same-parent proof.
     // Prove route identities before the first mutating Store entrance.
-    for entry in plan.entries where entry.capsule.kind == .businessStore {
-      guard let route = leaves.storeRoutes[entry.capsule.componentID] else { throw M4LocalErasureError.unsupportedComponent }
-      try route.validateOriginalStoreCapsule(entry.capsule, scope: plan.scope)
-    }
+    let stores = plan.entries.filter { $0.capsule.kind == .businessStore }
+    // Multiple facade routes do not prove one original parent/facts provenance.
+    // Preserve every Store until such a proof exists; never erase the first and
+    // discover the missing second Saga afterwards.
+    guard stores.count == 1, let original = stores.first,
+          let route = leaves.storeRoutes[original.capsule.componentID], route === composition else { throw M4LocalErasureError.unsupportedComponent }
+    try route.validateOriginalStoreCapsule(original.capsule, scope: plan.scope)
   }
   private func requiredDigest(_ plan: M4FrozenDeletionPlan) throws -> String {
     guard let digest = plan.parentIntentDigest else { throw M4LocalErasureError.intentMismatch }; return digest
@@ -296,6 +299,9 @@ struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
   private let admission: M4DeletionAdmission
   private let service: LifecycleService
   private var running: [Data: Task<DeletionSagaV4, any Error>] = [:]
+  private var stopped = false
+  private var stopping: Task<Void, Never>?
+  private var reconciliations: [UUID: Task<VerifiedAuthorityReceiptV1, any Error>] = [:]
   init(admission: M4DeletionAdmission, cloudDeletion: any CloudAccountDeletionDriver = UnavailableCloudAccountDeletionDriver(), healthDeletion: any AppWorkoutDeletionDriver = UnavailableAppWorkoutDeletionDriver()) {
     self.admission = admission
     service = LifecycleService(client: admission.composition.client, repository: admission.composition.repository,
@@ -303,6 +309,7 @@ struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
       cloudDeletion: cloudDeletion, healthDeletion: healthDeletion, localTransportDeletion: M4GuardedLocalTransportDeletion(admission: admission))
   }
   func resume(requestID: String) async throws -> DeletionSagaV4 {
+    guard !stopped else { throw AuthorityError.identityChanged }
     let key = Data(requestID.utf8)
     if let prior = running[key] { return try await prior.value }
     let admission = admission, service = service
@@ -311,19 +318,45 @@ struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
       try await admission.validateHistoricalLocalCompletion(original); try Task.checkCancellation()
       let result = try await service.resumeDeletion(requestID: requestID)
       try await admission.validateHistoricalLocalCompletion(result)
+      try Task.checkCancellation()
       return result
     }
     running[key] = task; defer { running[key] = nil }
     return try await task.value
   }
   func recover() async throws -> [DeletionSagaV4] {
+    guard !stopped else { throw AuthorityError.identityChanged }
     let originals = try await admission.composition.repository.deletionSagasV4()
     var results: [DeletionSagaV4] = []
     for original in originals { results.append(try await resume(requestID: original.intent.requestID)) }
     return results
   }
+  /// Final-close only. Business quiescence must retain this same control facade
+  /// and relay so the original deletion Saga can still recover unknown outcomes.
+  func stopAndJoin() async {
+    if let stopping { await stopping.value; return }
+    stopped = true
+    let resumes = Array(running.values), controls = Array(reconciliations.values)
+    resumes.forEach { $0.cancel() }; controls.forEach { $0.cancel() }
+    let join = Task<Void, Never> {
+      for task in resumes { _ = await task.result }
+      for task in controls { _ = await task.result }
+    }
+    stopping = join
+    await join.value
+    running.removeAll(); reconciliations.removeAll()
+  }
   func reconcile(_ intent: ControlIntentV1) async throws -> VerifiedAuthorityReceiptV1 {
-    if intent.operation == .deleteAccount { guard try await admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
-    return try await service.reconcileLifecycle(intent)
+    guard !stopped else { throw AuthorityError.identityChanged }
+    let id = UUID(), admission = admission, service = service
+    let task = Task {
+      try Task.checkCancellation()
+      if intent.operation == .deleteAccount { guard try await admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
+      let result = try await service.reconcileLifecycle(intent)
+      try Task.checkCancellation()
+      return result
+    }
+    reconciliations[id] = task; defer { reconciliations[id] = nil }
+    return try await task.value
   }
 }
