@@ -325,7 +325,7 @@ extension M4AccountCompositionTests {
 }
 private actor CompositionIdentityFixture: M4CurrentIdentityObserving {
   private var cloud = "cloud-fixture"
-  private let suspend: Bool
+  private var suspend: Bool
   private var entered = false
   private var entry: CheckedContinuation<Void, Never>?
   private var held: CheckedContinuation<Void, Never>?
@@ -338,6 +338,7 @@ private actor CompositionIdentityFixture: M4CurrentIdentityObserving {
   }
   func advanceIdentityFence(to generation: Int64) async throws {}
   func setCloud(_ value: String) { cloud = value }
+  func holdNext() { suspend = true; entered = false }
   func waitForEntry() async { if entered { return }; await withCheckedContinuation { entry = $0 } }
   func release() { held?.resume(); held = nil }
 }
@@ -794,3 +795,69 @@ extension M4AccountCompositionTests {
     try await c.close(); try await ledger.close()
   }
 }
+
+#if DEBUG
+extension M4AccountCompositionTests {
+  func testOriginalPhoneInboxChecksFreshIdentityForEveryRequestAndStopsAtQuiesce() async throws {
+    let f = try await freshServiceFixture(), c = f.composition
+    let signingIn = Task { await c.context.account.perform(.signIn) }
+    let apple = try await serviceMailboxRequest(f.protocolRoot, operation: "apple")
+    try serviceMailboxReply(apple, payload: JSONSerialization.data(withJSONObject: ["identityToken": "explicit-current-token", "authorizationCode": "explicit-current-code"]))
+    await signingIn.value; XCTAssertTrue(c.context.account.canEnterRecording)
+    try await c.startPhoneInbox()
+    let first = try originalInboxRequest(f.protocolRoot), raw = try await originalInboxReply(first.response)
+    let payload = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(raw["payload"] as? String)))
+    let context = try AuthorityWire.decode(WatchRegistrationContextV4.self, payload)
+    XCTAssertEqual(context.phoneID, f.prepared.seed.installationID); XCTAssertEqual(context.accountID, "account-fixture")
+    let firstReads = await f.observer.reads; XCTAssertEqual(firstReads, 3)
+    try consumeOwnedInboxFixture(first)
+    await f.observer.setCloud("foreign-cloud")
+    let second = try originalInboxRequest(f.protocolRoot), refusal = try await originalInboxReply(second.response)
+    XCTAssertEqual(refusal["issue"] as? String, "unavailable"); XCTAssertNil(refusal["payload"])
+    let secondReads = await f.observer.reads; XCTAssertEqual(secondReads, 4); XCTAssertFalse(c.context.account.canEnterRecording)
+    try consumeOwnedInboxFixture(second)
+    try await c.quiesceBusiness()
+    let stopped = try originalInboxRequest(f.protocolRoot)
+    try await Task.sleep(for: .milliseconds(80))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: stopped.response.path), "retired original inbox cannot publish even a new error response")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: stopped.request.path), "quiesce preserves borrowed pending input")
+    try consumeOwnedInboxFixture(stopped); try await c.close()
+  }
+  func testOriginalPhoneInboxQuiesceJoinsHeldOriginalIdentityAndCannotPublishLateReply() async throws {
+    let f = try await freshServiceFixture(), c = f.composition
+    let signingIn = Task { await c.context.account.perform(.signIn) }
+    let apple = try await serviceMailboxRequest(f.protocolRoot, operation: "apple")
+    try serviceMailboxReply(apple, payload: JSONSerialization.data(withJSONObject: ["identityToken": "explicit-current-token", "authorizationCode": "explicit-current-code"]))
+    await signingIn.value; try await c.startPhoneInbox(); await f.observer.holdNext()
+    let held = try originalInboxRequest(f.protocolRoot); await f.observer.waitForEntry()
+    var done = false; let stopping = Task { try await c.quiesceBusiness(); done = true }
+    let retired = await waitForOriginalRetirement(c.session); XCTAssertTrue(retired)
+    try await Task.sleep(for: .milliseconds(30)); XCTAssertFalse(done)
+    await f.observer.release(); try await stopping.value
+    XCTAssertFalse(FileManager.default.fileExists(atPath: held.response.path), "no late original success/error may be published after stop")
+    XCTAssertTrue(FileManager.default.fileExists(atPath: held.request.path)); XCTAssertFalse(c.context.account.canEnterRecording)
+    try consumeOwnedInboxFixture(held); try await c.close()
+  }
+  private struct OriginalInboxFixture { let request, response: URL }
+  private func originalInboxRequest(_ root: URL) throws -> OriginalInboxFixture {
+    let id = UUID().uuidString, mailbox = root.appendingPathComponent("development/mailbox")
+    let file = mailbox.appendingPathComponent("incoming/" + id + ".json")
+    try JSONSerialization.data(withJSONObject: ["id": id, "operation": "phone-context", "dataset": "fresh", "payload": Data().base64EncodedString()], options: [.sortedKeys, .withoutEscapingSlashes]).write(to: file, options: .withoutOverwriting)
+    return OriginalInboxFixture(request: file, response: mailbox.appendingPathComponent("incoming-responses/" + id + ".json"))
+  }
+  private func originalInboxReply(_ file: URL) async throws -> [String: Any] {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+    while ContinuousClock.now < deadline {
+      if FileManager.default.fileExists(atPath: file.path) { return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any]) }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    throw AuthorityError.unavailable
+  }
+  private func consumeOwnedInboxFixture(_ item: OriginalInboxFixture) throws {
+    // Exact fixtures only, standing in for the external broker consuming its own
+    // request/reply. Neither production code nor the inbox removes these files.
+    try FileManager.default.removeItem(at: item.request)
+    if FileManager.default.fileExists(atPath: item.response.path) { try FileManager.default.removeItem(at: item.response) }
+  }
+}
+#endif

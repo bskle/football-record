@@ -185,6 +185,12 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     guard !businessOperations.isEmpty else { return }
     await withCheckedContinuation { businessReturnWaiters.append($0) }
   }
+  func startPhoneInbox() async throws {
+    let token = businessLifetime; try requireBusiness(token)
+    guard let controlledAdapters else { throw AuthorityError.unavailable }
+    try await controlledAdapters.startPhoneInbox(authorizer: phoneAuthorizer)
+    try requireBusiness(token)
+  }
   var phoneAuthorizer: any WatchRegistrationAuthorizing { M4OriginalPhoneAuthorizer(owner: self) }
   fileprivate func phoneRegistrationContext() async throws -> WatchRegistrationContextV4 {
     try await ownBusiness {

@@ -83,6 +83,16 @@ actor M4ControlledAdapters: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, 
     #endif
     return original
   }
+  func startPhoneInbox(authorizer: any WatchRegistrationAuthorizing) async throws {
+    guard !businessStopped, !finalStopped else { throw AuthorityError.identityChanged }
+    _ = try await original()
+    #if DEBUG
+    try await clients.startInbox(authorizer: authorizer)
+    guard !businessStopped, !finalStopped else { await clients.stopInbox(); throw AuthorityError.identityChanged }
+    #else
+    throw AuthorityError.unavailable
+    #endif
+  }
   func authorize(nonceSHA256: String) async throws -> AppleAuthorization {
     #if DEBUG
     let clients = clients; return try await ownedBusiness { try await clients.authorize(nonceSHA256: nonceSHA256) }
@@ -143,6 +153,11 @@ actor M4ControlledAdapters: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, 
     let pending = Array(business.values), rpc = Array(exchanges.values)
     pending.forEach { $0.cancel() }; rpc.forEach { $0.cancel() }
     let task = Task {
+      #if DEBUG
+      // Business retirement joins the original typed Phone inbox without closing
+      // the same original HTTP/Cloud clients needed by retained Saga controls.
+      await self.clients.stopInbox()
+      #endif
       for call in pending { await call.join.value }; for call in rpc { _ = await call.result }
       await self.waitForBusinessReturns()
     }
