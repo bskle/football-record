@@ -1,5 +1,6 @@
 #if DEBUG
 import Foundation
+import Darwin
 import CryptoKit
 import MatchCore
 import MatchStore
@@ -19,6 +20,9 @@ public struct DevelopmentAuthorityConfiguration: Codable, Sendable {
   }
 }
 public enum DevelopmentAuthorityScenario {
+  public static func protocolClients(configuration: DevelopmentAuthorityConfiguration, rootDirectory: URL) throws -> DevelopmentAuthorityProtocolClients {
+    try DevelopmentAuthorityProtocolClients(configuration: configuration, rootDirectory: rootDirectory)
+  }
   @MainActor public static func fromPrivateFile(rootDirectory: URL? = nil) async throws -> AccountAppContext {
     let root = try rootDirectory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("football-record")
     let url = root.appendingPathComponent("development/m4-fixture.json")
@@ -42,6 +46,125 @@ public enum DevelopmentAuthorityScenario {
     let result = AccountAppContext(repository: runtime.repository, session: runtime.session, recording: runtime.recording, account: account, lifecycle: lifecycle, close: { await runtime.shutdown() })
     await result.refresh(); return result
   }
+}
+
+public enum DevelopmentAuthorityProtocolError: Error, Sendable, Equatable { case closed, undrainedMailbox }
+public enum DevelopmentAuthorityProtocolCloseState: Sendable, Equatable { case drained, undrained }
+/// Protocol clients only; the original Session, credentials and Saga belong to the caller.
+public actor DevelopmentAuthorityProtocolClients: AppleSignInDriver, AuthorityHTTPRelay, CloudDriver, CloudAccountDeletionDriver, WatchRegistrationAuthorizing {
+  public nonisolated let namespace: String
+  private let mailbox: DevelopmentMailbox
+  private let relay: URLSessionAuthorityRelay
+  private let mailboxRoot: URL
+  private var closed = false
+  private var closing: Task<Void, Never>?
+  private struct Pending: Sendable {
+    let cancel: @Sendable () -> Void
+    let join: Task<Void, Never>
+  }
+  private var operations: [UUID: Pending] = [:]
+  fileprivate init(configuration: DevelopmentAuthorityConfiguration, rootDirectory: URL) throws {
+    try configuration.validate()
+    guard rootDirectory.isFileURL, let base = URL(string: configuration.baseURL) else { throw SessionError.invalidRequest }
+    _ = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
+    _ = try protocolClientDirectoryExists(rootDirectory)
+    let mailboxRoot = rootDirectory.appendingPathComponent("development/mailbox")
+    guard try protocolClientMailboxEmpty(mailboxRoot) else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+    let relay = try URLSessionAuthorityRelay(baseURL: base, environment: .development)
+    do {
+      mailbox = try DevelopmentMailbox(root: mailboxRoot, dataset: configuration.dataset)
+      guard try protocolClientMailboxEmpty(mailboxRoot) else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+    } catch { relay.shutdown(); throw error }
+    self.relay = relay; self.mailboxRoot = mailboxRoot; namespace = configuration.namespace
+  }
+  func owned<T: Sendable>(_ work: @escaping @Sendable () async throws -> T) async throws -> T {
+    guard !closed else { throw DevelopmentAuthorityProtocolError.closed }
+    try Task.checkCancellation()
+    let id = UUID(), task = Task { try await work() }
+    operations[id] = Pending(cancel: { task.cancel() }, join: Task { _ = try? await task.value })
+    defer { operations.removeValue(forKey: id) }
+    do {
+      let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+      guard !closed else { throw DevelopmentAuthorityProtocolError.closed }
+      try Task.checkCancellation()
+      return value
+    } catch {
+      if closed { throw DevelopmentAuthorityProtocolError.closed }
+      throw error
+    }
+  }
+  public func authorize(nonceSHA256: String) async throws -> AppleAuthorization {
+    let driver = DevelopmentAppleDriver(mailbox: mailbox)
+    return try await owned { try await driver.authorize(nonceSHA256: nonceSHA256) }
+  }
+  public func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    let relay = relay
+    return try await owned { try await relay.send(request) }
+  }
+  public func registrationContext() async throws -> WatchRegistrationContextV4 {
+    let driver = DevelopmentWatchAuthorizer(mailbox: mailbox)
+    return try await owned { try await driver.registrationContext() }
+  }
+  public func authorizeRegistration(_ attempt: WatchRegistrationAttemptV4, action: WatchRegistrationAction) async throws -> Data {
+    let driver = DevelopmentWatchAuthorizer(mailbox: mailbox)
+    return try await owned { try await driver.authorizeRegistration(attempt, action: action) }
+  }
+  public func fetch(scope: CloudScope, cursor: CloudCursor) async throws -> CloudFetchBatch {
+    let driver = DevelopmentFileCloud(mailbox: mailbox)
+    return try await owned { try await driver.fetch(scope: scope, cursor: cursor) }
+  }
+  public func save(_ upload: CloudUpload) async throws -> CloudSaveResult {
+    let driver = DevelopmentFileCloud(mailbox: mailbox)
+    return try await owned { try await driver.save(upload) }
+  }
+  public func deletePrivateZone(scope: CloudScope) async throws {
+    let driver = DevelopmentFileCloud(mailbox: mailbox)
+    try await owned { try await driver.deletePrivateZone(scope: scope) }
+  }
+  /// Point-in-time inspection only: it neither closes nor cancels clients needed by the original Saga.
+  /// Callers must gate business admission before checking; later calls can change this state.
+  public func drainState() -> DevelopmentAuthorityProtocolCloseState {
+    guard operations.isEmpty else { return .undrained }
+    return (try? protocolClientMailboxEmpty(mailboxRoot)) == true ? .drained : .undrained
+  }
+  /// Final close, not business quiescence: retain these clients while the original Saga needs them.
+  /// The state is a fresh mailbox snapshot, not a durable whole-device erasure receipt.
+  public func close() async -> DevelopmentAuthorityProtocolCloseState {
+    if closing == nil {
+      closed = true
+      let pending = Array(operations.values), mailbox = mailbox
+      pending.forEach { $0.cancel() }; relay.shutdown()
+      closing = Task {
+        await mailbox.close()
+        for call in pending { await call.join.value }
+      }
+    }
+    await closing?.value
+    operations.removeAll()
+    return drainState()
+  }
+}
+
+private func protocolClientDirectoryExists(_ url: URL) throws -> Bool {
+  var info = stat()
+  if lstat(url.path, &info) != 0 {
+    if errno == ENOENT { return false }
+    throw DevelopmentAuthorityProtocolError.undrainedMailbox
+  }
+  guard Int(info.st_mode) & Int(S_IFMT) == Int(S_IFDIR) else { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
+  return true
+}
+private func protocolClientMailboxEmpty(_ root: URL) throws -> Bool {
+  _ = try protocolClientDirectoryExists(root.deletingLastPathComponent())
+  guard try protocolClientDirectoryExists(root) else { return true }
+  let names = Set(["outgoing", "responses", "incoming", "incoming-responses"])
+  do {
+    for child in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+      guard names.contains(child.lastPathComponent), try protocolClientDirectoryExists(child),
+            try FileManager.default.contentsOfDirectory(atPath: child.path).isEmpty else { return false }
+    }
+    return true
+  } catch { throw DevelopmentAuthorityProtocolError.undrainedMailbox }
 }
 
 private struct MailboxRequest: Codable { let id, operation, dataset: String; let payload: Data }

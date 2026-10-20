@@ -12,11 +12,12 @@
 - 验证原 canonical 非 production dataset / namespace / role、原 trust 公钥格式和 loopback HTTP 配置后，复用原私有 Apple / Cloud / Watch drivers、DevelopmentMailbox 与新建的原 URLSessionAuthorityRelay。不得调用 Scenario.make 或构建 Runtime / AccountAppContext / Session / SQLite / identity / signer / vault / permits / 实际 SDK。
 - factory 复用邮箱前后只读检查原四目录，既有 pending / 未知内容 / 非预期类型保全并 typed 拒绝；不采用旧回复、不删外来文件、不另建持久邮箱协议。此检查为当前状态，不声称跨进程所有权或永久零。
 - 所有协议调用走同一个内部 owned 泛型边界，登记原 Task。final close 先永久停入口、仅取消并 join 本实例任务、关闭自身创建的 relay/mailbox，返回前拒绝迟到结果。原借用上下文、别的客户端与共享目录内容不关闭或清除。close 仅为最终关闭，026业务 quiesce 必须继续保留该 relay 供原 Saga 恢复。
-- close 排空后重新读取邮箱库存；有外来或未知内容返回 undrained。重复 close 仍查当前库存，不将历史 drained 缓存为当前零。有限状态不代表026全部 owned / fullseal / native 完成。
+- 公开只读 `drainState()` 同时要求本实例 owned 调用为空和四目录当前库存为空；不取消、关闭、删除或采纳内容。同一 clients / HTTP 保留供原 Saga 恢复，026先 gate业务入口再 fresh检查；这是点时事实，新调用可改变状态。
+- close 排空后复用上述检查重新读取邮箱库存；有外来或未知内容返回 undrained。重复 close 仍查当前库存，不将历史 drained 缓存为当前零。有限状态不代表026全部 owned / fullseal / native 完成。
 - 原 Scenario.make / fromPrivateFile / Runtime 保持原行为；Cloud 回执只沿用 controlled development fixture 语义，不能生成 production proof。全部新增 API 在 `#if DEBUG`，Release不可达。
 
 ## TDD 与验证
 
-先缺 API 编译红，再最小实现后的真实运行红与修复。用实际文件邮箱消费者验证 Apple nonce、Watch 原 attempt/action/raw bytes、Cloud typed 原 canonical、零 DB/identity 副作用和原 namespace 文件保留。补两实例独立关闭、旧 pending/未知保全与重复 close current inventory；内部共享 owned helper 用不响应 cancellation 的门闩验证 join，无 public 测试接口。
+先缺 API 编译红，再最小实现后的真实运行红与修复。用实际文件邮箱消费者验证 Apple nonce、Watch 原 attempt/action/raw bytes、Cloud typed 原 canonical、零 DB/identity 副作用和原 namespace 文件保留。补两实例独立关闭、旧 pending/未知保全与重复 close current inventory；只读 drainState 用真实 pending/外来文件和尚未写请求的 owned 门闩验证，检查后原调用仍继续；内部共享 owned helper 用不响应 cancellation 的门闩验证 join，无 public 测试接口。
 
 完整 Presentation host 保留原025/038全部回归；最低 iOS17/watch10 Debug/Release 四模拟器 SDK 产品及外部 consumer Debug可达/Release缺类型负编译。没有 App/工程/Package改动或App新调用，App构建仅在实际影响出现时增加。原日志、输入前后 hash、source/final及两审结果保存在树外；只按实际结果记数。无真实账号、CloudKit、Health、WC、本人设备或部署，作者不 merge / push / archive。
