@@ -6,6 +6,7 @@ import MatchSession
 import MatchSync
 import MatchPresentation
 import DeviceSync
+import AccountKit
 @testable import AppIntegration
 
 @MainActor final class IntegrationContextTests: XCTestCase {
@@ -213,5 +214,85 @@ private actor ContextHeldGateway: WorkoutGateway {
     return try! WorkoutObservation(operationID: operation.id, binding: operation.binding, externalToken: operation.externalToken, observedAt: Date(), outcome: .running, window: CaptureWindow(start: operation.requestedAt, end: nil))
   }
   func reconcile(_ operation: CaptureOperation) async -> WorkoutObservation { await perform(operation) }
+  func release() { held?.resume(); held = nil }
+}
+
+extension IntegrationContextTests {
+  func testCancelledFactoryJoinsUnpublishedOriginalNextBeforeQueuedFactory() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("cancelled-factory-" + UUID().uuidString), gateway = ContextHeldGateway(), gate = ContextFactoryBarrier(), lifecycle = IntegrationLifecycle()
+    var candidate: IntegrationContext?, operation: CaptureOperation?, returned = false, factorySawOriginalCancellation = false
+    let cancelled = Task {
+      defer { returned = true }
+      return try await lifecycle.replace {
+        let value = try await IntegrationContext.make(root: root, namespace: "cancelled-unpublished", development: true, workout: gateway, transport: ContextTransport(), trust: UnavailableRevocableTrust())
+        await value.model.start(starter: true); operation = await gateway.waitForEntry(); candidate = value
+        await gate.hold(); factorySawOriginalCancellation = Task.isCancelled
+        return value
+      }
+    }
+    await gate.waitForEntry(); let original = try XCTUnwrap(candidate), repository = try XCTUnwrap(original.repository), session = try XCTUnwrap(original.session)
+    cancelled.cancel(); var queuedCalls = 0, queuedSawClosedOriginal = false
+    let queued = Task {
+      try await lifecycle.replace {
+        queuedCalls += 1
+        do { _ = try await repository.matchIDs(); XCTFail("queued factory cannot see an open abandoned facade") } catch { queuedSawClosedOriginal = true }
+        return try await IntegrationContext.make(root: root, namespace: "after-cancelled-factory", development: true, transport: ContextTransport(), trust: UnavailableRevocableTrust())
+      }
+    }
+    await gate.release()
+    let retired = await candidateIsRetired(session); XCTAssertTrue(retired)
+    let deadline = ContinuousClock.now.advanced(by: .milliseconds(100))
+    while !returned, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    XCTAssertFalse(returned, "cancelled replacement must itself join the original next capture before returning")
+    XCTAssertEqual(queuedCalls, 0); XCTAssertTrue(factorySawOriginalCancellation)
+    await gateway.release()
+    do { _ = try await cancelled.value; XCTFail("cancelled caller cannot receive the late factory result") } catch { XCTAssertTrue(error is CancellationError) }
+    let next = try await queued.value
+    XCTAssertEqual(queuedCalls, 1); XCTAssertTrue(queuedSawClosedOriginal); XCTAssertTrue(lifecycle.current === next)
+    XCTAssertNil(original.model.snapshot); XCTAssertTrue(original.model.history.isEmpty)
+    let reopened = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "cancelled-unpublished")
+    let snapshot = try await reopened.snapshotV2(matchID: XCTUnwrap(operation).binding.matchID)
+    XCTAssertEqual(snapshot.captureOperations.first(where: { $0.operation.id == operation?.id })?.observation?.outcome, .running)
+    try await reopened.close(); try await next.shutdown()
+  }
+  func testCancelledFactoryCloseFailureRetainsOriginalNextAndBlocksQueuedFactory() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("cancelled-factory-lease-" + UUID().uuidString), gate = ContextFactoryBarrier(), lifecycle = IntegrationLifecycle()
+    let signer = try DevelopmentDeviceSigner(namespace: "cancelled-candidate", rawRepresentation: Data(repeating: 61, count: 32))
+    let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: "cancelled-candidate", controlDirectory: root.appendingPathComponent("retained")) { _ in M4IdentityMaterial(signer: signer, vault: MemoryDeviceCredentialVault()) }
+    let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["candidate-key": signer.publicKey])
+    let owner = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "candidate-cloud"), candidate = IntegrationContext.account(owner)
+    let cancelled = Task { try await lifecycle.replace { await gate.hold(); return candidate } }
+    await gate.waitForEntry()
+    let path = prepared.seed.controlDirectory.appendingPathComponent("identity.owner"), retained = root.appendingPathComponent("original-owner-preserved"), foreign = root.appendingPathComponent("foreign-owner-preserved")
+    try FileManager.default.moveItem(at: path, to: retained); try Data("foreign identity lease fixture".utf8).write(to: path)
+    cancelled.cancel(); var queuedCalls = 0
+    let queued = Task { try await lifecycle.replace { queuedCalls += 1; throw ContextReplacementProbe.reached } }
+    await gate.release()
+    do { _ = try await cancelled.value; XCTFail("original next lease refusal must propagate instead of cancelled success") }
+    catch { XCTAssertEqual(error as? M4BootstrapError, .identityUnavailable) }
+    do { _ = try await queued.value; XCTFail("failed original cleanup must block queued factory") }
+    catch { XCTAssertEqual(error as? M4BootstrapError, .identityUnavailable) }
+    XCTAssertEqual(queuedCalls, 0); XCTAssertTrue(lifecycle.current === candidate); XCTAssertNotNil(owner.lastCloseFailure)
+    let ids = try await owner.repository.matchIDs(); XCTAssertTrue(ids.isEmpty, "original DB remains open on identity-lease preflight refusal")
+    try FileManager.default.moveItem(at: path, to: foreign); try FileManager.default.moveItem(at: retained, to: path)
+    do { _ = try await lifecycle.replace { queuedCalls += 1; throw ContextReplacementProbe.reached }; XCTFail("fixture factory throws after original cleanup retry") }
+    catch { XCTAssertEqual(error as? ContextReplacementProbe, .reached) }
+    XCTAssertEqual(queuedCalls, 1); XCTAssertNil(lifecycle.current); XCTAssertNil(owner.lastCloseFailure)
+  }
+  private func candidateIsRetired(_ session: MatchSession) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while ContinuousClock.now < deadline {
+      do { _ = try await session.prepareStart(starter: true) } catch SessionError.retired { return true } catch {}
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    return false
+  }
+}
+private actor ContextFactoryBarrier {
+  private var entered = false
+  private var entry: CheckedContinuation<Void, Never>?
+  private var held: CheckedContinuation<Void, Never>?
+  func hold() async { await withCheckedContinuation { held = $0; entered = true; entry?.resume(); entry = nil } }
+  func waitForEntry() async { if entered { return }; await withCheckedContinuation { entry = $0 } }
   func release() { held?.resume(); held = nil }
 }

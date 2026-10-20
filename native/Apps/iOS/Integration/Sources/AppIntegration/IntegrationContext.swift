@@ -97,7 +97,18 @@ import MatchPresentation
     old = nil
     try Task.checkCancellation()
     // No factory/capture/transport for the next environment exists before old shutdown joins.
-    let next = try await build(); current = next
+    let next = try await build()
+    // Still the original caller's Task, not a detached FIFO worker. A cancelled
+    // asynchronous factory may have returned a live owner despite cancellation.
+    if Task.isCancelled {
+      // Retain the real unpublished next if its drain/lease check fails. A queued
+      // replacement must retry this same owner before any new factory can run.
+      current = next
+      try await next.shutdown()
+      current = nil
+      throw CancellationError()
+    }
+    current = next
     return next
   }
 }
