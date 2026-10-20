@@ -253,13 +253,35 @@ private actor DevelopmentFileVault: DeviceCredentialVault {
   struct State: Codable { var generation: Int64 = 0; var credential: Saved? }
   let url: URL
   var state: State
-  init(url: URL) throws { self.url = url; state = FileManager.default.fileExists(atPath: url.path) ? try JSONDecoder().decode(State.self, from: Data(contentsOf: url)) : State() }
-  func credential() throws -> DeviceCredential { guard let value = state.credential else { throw AuthorityError.unavailable }; return value.value }
+  private let strict: DevelopmentMaterialBinding?
+  init(url: URL, strict: DevelopmentMaterialBinding? = nil) throws {
+    self.url = url; self.strict = strict
+    if let strict { state = try strict.loadVault() }
+    else { state = FileManager.default.fileExists(atPath: url.path) ? try JSONDecoder().decode(State.self, from: Data(contentsOf: url)) : State() }
+  }
+  func credential() throws -> DeviceCredential {
+    if let strict { return try strict.gate.lock.withLock { guard let value = try strict.loadVault().credential else { throw AuthorityError.unavailable }; return value.value } }
+    guard let value = state.credential else { throw AuthorityError.unavailable }; return value.value
+  }
   func advanceIdentityFence(to generation: Int64) throws {
+    if let strict {
+      try strict.gate.lock.withLock {
+        var next = try strict.loadVault()
+        guard generation >= next.generation, generation <= 9_007_199_254_740_991 else { throw AuthorityError.identityChanged }
+        if generation > next.generation { next.generation = generation; next.credential = nil; try strict.persist(next); state = next }
+      }; return
+    }
     guard generation >= state.generation else { throw AuthorityError.identityChanged }
     if generation > state.generation { var next = state; next.generation = generation; next.credential = nil; try save(next) }
   }
   func replace(_ credential: DeviceCredential?, expectedIdentityGeneration: Int64) throws {
+    if let strict {
+      try strict.gate.lock.withLock {
+        var next = try strict.loadVault()
+        guard expectedIdentityGeneration == next.generation else { throw AuthorityError.identityChanged }
+        next.credential = credential.map(Saved.init); try strict.validate(next); try strict.persist(next); state = next
+      }; return
+    }
     guard expectedIdentityGeneration == state.generation else { throw AuthorityError.identityChanged }
     var next = state; next.credential = credential.map(Saved.init); try save(next)
   }
@@ -551,6 +573,154 @@ private struct DevelopmentOwnedLedgerDeletion: LocalTransportDeletionDriver {
     let tasks = Array(operations.values); tasks.forEach { $0.cancel() }; inbox?.cancel(); relay.shutdown(); await mailbox.close()
     for task in tasks { _ = try? await task.value }; await inbox?.value; inbox = nil
     try? await ledger.close(); try? await repository.close()
+  }
+}
+public struct DevelopmentAuthorityDeviceMaterial: Sendable {
+  public let namespace: String
+  public let deviceID: String
+  public let signer: any DeviceProofSigner
+  public let vault: any DeviceCredentialVault
+}
+public extension DevelopmentAuthorityScenario {
+  static func deviceMaterial(configuration: DevelopmentAuthorityConfiguration, namespaceDirectory: URL, installationID: String) throws -> DevelopmentAuthorityDeviceMaterial {
+    try configuration.validate()
+    _ = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
+    let directory = DevelopmentMaterialIO.canonical(namespaceDirectory)
+    guard directory.isFileURL, Data(directory.lastPathComponent.utf8) == Data(configuration.namespace.utf8), UUID(uuidString: installationID)?.uuidString == installationID else { throw SessionError.identityUnavailable }
+    let anchor = try DevelopmentMaterialIO.directory(directory), gate = DevelopmentMaterialGates.shared.gate(anchor)
+    return try gate.lock.withLock {
+      guard try DevelopmentMaterialIO.directory(directory) == anchor else { throw SessionError.identityUnavailable }
+      let identity = directory.appendingPathComponent("device.identity"), expectedIdentity = Data(("football-record.identity.v1:" + installationID).utf8)
+      guard try DevelopmentMaterialIO.read(identity, maximum: 256).0 == expectedIdentity else { throw SessionError.identityUnavailable }
+      let names = ["development.key", "authority.fixture", "development.vault"]
+      let present = try names.map { try DevelopmentMaterialIO.exists(directory.appendingPathComponent($0)) }
+      let pin = Data((configuration.keyID + "\n" + configuration.publicKey + "\n" + configuration.cloudSpaceID + "\n" + configuration.subject).utf8)
+      guard pin.count <= 16384 else { throw SessionError.identityUnavailable }
+      if present.allSatisfy({ !$0 }) {
+        for name in ["matches.sqlite", "matches.sqlite-wal", "matches.sqlite-shm", "matches.sqlite-journal"] {
+          guard try !DevelopmentMaterialIO.exists(directory.appendingPathComponent(name)) else { throw SessionError.identityUnavailable }
+        }
+        try DevelopmentMaterialIO.create(Curve25519.Signing.PrivateKey().rawRepresentation, directory.appendingPathComponent(names[0]))
+        try DevelopmentMaterialIO.create(pin, directory.appendingPathComponent(names[1]))
+        try DevelopmentMaterialIO.create(JSONEncoder().encode(DevelopmentFileVault.State()), directory.appendingPathComponent(names[2]))
+      } else { guard present.allSatisfy({ $0 }) else { throw SessionError.identityUnavailable } }
+      let key = try DevelopmentMaterialIO.read(directory.appendingPathComponent(names[0]), maximum: 32).0
+      guard key.count == 32, try DevelopmentMaterialIO.read(directory.appendingPathComponent(names[1]), maximum: 16384).0 == pin else { throw SessionError.identityUnavailable }
+      let signer = try DevelopmentDeviceSigner(namespace: configuration.namespace, rawRepresentation: key)
+      let binding = try DevelopmentMaterialBinding(directory: directory, anchor: anchor, gate: gate, deviceID: installationID, keyID: AuthorityWire.deviceKeyID(publicKey: signer.publicKey), expected: ["device.identity": expectedIdentity, "development.key": key, "authority.fixture": pin])
+      let vault = try DevelopmentFileVault(url: directory.appendingPathComponent(names[2]), strict: binding)
+      _ = try binding.loadVault()
+      return DevelopmentAuthorityDeviceMaterial(namespace: configuration.namespace, deviceID: installationID, signer: signer, vault: vault)
+    }
+  }
+}
+
+private struct DevelopmentMaterialAnchor: Hashable, Sendable { let device: dev_t; let inode: ino_t }
+private final class DevelopmentMaterialGate: @unchecked Sendable { let lock = NSRecursiveLock() }
+private final class DevelopmentMaterialGates: @unchecked Sendable {
+  static let shared = DevelopmentMaterialGates()
+  private final class Weak { weak var value: DevelopmentMaterialGate?; init(_ value: DevelopmentMaterialGate) { self.value = value } }
+  private let lock = NSLock()
+  private var values: [DevelopmentMaterialAnchor: Weak] = [:]
+  func gate(_ anchor: DevelopmentMaterialAnchor) -> DevelopmentMaterialGate {
+    lock.withLock {
+      values = values.filter { $0.value.value != nil }
+      if let value = values[anchor]?.value { return value }
+      let value = DevelopmentMaterialGate(); values[anchor] = Weak(value); return value
+    }
+  }
+}
+private final class DevelopmentMaterialBinding: Sendable {
+  let directory: URL, anchor: DevelopmentMaterialAnchor, gate: DevelopmentMaterialGate
+  private let deviceID: String, keyID: String
+  private let originals: [String: (Data, DevelopmentMaterialAnchor)]
+  init(directory: URL, anchor: DevelopmentMaterialAnchor, gate: DevelopmentMaterialGate, deviceID: String, keyID: String, expected: [String: Data]) throws {
+    self.directory = directory; self.anchor = anchor; self.gate = gate; self.deviceID = deviceID; self.keyID = keyID
+    var actual: [String: (Data, DevelopmentMaterialAnchor)] = [:]
+    for (name, data) in expected {
+      let read = try DevelopmentMaterialIO.read(directory.appendingPathComponent(name), maximum: name == "authority.fixture" ? 16384 : 256)
+      guard read.0 == data else { throw SessionError.identityUnavailable }; actual[name] = read
+    }
+    self.originals = actual
+  }
+  func loadVault() throws -> DevelopmentFileVault.State {
+    guard try DevelopmentMaterialIO.directory(directory) == anchor else { throw SessionError.identityUnavailable }
+    for (name, original) in originals {
+      let current = try DevelopmentMaterialIO.read(directory.appendingPathComponent(name), maximum: name == "authority.fixture" ? 16384 : 256)
+      guard current.0 == original.0, current.1 == original.1 else { throw SessionError.identityUnavailable }
+    }
+    let raw = try DevelopmentMaterialIO.read(directory.appendingPathComponent("development.vault"), maximum: 65536).0
+    guard let object = try JSONSerialization.jsonObject(with: raw) as? [String: Any], object["generation"] != nil, Set(object.keys).isSubset(of: ["generation", "credential"]) else { throw SessionError.identityUnavailable }
+    if let credential = object["credential"], !(credential is NSNull) {
+      guard let saved = credential as? [String: Any], Set(saved.keys) == ["token", "sessionID", "accountID", "deviceID", "keyID", "activationEpoch", "expiresAt"] else { throw SessionError.identityUnavailable }
+    }
+    let value = try JSONDecoder().decode(DevelopmentFileVault.State.self, from: raw); try validate(value); return value
+  }
+  func validate(_ value: DevelopmentFileVault.State) throws {
+    guard value.generation >= 0, value.generation <= 9_007_199_254_740_991 else { throw SessionError.identityUnavailable }
+    if let c = value.credential {
+      guard Data(c.deviceID.utf8) == Data(deviceID.utf8), Data(c.keyID.utf8) == Data(keyID.utf8), c.activationEpoch > 0, c.activationEpoch <= 9_007_199_254_740_991, c.expiresAt > 0, c.expiresAt <= 9_007_199_254_740_991 else { throw SessionError.identityUnavailable }
+      try AuthorityWire.identifier(c.accountID); try AuthorityWire.identifier(c.sessionID); _ = try AuthorityWire.decodeBase64URL(c.token, count: 32)
+    }
+  }
+  func persist(_ state: DevelopmentFileVault.State) throws {
+    _ = try loadVault(); try validate(state)
+    let bytes = try JSONEncoder().encode(state); guard bytes.count <= 65536 else { throw SessionError.identityUnavailable }
+    let url = directory.appendingPathComponent("development.vault")
+    try privateWrite(bytes, to: url); try DevelopmentMaterialIO.sync(url); try DevelopmentMaterialIO.sync(directory)
+    guard try DevelopmentMaterialIO.read(url, maximum: 65536).0 == bytes else { throw SessionError.identityUnavailable }
+    _ = try loadVault()
+  }
+}
+private enum DevelopmentMaterialIO {
+  static func canonical(_ url: URL) -> URL {
+    let path = url.standardizedFileURL.path
+    if path.hasPrefix("/var/") || path.hasPrefix("/tmp/") { return URL(fileURLWithPath: "/private" + path, isDirectory: true) }
+    return url.standardizedFileURL
+  }
+  static func directory(_ url: URL) throws -> DevelopmentMaterialAnchor {
+    var cursor = url
+    while true {
+      var value = stat(); guard lstat(cursor.path, &value) == 0, value.st_mode & S_IFMT == S_IFDIR else { throw SessionError.identityUnavailable }
+      if cursor.path == url.path {
+        if cursor.path == "/" { return DevelopmentMaterialAnchor(device: value.st_dev, inode: value.st_ino) }
+      }
+      if cursor.path == "/" { break }; cursor.deleteLastPathComponent()
+    }
+    var value = stat(); guard lstat(url.path, &value) == 0 else { throw SessionError.identityUnavailable }
+    return DevelopmentMaterialAnchor(device: value.st_dev, inode: value.st_ino)
+  }
+  static func exists(_ url: URL) throws -> Bool {
+    var value = stat(); if lstat(url.path, &value) == 0 { return true }
+    guard errno == ENOENT else { throw SessionError.identityUnavailable }; return false
+  }
+  static func read(_ url: URL, maximum: Int) throws -> (Data, DevelopmentMaterialAnchor) {
+    var before = stat(); guard lstat(url.path, &before) == 0, before.st_mode & S_IFMT == S_IFREG, before.st_size >= 0, before.st_size <= maximum else { throw SessionError.identityUnavailable }
+    let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); guard fd >= 0 else { throw SessionError.identityUnavailable }; defer { Darwin.close(fd) }
+    var actual = stat(); guard fstat(fd, &actual) == 0, actual.st_dev == before.st_dev, actual.st_ino == before.st_ino else { throw SessionError.identityUnavailable }
+    var bytes = Data(), buffer = [UInt8](repeating: 0, count: min(maximum + 1, 4096))
+    while true {
+      let amount = buffer.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+      guard amount >= 0 else { throw SessionError.identityUnavailable }; if amount == 0 { break }
+      guard bytes.count + amount <= maximum else { throw SessionError.identityUnavailable }; bytes.append(contentsOf: buffer.prefix(amount))
+    }
+    var after = stat(), path = stat()
+    guard fstat(fd, &after) == 0, lstat(url.path, &path) == 0, after.st_dev == before.st_dev, after.st_ino == before.st_ino, path.st_dev == before.st_dev, path.st_ino == before.st_ino, after.st_size == bytes.count, after.st_size == before.st_size, after.st_mtimespec.tv_sec == before.st_mtimespec.tv_sec, after.st_mtimespec.tv_nsec == before.st_mtimespec.tv_nsec else { throw SessionError.identityUnavailable }
+    return (bytes, DevelopmentMaterialAnchor(device: before.st_dev, inode: before.st_ino))
+  }
+  static func create(_ bytes: Data, _ url: URL) throws {
+    let fd = Darwin.open(url.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
+    guard fd >= 0 else { throw SessionError.identityUnavailable }; defer { Darwin.close(fd) }
+    var offset = 0
+    while offset < bytes.count {
+      let amount = bytes.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), $0.count - offset) }
+      guard amount > 0 else { throw SessionError.identityUnavailable }; offset += amount
+    }
+    guard fsync(fd) == 0 else { throw SessionError.identityUnavailable }; try sync(url.deletingLastPathComponent())
+  }
+  static func sync(_ url: URL) throws {
+    let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); guard fd >= 0 else { throw SessionError.identityUnavailable }; defer { Darwin.close(fd) }
+    guard fsync(fd) == 0 else { throw SessionError.identityUnavailable }
   }
 }
 #endif
