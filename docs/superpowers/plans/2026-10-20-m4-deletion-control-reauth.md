@@ -306,3 +306,10 @@ AccountKit跨模块HTTP test沿既有Support找repo root启动真实Node，new S
 保留六Git输入、原红绿/fixture失败、版本、全部runtime Sources/Package/Tests/support/Git mode/blob/hash与每command before/post0，source/final精确SHA、同源scope/links/diffcheck。root+m2 source双PASS后只两卡收尾，产品/测试/plan/合同保持source bytes；final再双审，由root普通merge held026。新数量以实际单轮为准，不填预计数。
 
 本任务为本机控制协议/SQLite+HTTP软件，不执行真实Apple/Keychain/iCloud/CloudKit/Health/WC/用户账号/设备/部署；四SDK只编译。生产provider默认Unavailable不变；026还负责真实SDK装配、原renew/abnormal UI路由、全部owned控制任务join与整体删除验收，不以052单叶通过称M4完成。
+
+
+## 后端 checkpoint 预审约束补充
+
+固定 `18dcd916c2290c421ec0f324a8c2534d9f0f1e04` 是首个 backend slice，未通过整体源码审。原 closing 状态与当前授权分开验证：过期或撤销仍须原 signed authorization、原 requests/auth_records/parent/session 元信息和所有 scope/expiry claims 相符；缺坏不能签新 knownRevoked。原 ready bytes 不覆盖，首次 expired/revoked resolution 用既有 requests 的 `deleteControlResolution` 私有 kind；ID 为 `dcr.` 加固定 `football-record.deletion-control-record.v1` 域的 `["resolution", parentID, parentDigest, authRequestID]` SHA256。该行闭合字段为原 parent envelope + `authRequestID, authRequestDigest, readyDigest, authorization, originalAcquire`，readyDigest 是原 signed ready envelope canonical bytes 的 SHA256，originalAcquire 明确 null。原 wire、旧 receipt domain 与 schema 不变。
+
+每 parent 4MiB 计入全部新控制 payload，含 requests、auth_records 副本、原 session/reauth/challenge 与其索引、专用 parent nonce/absence fence 和 PoP nonce；以每列 UTF8/BLOB 实际字节、INTEGER 8 bytes、NULL 0 bytes 核算，另保留32KiB单 envelope及64/256 challenge+auth计数。它不是 SQLite页/文件大小承诺。所有相关 mutation 仍在原 SQL事务，nonce/副本插入前检查候选总量；非 attempt session/首 closing 不因恰好64个 attempt误拒，但仍计 payload。未知私有 kind/列结构保留拒绝；原普通 nonce 分支机械兼容。旧 challenge_requests 全局ID与原 ordinary absence fence 不可被新 purpose重分类。

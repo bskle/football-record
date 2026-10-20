@@ -1,4 +1,4 @@
-import {createDeletionReauthentication,assertDeletionControlPurpose} from './deletion-reauth.mjs';
+import {createDeletionReauthentication,assertDeletionControlPurpose,assertDeletionControlNonceBudget} from './deletion-reauth.mjs';
 import {isAppleVerifier,isVerifiedApple} from './apple-verifier.mjs';
 import {routes,validatePayload} from './codec.mjs';
 import {createHmac,randomBytes,randomUUID,sign,verify,timingSafeEqual} from 'node:crypto';
@@ -19,7 +19,7 @@ export function createDeviceAuth({authority,appleVerifier}){
  function tokenFor(s){const claims={sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};return createHmac('sha256',config.tokenDerivationKey).update('football-record.session.v1\n'+canonicalJSON(claims)).digest('base64url');}
  function credential(s){return {token:tokenFor(s),sessionID:s.session_id,accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,expiresAt:s.expires_at};}
  function session(ctx){const s={session_id:randomUUID(),account_id:ctx.accountID,device_id:ctx.deviceID,key_id:ctx.keyID,activation_epoch:ctx.activationEpoch,expires_at:config.clock.now()+2592000};db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(s.session_id,s.account_id,s.device_id,s.key_id,s.activation_epoch,s.expires_at,sha256(tokenFor(s)));return s;}
- function consumeNonce(sessionID,nonce){if(db.prepare('SELECT 1 FROM nonces WHERE session_id=? AND nonce=?').get(sessionID,nonce))fail('unauthorized',401);db.prepare('INSERT INTO nonces VALUES(?,?)').run(sessionID,nonce);}
+ function consumeNonce(sessionID,nonce){assertDeletionControlNonceBudget(state,sessionID,nonce);if(db.prepare('SELECT 1 FROM nonces WHERE session_id=? AND nonce=?').get(sessionID,nonce))fail('unauthorized',401);db.prepare('INSERT INTO nonces VALUES(?,?)').run(sessionID,nonce);}
  function challenge(r){validatePayload('challenge',r);return transaction(db,config,()=>{
    try{edPublicKey(r.devicePublicKey);}catch{fail('invalidPayload',422);}
    if(db.prepare("SELECT 1 FROM requests WHERE request_id=? AND operation LIKE 'deleteControl%'").get(r.requestID))fail('idempotencyConflict');
@@ -69,6 +69,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    const publicKey=row?.public_key??r.devicePublicKey;
    if(!publicKey||(r.devicePublicKey!==undefined&&r.devicePublicKey!==publicKey)||sha256(publicKey)!==r.keyID||!Number.isSafeInteger(r.issuedAt)||Math.abs(config.clock.now()-r.issuedAt)>60||!signatureOK(publicKey,'football-record.device.auth-recover.v1',body,r.deviceProof))fail('unauthorized',401);
    if(!row){
+     if(db.prepare("SELECT 1 FROM requests WHERE request_id=? AND operation LIKE 'deleteControl%' AND account_id=(SELECT account_id FROM devices WHERE device_id=?)").get(r.authRequestID,r.deviceID))fail('idempotencyConflict');
      const fenceID=absenceKey(r.authRequestID,r.deviceID,r.keyID),nonceHash=recoveryHash('football-record.auth-recovery-nonce.v1',[fenceID,r.nonce]);
      if(db.prepare('SELECT 1 FROM auth_recovery_nonces WHERE fence_id=? AND nonce_hash=?').get(fenceID,nonceHash))fail('unauthorized',401);
      db.prepare('INSERT INTO auth_recovery_nonces VALUES(?,?)').run(fenceID,nonceHash);
