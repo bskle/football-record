@@ -40,12 +40,17 @@ extension SQLiteCloudLedger: CloudLocalTransportErasing {
     public func eraseLocalTransport(_ request: CloudLocalTransportEraseRequest) throws -> CloudLocalTransportEraseReceipt {
         let digest = try request.digest, stable = request.scope.stableZoneKey
         return try transaction {
+            try validateLocalErasureLayout(sql)
             // Replay first: a lost COMMIT response never turns into a new operation.
             if let row = try sql.rows("SELECT request_digest,stable_zone FROM cloud_local_erase_receipts WHERE request_id=?", [.text(request.requestID)]).first {
                 guard let oldDigest = row[0].string, let oldStable = row[1].string else { throw CloudError(.invalidPayload) }
                 let receipt = try CloudLocalTransportEraseReceipt(requestID: request.requestID, requestDigest: oldDigest, stableZoneKey: oldStable)
                 guard oldDigest == digest, oldStable == stable else { throw CloudError(.identityConflict) }
                 guard try locallyErased(request.scope) else { throw CloudError(.invalidPayload) }
+                let current = try validateErasureCanonicalRows(sql, version: 4)
+                guard !current.contains(where: { $0.stableZoneKey == stable }) else {
+                    throw CloudError(.invalidPayload)
+                }
                 return receipt
             }
             let scopes = try validateErasureCanonicalRows(sql, version: 4)
@@ -60,6 +65,29 @@ extension SQLiteCloudLedger: CloudLocalTransportErasing {
             try sql.execute("INSERT INTO cloud_local_erase_receipts(request_id,request_digest,stable_zone) VALUES(?,?,?)", [.text(request.requestID),.text(digest),.text(stable)])
             return try CloudLocalTransportEraseReceipt(requestID: request.requestID, requestDigest: digest, stableZoneKey: stable)
         }
+    }
+}
+
+// Exact schema emitted by the ledger's v1-v4 migrations. Erasure never interprets,
+// repairs or migrates an unknown layout, including on an already-open connection.
+private func validateLocalErasureLayout(_ sql: CloudSQL) throws {
+    guard try sql.rows("PRAGMA user_version").first?.first?.number == 4 else { throw CloudError(.unsupportedSchema) }
+    let layout = [
+        ("cloud_uploads", "CREATE TABLE cloud_uploads(id TEXT PRIMARY KEY, scope TEXT NOT NULL, digest TEXT NOT NULL, original BLOB NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL, issue TEXT, retry_ms INTEGER, attempted_ms INTEGER) STRICT"),
+        ("cloud_batches", "CREATE TABLE cloud_batches(scope TEXT NOT NULL,id TEXT NOT NULL,digest TEXT NOT NULL,original BLOB NOT NULL,state TEXT NOT NULL,attempts INTEGER NOT NULL,issue TEXT,retry_ms INTEGER,attempted_ms INTEGER,ack BLOB,PRIMARY KEY(scope,id)) STRICT"),
+        ("cloud_scope_state", "CREATE TABLE cloud_scope_state(scope TEXT PRIMARY KEY,issue TEXT,attempts INTEGER NOT NULL,retry_ms INTEGER,attempted_ms INTEGER) STRICT"),
+        ("cloud_conflicts", "CREATE TABLE cloud_conflicts(scope TEXT NOT NULL,upload_id TEXT NOT NULL,remote_digest TEXT NOT NULL,change_tag TEXT NOT NULL,original BLOB NOT NULL,PRIMARY KEY(scope,upload_id,remote_digest,change_tag)) STRICT"),
+        ("cloud_save_evidence", "CREATE TABLE cloud_save_evidence(scope TEXT NOT NULL,upload_id TEXT NOT NULL,digest TEXT NOT NULL,original BLOB NOT NULL,PRIMARY KEY(scope,upload_id)) STRICT"),
+        ("cloud_local_erase_fences", "CREATE TABLE cloud_local_erase_fences(stable_zone TEXT PRIMARY KEY) STRICT"),
+        ("cloud_local_erase_receipts", "CREATE TABLE cloud_local_erase_receipts(request_id TEXT PRIMARY KEY,request_digest TEXT NOT NULL,stable_zone TEXT NOT NULL) STRICT")
+    ]
+    let objects = try sql.rows("SELECT type,name,tbl_name,sql FROM sqlite_schema")
+    guard objects.count == layout.count * 2 else { throw CloudError(.invalidPayload) }
+    for (name, definition) in layout {
+        guard let table = objects.first(where: { $0[1].string == name }),
+              table[0].string == "table", table[2].string == name, table[3].string == definition,
+              let index = objects.first(where: { $0[1].string == "sqlite_autoindex_" + name + "_1" }),
+              index[0].string == "index", index[2].string == name, case .null = index[3] else { throw CloudError(.invalidPayload) }
     }
 }
 
