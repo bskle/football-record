@@ -164,8 +164,15 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     let session = session, recording = context.recording, observations = Array(identityTasks.values)
     observations.forEach { $0.cancel() }
     let task = Task {
+      // Establish the original Session's permanent business gate before any
+      // cancellation-insensitive identity observer can delay this drain.
+      let retirement: Result<Void, any Error>
+      do { try await Self.retireBusiness(session: session, recording: recording); retirement = .success(()) }
+      catch { retirement = .failure(error) }
+      // A failed durable retirement still joins every cancelled identity task;
+      // preserve the original failure and facade for the owner's SQL-only retry.
       for observation in observations { _ = await observation.result }
-      try await Self.retireBusiness(session: session, recording: recording)
+      try retirement.get()
     }
     quiescing = task
     do { try await task.value; quiesced = true; quiescing = nil }

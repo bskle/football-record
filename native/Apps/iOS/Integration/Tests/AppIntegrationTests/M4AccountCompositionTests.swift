@@ -161,6 +161,35 @@ extension M4AccountCompositionTests {
     XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
     try await c.close()
   }
+  func testHeldIdentityCannotDelayOriginalSessionGateOrDispatchPreparedPermit() async throws {
+    let (prepared, trust) = try await identityFixture("m4-held-identity-business-gate")
+    let observer = CompositionIdentityFixture(suspend: true), relay = CompositionCountingRelay()
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer, authorityRelay: relay)
+    try await c.repository.bindAccountV4(binding(prepared))
+    let originalID = await c.repository.syncRepositoryIdentity(), request = try await c.session.prepareStart(starter: true)
+    let admission = Task { try await c.admitCurrentIdentity() }; await observer.waitForEntry()
+    var done = false
+    let retiring = Task { try await c.quiesceBusiness(); done = true }
+    // Observe the real original Session's typed gate while the observer remains
+    // held. A bounded state observation is not a scheduling/yield-count signal.
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    var retired = false
+    while ContinuousClock.now < deadline {
+      do { _ = try await c.session.prepareStart(starter: false) }
+      catch { if error as? SessionError == .retired { retired = true; break } }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    XCTAssertTrue(retired, "an uncooperative identity observer cannot delay the original Session gate")
+    XCTAssertFalse(done, "gate establishment does not substitute for joining the held identity task")
+    do { _ = try await c.session.execute(request); XCTFail("a pre-quiescence request cannot dispatch its first permit after retirement") }
+    catch { XCTAssertEqual(error as? SessionError, .retired) }
+    let calls = await relay.calls; XCTAssertEqual(calls, 0, "no first Authority permit HTTP may escape while identity is being joined")
+    await observer.release(); _ = await admission.result; try await retiring.value
+    let repositoryID = await c.repository.syncRepositoryIdentity(), sessionID = await c.session.syncRepositoryIdentity()
+    XCTAssertEqual(repositoryID, originalID); XCTAssertEqual(sessionID, originalID)
+    XCTAssertNil(c.admittedScope); XCTAssertFalse(c.context.account.canEnterRecording)
+    try await c.close()
+  }
   func testPublicContextShutdownJoinsOriginalHeldCaptureBeforeClosingFacade() async throws {
     let (prepared, trust) = try await identityFixture("m4-public-close-capture"), gateway = CompositionSuspendedGateway()
     let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", workout: gateway)
@@ -256,3 +285,10 @@ private struct CompositionUnavailableRelay: AuthorityHTTPRelay {
 }
 
 private enum CompositionCloseProbe: Error { case factoryReached }
+
+private actor CompositionCountingRelay: AuthorityHTTPRelay {
+  private(set) var calls = 0
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    calls += 1; throw AuthorityError.unavailable
+  }
+}
