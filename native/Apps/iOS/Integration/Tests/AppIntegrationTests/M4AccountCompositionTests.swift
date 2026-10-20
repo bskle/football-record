@@ -367,3 +367,215 @@ private actor CompositionHeldPermitRelay: AuthorityHTTPRelay {
   func waitForEntry() async { if entered { return }; await withCheckedContinuation { waiter = $0 } }
   func release() { held?.resume(); held = nil }
 }
+
+extension M4AccountCompositionTests {
+  func testInitialAccountRecoveryUsesFreshIdentityAndOriginalSignedService() async throws {
+    let f = try await serviceFixture()
+    let original = await f.composition.repository.syncRepositoryIdentity()
+    await f.composition.context.account.perform(.recover)
+    let binding = try await f.composition.repository.accountBindingV4(), credential = try? await f.vault.credential()
+    let reads = await f.observer.reads, calls = await f.relay.calls
+    XCTAssertEqual(binding?.accountID, "account-fixture"); XCTAssertEqual(credential?.accountID, "account-fixture")
+    XCTAssertGreaterThanOrEqual(reads, 2, "initial service admission and final presentation each need a new independent observation")
+    XCTAssertEqual(calls, 1); XCTAssertTrue(f.composition.context.account.canEnterRecording)
+    let after = await f.composition.repository.syncRepositoryIdentity(), session = await f.composition.session.syncRepositoryIdentity()
+    XCTAssertEqual(after, original); XCTAssertEqual(session, original)
+    try await f.composition.close()
+  }
+  func testMismatchingFreshIdentityRejectsInitialRecoveryBeforeHTTP() async throws {
+    let f = try await serviceFixture(); await f.observer.setCloud("foreign-cloud")
+    let before = try await f.composition.repository.authAttemptV4(requestID: f.attempt.requestID)
+    await f.composition.context.account.perform(.recover)
+    let calls = await f.relay.calls, reads = await f.observer.reads
+    let binding = try await f.composition.repository.accountBindingV4(), after = try await f.composition.repository.authAttemptV4(requestID: f.attempt.requestID)
+    XCTAssertEqual(calls, 0); XCTAssertEqual(reads, 1); XCTAssertNil(binding); XCTAssertEqual(before, after)
+    XCTAssertFalse(f.composition.context.account.canEnterRecording)
+    try await f.composition.close()
+  }
+  func testQuiesceJoinsOriginalAuthenticationVaultTailBeforeReturning() async throws {
+    let f = try await serviceFixture(holdVault: true), c = f.composition
+    let action = Task { await c.context.account.perform(.recover) }
+    guard await waitForVault(f.vault) else {
+      XCTFail("original AccountService must reach its real vault.replace after verified receipt and original SQL")
+      await action.value; try await c.close(); return
+    }
+    let committed = try await c.repository.accountBindingV4(); XCTAssertEqual(committed?.accountID, "account-fixture")
+    var quiesced = false
+    let drain = Task { try await c.quiesceBusiness(); quiesced = true }
+    let retired = await waitForOriginalRetirement(c.session); XCTAssertTrue(retired)
+    let deadline = ContinuousClock.now.advanced(by: .milliseconds(100))
+    while !quiesced, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    XCTAssertFalse(quiesced, "Session SQL drain alone must not release the still-held original vault write")
+    await f.vault.release(); await action.value; try await drain.value
+    let retained = try await c.repository.accountBindingV4(), credential = try await f.vault.credential()
+    XCTAssertEqual(retained, committed); XCTAssertEqual(credential.accountID, "account-fixture")
+    XCTAssertFalse(c.context.account.canEnterRecording)
+    let before = await f.relay.calls; await c.context.account.perform(.renew); let after = await f.relay.calls; XCTAssertEqual(after, before)
+    try await c.close()
+    let reopened = try SQLiteSessionRepository(rootDirectory: f.prepared.seed.root, databaseNamespace: f.prepared.seed.namespace, authorityTrust: f.trust)
+    let original = try await reopened.accountBindingV4(); XCTAssertEqual(original, committed); try await reopened.close()
+  }
+  func testFinalCloseJoinsOriginalAuthenticationVaultTailAndPublicVoidCallback() async throws {
+    let f = try await serviceFixture(holdVault: true), c = f.composition
+    let action = Task { await c.context.account.perform(.recover) }
+    guard await waitForVault(f.vault) else {
+      XCTFail("original service did not reach its verified credential tail")
+      await action.value; try await c.close(); return
+    }
+    let committed = try await c.repository.accountBindingV4()
+    var publicDone = false, closeDone = false
+    let publicClose = Task { await c.context.shutdown(); publicDone = true }
+    let close = Task { try await c.close(); closeDone = true }
+    let retired = await waitForOriginalRetirement(c.session); XCTAssertTrue(retired)
+    let deadline = ContinuousClock.now.advanced(by: .milliseconds(100))
+    while !closeDone, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    XCTAssertFalse(closeDone); XCTAssertFalse(publicDone)
+    let heldOriginal = try? await c.repository.accountBindingV4()
+    XCTAssertEqual(heldOriginal, committed, "original DB must remain open until the complete original service returns")
+    await f.vault.release(); await action.value; try await close.value; await publicClose.value
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.lastCloseFailure)
+    let reopened = try SQLiteSessionRepository(rootDirectory: f.prepared.seed.root, databaseNamespace: f.prepared.seed.namespace, authorityTrust: f.trust)
+    let retained = try await reopened.accountBindingV4(); XCTAssertEqual(retained, committed); try await reopened.close()
+  }
+  func testChangedPostServiceIdentityCannotAdmitInitialRecovery() async throws {
+    let f = try await serviceFixture(holdVault: true)
+    let action = Task { await f.composition.context.account.perform(.recover) }
+    guard await waitForVault(f.vault) else {
+      XCTFail("original service did not reach the real credential tail")
+      await action.value; try await f.composition.close(); return
+    }
+    await f.observer.setCloud("foreign-cloud"); await f.vault.release(); await action.value
+    let binding = try await f.composition.repository.accountBindingV4(), reads = await f.observer.reads
+    XCTAssertEqual(binding?.accountID, "account-fixture", "verified original positive SQL remains retained")
+    XCTAssertGreaterThanOrEqual(reads, 2); XCTAssertFalse(f.composition.context.account.canEnterRecording)
+    try await f.composition.close()
+  }
+  func testReadyAccountRenewalMismatchImmediatelyDropsPriorAdmission() async throws {
+    let f = try await serviceFixture(); await f.composition.context.account.perform(.recover)
+    XCTAssertTrue(f.composition.context.account.canEnterRecording)
+    let original = try await f.composition.repository.accountBindingV4()
+    await f.observer.setCloud("foreign-cloud"); await f.composition.context.account.perform(.renew)
+    let calls = await f.relay.calls, retained = try await f.composition.repository.accountBindingV4()
+    XCTAssertEqual(calls, 1); XCTAssertEqual(retained, original)
+    XCTAssertFalse(f.composition.context.account.canEnterRecording, "a failed new current observation must remove the prior UI admission")
+    try await f.composition.close()
+  }
+  func testOwnedPhoneAuthorizerUsesFreshIdentityAndRejectsAfterRetirement() async throws {
+    let f = try await serviceFixture(), c = f.composition
+    await c.context.account.perform(.recover)
+    let endpoint = M4PhoneWatchRegistrationEndpoint(authorizer: c.phoneAuthorizer), id = UUID()
+    guard case .context(let replyID, let original) = try await endpoint.handle(.context(id)) else { return XCTFail("original context reply required") }
+    XCTAssertEqual(replyID, id); XCTAssertEqual(original.phoneID, f.prepared.seed.installationID)
+    XCTAssertEqual(original.accountID, "account-fixture"); XCTAssertEqual(original.cloudSpaceID, "cloud-fixture")
+    await f.observer.setCloud("foreign-cloud")
+    do { _ = try await endpoint.handle(.context(UUID())); XCTFail("Phone may not authorize from a retained credential/config") }
+    catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    await f.observer.setCloud("cloud-fixture"); try await c.quiesceBusiness()
+    do { _ = try await endpoint.handle(.context(UUID())); XCTFail("original Phone entry remains permanently stopped") }
+    catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    await endpoint.close(); try await c.close()
+  }
+  func testQuiesceJoinsCompleteOriginalPhoneAuthorizationCall() async throws {
+    let f = try await serviceFixture(), c = f.composition
+    await c.context.account.perform(.recover)
+    let context = try await c.phoneAuthorizer.registrationContext(), key = Curve25519.Signing.PrivateKey()
+    let hash = AuthorityWire.hash(Data("original-phone-challenge".utf8)), publicKey = AuthorityWire.base64URL(key.publicKey.rawRepresentation)
+    let body: [String: Any] = ["version": 1, "requestID": "phone-held-watch", "watchID": "watch-service", "watchPublicKey": publicKey, "challengeID": "phone-held-challenge", "challengeSHA256": hash]
+    let proof = try key.signature(for: AuthorityWire.signedInput("football-record.device.challenge.v1", body: JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])))
+    let attempt = try WatchRegistrationAttemptV4(context: context, payload: WatchRegistrationPayloadV4(requestID: "phone-held-watch", watchID: "watch-service", watchPublicKey: publicKey, challengeID: "phone-held-challenge", deviceProof: AuthorityWire.base64URL(proof)), challengeRequestID: "phone-held-challenge-request", challengeSHA256: hash)
+    let endpoint = M4PhoneWatchRegistrationEndpoint(authorizer: c.phoneAuthorizer)
+    let call = Task { try await endpoint.handle(.authorize(UUID(), attempt, .submit)) }
+    let until = ContinuousClock.now.advanced(by: .seconds(2)); var entered = false
+    while ContinuousClock.now < until { if await f.relay.phoneEntered { entered = true; break }; try await Task.sleep(for: .milliseconds(2)) }
+    guard entered else { XCTFail("original Phone service must reach its real signed HTTP request"); _ = await call.result; await endpoint.close(); try await c.close(); return }
+    let persisted = try await c.repository.watchRegistrationAttemptV4(requestID: attempt.requestID); XCTAssertEqual(persisted, attempt)
+    var done = false; let drain = Task { try await c.quiesceBusiness(); done = true }
+    let retired = await waitForOriginalRetirement(c.session); XCTAssertTrue(retired)
+    let deadline = ContinuousClock.now.advanced(by: .milliseconds(100))
+    while !done, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    XCTAssertFalse(done, "Phone service may still publish/accept after its SQL attempt has already returned")
+    let retained = try? await c.repository.watchRegistrationAttemptV4(requestID: attempt.requestID); XCTAssertEqual(retained, attempt)
+    await f.relay.releasePhone()
+    do { _ = try await call.value; XCTFail("controlled original HTTP refusal must remain an error") } catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+    try await drain.value; await endpoint.close()
+    let receipt = try await c.repository.watchRegistrationReceiptV4(requestID: attempt.requestID); XCTAssertNil(receipt)
+    try await c.close()
+  }
+  private func waitForVault(_ vault: CompositionServiceVault) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while ContinuousClock.now < deadline { if await vault.entered { return true }; try? await Task.sleep(for: .milliseconds(2)) }
+    return false
+  }
+  private func waitForOriginalRetirement(_ session: MatchSession) async -> Bool {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while ContinuousClock.now < deadline {
+      do { _ = try await session.prepareStart(starter: true) }
+      catch SessionError.retired { return true } catch {}
+      try? await Task.sleep(for: .milliseconds(2))
+    }
+    return false
+  }
+  private struct ServiceFixture {
+    let composition: M4AccountComposition
+    let prepared: M4PreparedIdentity
+    let trust: AuthorityTrustConfiguration
+    let observer: CompositionIdentityFixture
+    let vault: CompositionServiceVault
+    let relay: CompositionAuthenticationRelay
+    let attempt: AuthAttemptV4
+  }
+  private func serviceFixture(holdVault: Bool = false) async throws -> ServiceFixture {
+    let root = location(), key = Curve25519.Signing.PrivateKey(), vault = CompositionServiceVault(hold: holdVault), observer = CompositionIdentityFixture()
+    let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["service-key": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
+    let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: "m4-service-owner", controlDirectory: root.appendingPathComponent("retained")) { _ in
+      M4IdentityMaterial(signer: try DevelopmentDeviceSigner(namespace: "m4-service-owner", rawRepresentation: Data(repeating: 31, count: 32)), vault: vault)
+    }
+    let attempt = try AuthAttemptV4(requestID: "original-auth", deviceID: prepared.seed.installationID, publicKey: prepared.material.signer.publicKey, cloudSpaceID: "cloud-fixture", challengeID: "original-challenge", requestDigest: String(repeating: "a", count: 64), environment: .development)
+    let relay = CompositionAuthenticationRelay(key: key, attempt: attempt)
+    let composition = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer, authorityRelay: relay)
+    try await composition.session.saveAuthAttempt(attempt, expectedIdentityGeneration: 0)
+    return ServiceFixture(composition: composition, prepared: prepared, trust: trust, observer: observer, vault: vault, relay: relay, attempt: attempt)
+  }
+}
+
+private actor CompositionServiceVault: DeviceCredentialVault {
+  private let original = MemoryDeviceCredentialVault()
+  private let hold: Bool
+  private var held: CheckedContinuation<Void, Never>?
+  private(set) var entered = false
+  init(hold: Bool) { self.hold = hold }
+  func credential() async throws -> DeviceCredential { try await original.credential() }
+  func advanceIdentityFence(to generation: Int64) async throws { try await original.advanceIdentityFence(to: generation) }
+  func replace(_ credential: DeviceCredential?, expectedIdentityGeneration: Int64) async throws {
+    entered = true
+    if hold { await withCheckedContinuation { held = $0 } }
+    try await original.replace(credential, expectedIdentityGeneration: expectedIdentityGeneration)
+  }
+  func release() { held?.resume(); held = nil }
+}
+private actor CompositionAuthenticationRelay: AuthorityHTTPRelay {
+  private let key: Curve25519.Signing.PrivateKey
+  private let attempt: AuthAttemptV4
+  private(set) var calls = 0
+  private(set) var phoneEntered = false
+  private var heldPhone: CheckedContinuation<Void, Never>?
+  func releasePhone() { heldPhone?.resume(); heldPhone = nil }
+  init(key: Curve25519.Signing.PrivateKey, attempt: AuthAttemptV4) { self.key = key; self.attempt = attempt }
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    calls += 1
+    if request.path == "/v1/devices/watches" {
+      guard request.authorization != nil, request.deviceProof != nil else { throw AuthorityError.invalidWire }
+      phoneEntered = true
+      await withCheckedContinuation { heldPhone = $0 }
+      throw AuthorityError.unavailable
+    }
+    guard request.path == "/v1/auth/recover", let value = try JSONSerialization.jsonObject(with: request.body) as? [String: Any],
+          value["authRequestID"] as? String == attempt.requestID else { throw AuthorityError.invalidWire }
+    let body: [String: Any] = ["version": 1, "environment": "development", "keyID": "service-key", "receiptID": "original-auth-receipt", "requestID": attempt.requestID, "requestDigest": attempt.requestDigest, "operation": "authApple", "accountID": "account-fixture", "activationEpoch": 1, "matchID": "", "lockID": "", "recordingDeviceID": "", "result": "registered", "issuedAt": Int64(Date().timeIntervalSince1970)]
+    let raw = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+    let receipt: [String: Any] = ["body": body, "signature": AuthorityWire.base64URL(try key.signature(for: AuthorityWire.signedInput("football-record.authority.receipt.v1", body: raw)))]
+    let expires = Int64(Date().timeIntervalSince1970) + 3600
+    let response: [String: Any] = ["receipt": receipt, "sessionClaims": ["sessionID": "original-service-session", "expiresAt": expires], "credential": ["token": AuthorityWire.base64URL(Data(repeating: 11, count: 32)), "sessionID": "original-service-session", "accountID": "account-fixture", "deviceID": attempt.deviceID, "keyID": attempt.keyID, "activationEpoch": 1, "expiresAt": expires], "context": ["accountID": "account-fixture", "deviceID": attempt.deviceID, "keyID": attempt.keyID, "activationEpoch": 1], "reauthenticationID": "original-service-reauth"]
+    return AuthorityHTTPResponse(status: 200, body: try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes]))
+  }
+}
