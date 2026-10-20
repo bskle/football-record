@@ -1,6 +1,21 @@
 import Foundation
 struct StoredLifecycleControlV4:Codable {let intent:ControlIntentV1;let accountID:String;let epoch:Int64;let raw:Data}
 struct StoredAnalyticsV4:Codable {var enabled=false;var pending:[AnalyticsEventV4]=[];var acknowledged:[AnalyticsEventV4]=[]}
+public enum LocalBusinessErasureErrorV4: Error, Sendable, Equatable {
+    case residualBusiness(table: String)
+    case corruptControl
+}
+/// The same inventory is used by the mutating erasure and its read-only current-zero check.
+private let localBusinessTablesV4 = ["matches","events","commands","outbox","inbound","diagnostics","completion","capture_identities","capture_revisions","capture_operations","capture_operation_history","business_outbox","commands_v2","completion_confirmations","completion_v2","sync_delivery_v3","sync_fragments_v3","sync_context_v3","sync_registry_v3","sync_routes_v3","sync_sequences_v3","sync_inbox_v3","sync_acknowledgements_v3","sync_ack_controls_v3","sync_receive_progress_v3","cloud_applied_batches_v4","cloud_checkpoints_v4","cloud_records_v4","cloud_history_v4","cloud_cursors_v4","cloud_deletions_v4","peer_contexts_v4","peer_inbox_v4","peer_grants_v4"]
+private let localBusinessWitnessPredicateV4 = "id LIKE 'normal-intent:%' OR id LIKE 'migration-checkpoint:%'"
+/// Evidence for one successful SQL snapshot, not a durable completion receipt.
+public struct LocalBusinessErasureWitnessV4: Sendable {
+    public let requestID: String
+    public let requestDigest: String
+    public let originalScope: CloudScopeV1
+    public let currentSagaRevision: Int64
+    public let backendReceiptDigest: String
+}
 extension MatchStore {
     func readLifecycleV4<T:Codable>(_ type:T.Type,_ key:String)throws->T? {
         guard let row=try db.rows("SELECT payload,checksum FROM lifecycle_steps_v4 WHERE id=?",[.text(key)]).first else {return nil}
@@ -122,9 +137,10 @@ extension MatchStore {
             guard var saga=try deletionSagaV4(requestID:requestID),saga.revision==expectedRevision,saga.backendDeleted,saga.backendReceipt != nil,saga.localChoice == .delete,expectedRevision<Int64.max else {throw AuthorityError.intentMismatch}
             try validateDeletionScopeLockedV4(saga)
             for id in try matchIDs() {if let descriptor=try descriptorAndGeneration(id)?.0 {guard try loadOperations(matchID:id,descriptor:descriptor).allSatisfy({$0.state != .pending && $0.state != .needsReconciliation}) else {throw AuthorityError.unavailable}}}
-            let tables=["matches","events","commands","outbox","inbound","diagnostics","completion","capture_identities","capture_revisions","capture_operations","capture_operation_history","business_outbox","commands_v2","completion_confirmations","completion_v2","sync_delivery_v3","sync_fragments_v3","sync_context_v3","sync_registry_v3","sync_routes_v3","sync_sequences_v3","sync_inbox_v3","sync_acknowledgements_v3","sync_ack_controls_v3","sync_receive_progress_v3","cloud_applied_batches_v4","cloud_checkpoints_v4","cloud_records_v4","cloud_history_v4","cloud_cursors_v4","cloud_deletions_v4","peer_contexts_v4","peer_inbox_v4","peer_grants_v4"]
-            for table in tables {try db.execute("DELETE FROM "+table)}
-            try db.execute("DELETE FROM lifecycle_steps_v4 WHERE id LIKE 'normal-intent:%' OR id LIKE 'migration-checkpoint:%'")
+            try db.validateLocalErasureLayoutV4()
+            for table in localBusinessTablesV4 { try db.execute("DELETE FROM "+table) }
+            try db.execute("DELETE FROM lifecycle_steps_v4 WHERE "+localBusinessWitnessPredicateV4)
+            try assertLocalBusinessZeroLockedV4()
             saga.localProgress = .completed;saga.revision += 1
             try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+requestID);try fail(.beforeCommit);return saga
         };if fault == .afterCommit {throw StoreError.responseLost};return result
@@ -182,4 +198,45 @@ extension MatchStore {
         let proof=try VerifiedAccountCheckpointV4.verifyReadback(input,policy:cloudSavePolicy);try validateAccountCheckpointV4(migrationID:migrationID,proof:proof);return proof
     }
 
+}
+
+extension MatchStore {
+    private func assertLocalBusinessZeroLockedV4() throws {
+        for table in localBusinessTablesV4 {
+            // Count existence, never decode residual facts into an apparent empty result.
+            guard try db.rows("SELECT 1 FROM "+table+" LIMIT 1").isEmpty else {
+                throw LocalBusinessErasureErrorV4.residualBusiness(table: table)
+            }
+        }
+        guard try db.rows("SELECT 1 FROM lifecycle_steps_v4 WHERE "+localBusinessWitnessPredicateV4+" LIMIT 1").isEmpty else {
+            throw LocalBusinessErasureErrorV4.residualBusiness(table: "lifecycle_steps_v4")
+        }
+    }
+    /// Read on the original facade after writers have drained. The witness is not cached authority.
+    public func validateLocalBusinessErasedV4(requestID: String, requestDigest: String, scope: CloudScopeV1) throws -> LocalBusinessErasureWitnessV4 {
+        do { return try db.transaction {
+            try db.validateLocalErasureLayoutV4()
+            guard let saga = try deletionSagaV4(requestID: requestID), let original = saga.originalScope,
+                  let receipt = saga.backendReceipt, let trust = authorityTrust,
+                  saga.intent.requestID.utf8.elementsEqual(requestID.utf8), saga.intent.digest.utf8.elementsEqual(requestDigest.utf8),
+                  original == scope, saga.backendDeleted, saga.localChoice == .delete, saga.localProgress == .completed,
+                  saga.revision >= 2 else { throw AuthorityError.intentMismatch }
+            // Codable's synthesized Saga initializer does not re-run these original invariants.
+            _ = try DeletionSagaV4(intent: saga.intent, accountID: saga.accountID, activationEpoch: saga.activationEpoch,
+                recoveryCapability: saga.recoveryCapability, cloudChoice: saga.cloudChoice, localChoice: saga.localChoice,
+                healthChoice: saga.healthChoice, healthConfirmed: saga.healthConfirmed, originalScope: original)
+            try validateDeletionScopeLockedV4(saga)
+            guard let control = try controlV4(requestID), try Canonical.data(control) == Canonical.data(saga.intent),
+                  try db.scalar("SELECT match_id FROM control_intents_v4 WHERE id=?", [.text(requestID)]).string == "" else { throw AuthorityError.intentMismatch }
+            let verified = try VerifiedAuthorityReceiptV1.verify(receipt,
+                expected: AuthorityExpectedIntent(saga.intent, accountID: saga.accountID, epoch: saga.activationEpoch), trust: trust)
+            guard verified.body.result == .deleted, verified.body.deletion?.backend == "backendDeleted",
+                  verified.body.deletion?.apple == "revoked" else { throw AuthorityError.intentMismatch }
+            try assertLocalBusinessZeroLockedV4()
+            return LocalBusinessErasureWitnessV4(requestID: saga.intent.requestID, requestDigest: saga.intent.digest,
+                originalScope: original, currentSagaRevision: saga.revision, backendReceiptDigest: AuthorityWire.hash(receipt))
+        } } catch is DecodingError {
+            throw LocalBusinessErasureErrorV4.corruptControl
+        }
+    }
 }
