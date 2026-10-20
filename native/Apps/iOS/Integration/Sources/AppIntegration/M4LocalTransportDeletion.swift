@@ -14,9 +14,10 @@ enum M4LocalErasureError: Error, Equatable {
 struct M4LocalTransportLeaves: Sendable {
   let catalog: M4OwnedDataCatalog
   let stagingControls: [String: URL]
+  let storeRoutes: [String: M4AccountComposition]
   let deviceDriver: any DeviceSyncErasureDriving
-  init(catalog: M4OwnedDataCatalog, stagingControls: [String: URL] = [:], deviceDriver: any DeviceSyncErasureDriving = UnavailableDeviceSyncErasureDriver()) {
-    self.catalog = catalog; self.stagingControls = stagingControls; self.deviceDriver = deviceDriver
+  init(catalog: M4OwnedDataCatalog, stagingControls: [String: URL] = [:], deviceDriver: any DeviceSyncErasureDriving = UnavailableDeviceSyncErasureDriver(), storeRoutes: [String: M4AccountComposition] = [:]) {
+    self.catalog = catalog; self.stagingControls = stagingControls; self.deviceDriver = deviceDriver; self.storeRoutes = storeRoutes
   }
   func erase(componentID: String, parentID: String, parentIntentDigest: String) async throws -> M4RetainedLeafReceipt {
     let (plan, capsule, child) = try admitted(componentID, parentID, parentIntentDigest)
@@ -50,10 +51,21 @@ struct M4LocalTransportLeaves: Sendable {
       let request = try DeviceSyncLocalEraseRequest(binding: capsule.deviceBinding(), requestID: parentID, requestDigest: parentIntentDigest)
       guard case .completed(let receipt) = try await DeviceSyncErasureService(context: context, driver: deviceDriver).erase(request) else { throw M4LocalErasureError.pendingTransfer }
       payload = try M4CatalogIO.encode(receipt); digest = receipt.intentDigest
-    case .cloudLedger, .businessStore:
-      // No cached-receipt fallback. Store proof and the 033 all-epoch current-zero
-      // boundary are supplied only by their concrete aggregate implementation.
-      throw M4LocalErasureError.unsupportedComponent
+    case .cloudLedger:
+      guard !capsule.root.directory else { throw M4LocalErasureError.intentMismatch }
+      let ledger = try SQLiteCloudLedger(url: URL(fileURLWithPath: capsule.root.path))
+      do {
+        try capsule.verifyCurrent()
+        // Always invoke the concrete leaf, including cached receipt replay. Its
+        // current all-epoch canonical inventory is the authority for this read.
+        let receipt = try await ledger.eraseLocalTransport(CloudLocalTransportEraseRequest(requestID: child.requestID, scope: capsule.scope))
+        payload = try M4CatalogIO.encode(receipt); digest = receipt.requestDigest
+        try await ledger.close()
+      } catch { try? await ledger.close(); throw error }
+    case .businessStore:
+      guard let original = storeRoutes[componentID] else { throw M4LocalErasureError.unsupportedComponent }
+      let proof = try await original.localStoreEvidence(capsule: capsule, parentID: parentID, parentIntentDigest: parentIntentDigest, scope: plan.scope)
+      payload = try M4CatalogIO.encode(proof); digest = M4CatalogIO.hash(payload)
     }
     _ = try admitted(componentID, parentID, parentIntentDigest)
     let receipt = try M4RetainedLeafReceipt.capture(plan: plan, componentID: componentID, leafDigest: digest, canonicalReceipt: payload)

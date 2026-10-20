@@ -68,6 +68,92 @@ import HealthKitDeletion
     XCTAssertEqual(try Data(contentsOf: restored), bytes)
     XCTAssertEqual(try M4CatalogIO.encode(catalog.receipts(requestID: plan.requestID)), try M4CatalogIO.encode([first])); try catalog.close()
   }
+  func testConcreteCloudLeafReopenReplaysOriginalReceiptAndRejectsRestoredOldEpoch() async throws {
+    let root = try root(), directory = root.appendingPathComponent("catalog"), catalog = try M4OwnedDataCatalog(directory: directory)
+    let url = root.appendingPathComponent("ledger.sqlite"), ledger = try SQLiteCloudLedger(url: url)
+    let oldScope = try CloudScope(accountID: "account", cloudSpaceID: "cloud", zoneID: "zone", activationEpoch: 1)
+    let foreign = try CloudScope(accountID: "other", cloudSpaceID: "cloud", zoneID: "zone", activationEpoch: 2)
+    for (scope, id) in [(oldScope, "old-epoch-upload"), (foreign, "foreign-upload")] {
+      let record = try CloudRecord(scope: scope, payload: .deletion(CloudDeletion(matchID: id, deletionID: id, deletedAt: Date(timeIntervalSince1970: 10))))
+      try await ledger.enqueue(CloudUpload(id: id, scope: scope, record: record))
+    }
+    let originalRow = try XCTUnwrap(sqlStrings(url, "SELECT quote(id)||','||quote(scope)||','||quote(digest)||','||quote(original)||','||quote(state)||','||quote(attempts)||','||quote(issue)||','||quote(retry_ms)||','||quote(attempted_ms) FROM cloud_uploads WHERE id='old-epoch-upload'").first)
+    let capsule = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "all-epoch-ledger", kind: .cloudLedger, scope: scope(), root: url, retainedControls: [])
+    let plan = try seal(catalog, capsules: [capsule]); try await ledger.close()
+    let first = try await erase(M4LocalTransportLeaves(catalog: catalog), capsule, plan)
+    XCTAssertEqual(first.kind, .cloudLedger)
+    XCTAssertEqual(try sqlStrings(url, "SELECT id FROM cloud_uploads ORDER BY id"), ["foreign-upload"])
+    let saved = try M4CatalogIO.encode(catalog.receipts(requestID: plan.requestID)); try catalog.close()
+    let reopened = try M4OwnedDataCatalog(directory: directory), retry = M4LocalTransportLeaves(catalog: reopened)
+    let second = try await erase(retry, capsule, plan)
+    XCTAssertEqual(try M4CatalogIO.encode(first), try M4CatalogIO.encode(second))
+    try executeSQL(url, "INSERT INTO cloud_uploads VALUES(" + originalRow + ")")
+    let before = try sqlStrings(url, "SELECT hex(original) FROM cloud_uploads ORDER BY id")
+    do { _ = try await erase(retry, capsule, plan); XCTFail("first receipt cannot bypass actual044 replay of a restored older epoch") }
+    catch { XCTAssertEqual(error as? CloudError, CloudError(.invalidPayload)) }
+    XCTAssertEqual(try sqlStrings(url, "SELECT hex(original) FROM cloud_uploads ORDER BY id"), before)
+    XCTAssertEqual(try M4CatalogIO.encode(reopened.receipts(requestID: plan.requestID)), saved)
+    try reopened.close()
+  }
+  func testConcreteCloudLeafPreservesUnknownLiveLayoutAfterFirstReceipt() async throws {
+    let root = try root(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog")), url = root.appendingPathComponent("ledger.sqlite")
+    let ledger = try SQLiteCloudLedger(url: url); try await ledger.close()
+    let capsule = try M4OwnershipCapsule.capture(namespaceID: UUID().uuidString, componentID: "layout-ledger", kind: .cloudLedger, scope: scope(), root: url, retainedControls: [])
+    let plan = try seal(catalog, capsules: [capsule]), leaves = M4LocalTransportLeaves(catalog: catalog)
+    let first = try await erase(leaves, capsule, plan)
+    try executeSQL(url, "CREATE TABLE future_business(value BLOB) STRICT; INSERT INTO future_business VALUES(X'010203')")
+    do { _ = try await erase(leaves, capsule, plan); XCTFail("unknown layout must reach concrete leaf validation even with a receipt") }
+    catch { XCTAssertEqual(error as? CloudError, CloudError(.invalidPayload)) }
+    XCTAssertEqual(try sqlStrings(url, "SELECT hex(value) FROM future_business"), ["010203"])
+    XCTAssertEqual(try M4CatalogIO.encode(catalog.receipts(requestID: plan.requestID)), try M4CatalogIO.encode([first])); try catalog.close()
+  }
+  func testConcreteStoreWitnessUsesOriginalFacadeAndStableFirstBytesAcrossSagaProgress() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil)
+    try await f.composition.quiesceBusiness()
+    let erased = try await f.composition.session.eraseLocalBusiness(requestID: f.saga.intent.requestID, expectedRevision: f.saga.revision)
+    let plan = try XCTUnwrap(f.catalog.plan(requestID: f.saga.intent.requestID)), capsule = try XCTUnwrap(plan.entries.first(where: { $0.capsule.kind == .businessStore })).capsule
+    let leaves = M4LocalTransportLeaves(catalog: f.catalog, storeRoutes: [capsule.componentID: f.composition])
+    let first = try await erase(leaves, capsule, plan)
+    XCTAssertEqual(first.kind, .businessStore)
+    var advanced = erased; advanced.revision += 1; advanced.cloudProgress = .completed
+    try await f.composition.session.updateDeletionSaga(advanced, expectedRevision: erased.revision)
+    let again = try await erase(leaves, capsule, plan)
+    XCTAssertEqual(try M4CatalogIO.encode(first), try M4CatalogIO.encode(again), "mutable Saga revision is not frozen into the first component receipt")
+    do { _ = try await erase(M4LocalTransportLeaves(catalog: f.catalog), capsule, plan); XCTFail("an absent original Store route cannot borrow another proof") }
+    catch { XCTAssertEqual(error as? M4LocalErasureError, .unsupportedComponent) }
+    let wrong = try await deletionGuardFixture(healthIssue: nil)
+    do { _ = try await erase(M4LocalTransportLeaves(catalog: f.catalog, storeRoutes: [capsule.componentID: wrong.composition]), capsule, plan); XCTFail("another facade cannot prove this capsule") }
+    catch { XCTAssertEqual(error as? M4CatalogError, .identityChanged) }
+    try await wrong.close()
+    let seed = f.prepared.seed, material = f.prepared.material, trust = f.composition.client.trust
+    try await f.close()
+    let prepared = try await M4IdentityBootstrap.prepare(root: seed.root, namespace: seed.namespace, controlDirectory: seed.controlDirectory) { _ in material }
+    let composition = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: f.scope.cloudSpaceID)
+    let catalog = try M4OwnedDataCatalog(directory: f.root.appendingPathComponent("catalog"))
+    let reopened = M4LocalTransportLeaves(catalog: catalog, storeRoutes: [capsule.componentID: composition])
+    let replay = try await erase(reopened, capsule, plan)
+    XCTAssertEqual(try M4CatalogIO.encode(replay), try M4CatalogIO.encode(first))
+    let raw = try M4CatalogIO.encode("restored-business"), hex = raw.map { String(format: "%02x", $0) }.joined()
+    try executeSQL(f.database, "INSERT INTO lifecycle_steps_v4 VALUES('normal-intent:guard-witness',X'" + hex + "','" + M4CatalogIO.hash(raw) + "')")
+    do { _ = try await erase(reopened, capsule, plan); XCTFail("original first bytes cannot replace the fresh045 current-zero query") }
+    catch { XCTAssertEqual(error as? LocalBusinessErasureErrorV4, .residualBusiness(table: "lifecycle_steps_v4")) }
+    XCTAssertEqual(try businessWitnessCount(f.database), 1)
+    XCTAssertEqual(try M4CatalogIO.encode(catalog.receipts(requestID: plan.requestID)), try M4CatalogIO.encode([first]))
+    try catalog.close(); try await prepared.close()
+  }
+  private func sqlStrings(_ url: URL, _ query: String) throws -> [String] {
+    var db: OpaquePointer?, statement: OpaquePointer?
+    guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { throw M4CatalogError.storageBlocked }; defer { sqlite3_close(db) }
+    guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { throw M4CatalogError.storageBlocked }; defer { sqlite3_finalize(statement) }
+    var rows: [String] = []
+    while sqlite3_step(statement) == SQLITE_ROW { rows.append(String(cString: sqlite3_column_text(statement, 0))) }
+    return rows
+  }
+  private func executeSQL(_ url: URL, _ sql: String) throws {
+    var db: OpaquePointer?
+    guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else { throw M4CatalogError.storageBlocked }; defer { sqlite3_close(db) }
+    guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw M4CatalogError.storageBlocked }
+  }
   func testUnregisteredStagingControlCannotBeOpenedOrCreateAReplacementOwner() async throws {
     let root = try root(), catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("catalog"))
     let (staging, capsule, _) = try staging(root), plan = try seal(catalog, capsules: [capsule]); try staging.close()
