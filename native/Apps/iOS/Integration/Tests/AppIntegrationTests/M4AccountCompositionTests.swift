@@ -666,7 +666,14 @@ extension M4AccountCompositionTests {
     let deadline = ContinuousClock.now.advanced(by: .seconds(3)), directory = root.appendingPathComponent("development/mailbox/outgoing")
     while ContinuousClock.now < deadline {
       for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
-        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any], value["operation"] as? String == operation,
+        let bytes: Data
+        do { bytes = try Data(contentsOf: file) }
+        catch let error as NSError where error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoSuchFileError {
+          // The original client can consume a previous request after enumeration.
+          // Only its now-missing snapshot entry is retried; other errors remain.
+          continue
+        }
+        guard let value = try JSONSerialization.jsonObject(with: bytes) as? [String: Any], value["operation"] as? String == operation,
               let id = value["id"] as? String, let encoded = value["payload"] as? String, let payload = Data(base64Encoded: encoded) else { continue }
         return ServiceMailboxRequest(response: root.appendingPathComponent("development/mailbox/responses/" + id + ".json"), payload: payload)
       }
