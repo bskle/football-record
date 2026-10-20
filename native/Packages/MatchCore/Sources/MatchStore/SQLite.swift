@@ -145,6 +145,33 @@ final class SQLite: @unchecked Sendable {
         let status = sqlite3_finalize(statement); finalized = true; try check(status)
         return result
     }
+    /// Narrow read-only admission for the Store erasure witness, not a migration or repair.
+    func validateLocalErasureLayoutV4() throws {
+        let version = try scalar("PRAGMA user_version").number ?? -1
+        guard version == 4 else { throw StoreError.unsupportedSchema(version) }
+        let definitions = Self.schema + Self.schemaV2 + Self.schemaV3 + Self.schemaV4
+        var expected: [String: String] = [:]
+        for sql in definitions {
+            let words = sql.split(separator: " ")
+            expected[String(words[2])] = sql
+        }
+        var seen: Set<String> = []
+        for row in try rows("SELECT type,name,tbl_name,sql FROM sqlite_master") {
+            guard let kind = row[0].string, let name = row[1].string, let table = row[2].string else {
+                throw StoreError.corruptPayload(table: "sqlite_schema", key: "schema4")
+            }
+            if kind == "index", case .null = row[3], name.hasPrefix("sqlite_autoindex_"), expected[table] != nil { continue }
+            guard kind == "table", name == table, let sql = row[3].string, let original = expected[name],
+                  sql.utf8.elementsEqual(original.utf8), seen.insert(name).inserted else {
+                throw StoreError.corruptPayload(table: "sqlite_schema", key: name)
+            }
+        }
+        guard seen == Set(expected.keys) else { throw StoreError.corruptPayload(table: "sqlite_schema", key: "schema4") }
+        for sql in Self.schemaChecks + Self.schemaChecksV2 + Self.schemaChecksV3 + Self.schemaChecksV4 { _ = try rows(sql) }
+        guard try scalar("PRAGMA quick_check(1)").string == "ok" else {
+            throw StoreError.sqlite(code: SQLITE_CORRUPT, message: "integrity check failed")
+        }
+    }
     private func migrateLegacyCompletionConfirmations() throws {
         let emptyDigest = try CaptureRevision.digest([])
         for row in try rows("SELECT match_id,evidence FROM completion") {

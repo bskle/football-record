@@ -169,3 +169,9 @@ extension SQLiteSessionRepository: AuthorityRepository {
   public func authorityStateV4(matchID: String, now: Date) async throws -> AuthorityStateV4 { try await store.authorityStateV4(matchID:matchID,now:now) }
   public func validateAuthorityStartV4(_ intent: StartIntent, now: Date) async throws { try await store.validateAuthorityStartV4(intent,now:now) }
 }
+
+extension SQLiteSessionRepository {
+  public func validateLocalBusinessErasedV4(requestID: String, requestDigest: String, scope: CloudScopeV1) async throws -> LocalBusinessErasureWitnessV4 {
+    try await store.validateLocalBusinessErasedV4(requestID: requestID, requestDigest: requestDigest, scope: scope)
+  }
+}
