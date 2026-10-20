@@ -265,3 +265,31 @@ Metadata encoding is bounded to 16 KiB. Capacity preflight removes already-publi
 | `fullseal-full-host.log` | `846f93556eb7ac17f0234732acead9ceb12ad0bd8953bfde86140a5076eb26b3` |
 
 This checkpoint publishes coherent retained control evidence. The composition must still enforce fullseal/capacity/quiescence at every explicit/background/retry erasure entrance and recover createSaga-before-seal interruptions using the original parent. Store and all-epoch cloud-ledger current-zero boundaries remain reported upstream gaps; cached component progress does not prove them. Actual original-session retirement depends on accepted 042. App wiring, full aggregate erase/resume, real SDK/account/device/signing/App/UI checks, power-loss and whole-026 source/final acceptance remain incomplete.
+
+## Accepted-042 retirement and original context/identity task drain
+
+Source `23459343d04f49cddf07d327cdb222b2eb6a1a23` follows root's ordinary merge `12cb0cfabc0619ddb07784603f313623c26aa080` of accepted042 final `dd38dc2`. Root's separate related merge checks were SessionRetirement11/0 and Integration35/1; the latter retained one original capture generation assertion until this composition integration.
+
+The owner now synchronously gates model business entry, awaits the original Session's permanent retirement and durable capture observations, then joins/clears the model. Shared quiescence callers join the same task. Original identity admission tasks are owned, cancelled and joined even when their observer ignores cancellation; lifetime/business gates are rechecked after the final durable generation await. Later admission on the retired composition is rejected. The Session and original repository remain available for saga control operations; quiescence does not close the DB.
+
+The old IntegrationContext uses the same three phases and a shared throwing shutdown task. Only success closes its original repository. A failed drain propagates to IntegrationLifecycle.replace, which retains the original retired context and never constructs/publishes a replacement. Failed business gates stay permanent; a subsequent shutdown can retry the original durable drain. No `try?` converts a failed drain into successful close.
+
+- Actual original two-case retirement RED after accepted042: **two tests / one failure**. Old call order returned generation3 and then wrote generation4. Three-phase selected composition GREEN was **seven / zero**, with original return/final generation4=4, snapshot/history assertions intact and a new same-facade saga survival check.
+- First full run at that intermediate layer was **145/2**, 344 unchanged inputs. Both failures were prior IntegrationContextTests expecting old UI feedback counts2/1 after the new042 retirement contract deliberately clears them. The original successful counts remain asserted before retirement; retirement now explicitly requires zero and no subsequent repopulation from fresh-model actions. This compatibility adjustment is distinct from the following product failure regressions.
+- New owned exit/identity runtime RED: **five tests / seven failures**. Actual uncooperative identity observation outlived quiescence; original capture shutdown closed its DB before the positive observation; forced durable drain failure still called the replacement factory and discarded the original context. The two feedback compatibility failures are included in this red run. The first attempt lacked the fixture's MatchCore import and is preserved separately. Exact red composition/context/test snapshots remain in bootstrap.
+- Final related selected run: **13/0** (Composition8, IntegrationContext4, DevicePair1). The forced-failure fixture deliberately closes its repository before returning a positive gateway observation to produce a real drain failure; this proves typed replacement refusal and original-context retention, not recovery of an externally closed connection. Leaf042 separately proves retry of retained SQL failures.
+- Final frozen complete AppIntegration: **148 tests / zero failures**, 140 seconds. All **344 conservative inputs** remain identical before/post and match the source commit byte for byte. `git diff --check` passed. Previous 144/3,145/2 and all original red logs keep their own source layers; they are not relabeled.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `retirement-042-runtime-red.log` | `b706d2d925320ba7813af13996ed1e57629e36d1cef08e93cbd2ac2f8c8746c4` |
+| `retirement-042-selected-green.log` | `7545ea623d32a81bc183751185cf66f96863ccef662a1d1767f31aed884355db` |
+| `retirement-042-full-host.log` (intermediate145/2) | `ddcc1bdb62f6a042d7c5b665ff63c9b53e83e2ac81cd03ea184bdc47b4799d7b` |
+| `retirement-owners-runtime-red-2.log` | `83bc5da3cf1020fac669f010f56f2e59b4f1b9f1eaee74268446ef92187fd1d9` |
+| `retirement-owners-selected-green.log` | `922f0d0d9ae6fdc0a641e317ea3bee5723b239e17590adb95a8cdad9f2767196` |
+| `retirement-owners-checkpoint-inputs.json` | `5d258715919d662add5d430c8828bc2fc7c7a9fe0afd0023ff3b663e48d91319` |
+| `retirement-owners-checkpoint-post.json` | `5bade929294b6fcaa7fb3ebc44eb1fb92b132e8b68e44b79b8b4c449a3ea5296` |
+| `retirement-owners-checkpoint-commit-match.json` | `1369cb59b6cd556dad81c82f78c41f944dbef8388b6277614f829a7762dcecb1` |
+| `retirement-owners-full-host.log` (single148/0) | `ee856b9dca830e392bb8299b539778b34ac2efc0f2d3cab7e0aff980306125f5` |
+
+This is source/host retirement integration only. Every composition deletion resume still needs the original general parent/catalog/choice/child/capacity/quiescence guard. Health.delete additionally requires real039/041/028 fullHealthSeal at Store/transport erasure, while typed missing/source issues preserve Store and allow independent Cloud progress. Full current-zero aggregate interfaces, App wiring and real SDK/device/account/signing/App/UI/power-loss checks remain incomplete.
