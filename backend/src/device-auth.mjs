@@ -1,5 +1,6 @@
+import {createDeletionReauthentication,assertDeletionControlPurpose} from './deletion-reauth.mjs';
 import {isAppleVerifier,isVerifiedApple} from './apple-verifier.mjs';
-import {validatePayload} from './codec.mjs';
+import {routes,validatePayload} from './codec.mjs';
 import {createHmac,randomBytes,randomUUID,sign,verify,timingSafeEqual} from 'node:crypto';
 import {authorityState} from './authority.mjs';
 import {canonicalJSON,sha256,edPublicKey,decodeBase64URL,makeReceipt} from './receipt.mjs';
@@ -21,6 +22,7 @@ export function createDeviceAuth({authority,appleVerifier}){
  function consumeNonce(sessionID,nonce){if(db.prepare('SELECT 1 FROM nonces WHERE session_id=? AND nonce=?').get(sessionID,nonce))fail('unauthorized',401);db.prepare('INSERT INTO nonces VALUES(?,?)').run(sessionID,nonce);}
  function challenge(r){validatePayload('challenge',r);return transaction(db,config,()=>{
    try{edPublicKey(r.devicePublicKey);}catch{fail('invalidPayload',422);}
+   if(db.prepare("SELECT 1 FROM requests WHERE request_id=? AND operation LIKE 'deleteControl%'").get(r.requestID))fail('idempotencyConflict');
    const digest=sha256(canonicalJSON(r)),prior=db.prepare('SELECT * FROM challenge_requests WHERE request_id=?').get(r.requestID);
    let c;if(prior){if(prior.request_digest!==digest)fail('idempotencyConflict');c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(prior.challenge_id);}
    else{c={challenge_id:randomUUID(),device_id:r.deviceID,key_fingerprint:sha256(r.devicePublicKey),expires_at:config.clock.now()+300,consumed:0};}
@@ -30,7 +32,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    const response={version:1,requestID:r.requestID,challengeID:c.challenge_id,expiresAt:c.expires_at};
    if(c.consumed)return {...response,status:'consumed'};if(c.expires_at<config.clock.now())return {...response,status:'expired'};return {...response,challenge:secret};
  });}
- function checkChallenge(r,publicKey,deviceID,closing=false){const c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(r.challengeID);if(!c||(!closing&&(c.consumed||c.expires_at<config.clock.now()))||c.device_id!==deviceID||c.key_fingerprint!==sha256(publicKey))fail('unauthorized',401);const proof={...r,challengeSHA256:c.challenge_hash};delete proof.deviceProof;if(!signatureOK(publicKey,'football-record.device.challenge.v1',proof,r.deviceProof))fail('unauthorized',401);return c;}
+ function checkChallenge(r,publicKey,deviceID,closing=false){if(db.prepare("SELECT 1 FROM challenge_requests c JOIN requests r ON c.request_id=r.request_id WHERE c.challenge_id=? AND r.operation LIKE 'deleteControl%'").get(r.challengeID))fail('unauthorized',401);const c=db.prepare('SELECT * FROM challenges WHERE challenge_id=?').get(r.challengeID);if(!c||(!closing&&(c.consumed||c.expires_at<config.clock.now()))||c.device_id!==deviceID||c.key_fingerprint!==sha256(publicKey))fail('unauthorized',401);const proof={...r,challengeSHA256:c.challenge_hash};delete proof.deviceProof;if(!signatureOK(publicKey,'football-record.device.challenge.v1',proof,r.deviceProof))fail('unauthorized',401);return c;}
  function output(record,s){return {...JSON.parse(Buffer.from(record)),credential:credential(s),context:{accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch}};}
  async function authenticate(r){
    validatePayload('authApple',r);
@@ -62,6 +64,7 @@ export function createDeviceAuth({authority,appleVerifier}){
  }
  function recover(r){validatePayload('authRecover',r);return transaction(db,config,()=>{
    const row=db.prepare('SELECT * FROM auth_records WHERE auth_request_id=? AND device_id=?').get(r.authRequestID,r.deviceID);
+   if(row){let value;try{value=JSON.parse(Buffer.from(row.public_result));}catch{fail('unauthorized',401);}if(row.session_id.startsWith('dc.')||value.purpose!==undefined)fail('unauthorized',401);}
    const body={...r};delete body.deviceProof;
    const publicKey=row?.public_key??r.devicePublicKey;
    if(!publicKey||(r.devicePublicKey!==undefined&&r.devicePublicKey!==publicKey)||sha256(publicKey)!==r.keyID||!Number.isSafeInteger(r.issuedAt)||Math.abs(config.clock.now()-r.issuedAt)>60||!signatureOK(publicKey,'football-record.device.auth-recover.v1',body,r.deviceProof))fail('unauthorized',401);
@@ -87,7 +90,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    const fields={method,path,requestID,bodySHA256:sha256(bodyBytes),sessionID:s.session_id,activationEpoch:s.activation_epoch,keyID:proof.keyID,nonce:proof.nonce,issuedAt:proof.issuedAt};
    if(!d||!signatureOK(d.public_key,'football-record.device.pop.v1',fields,proof.signature))fail('unauthorized',401);
    const ctx={accountID:s.account_id,deviceID:s.device_id,keyID:s.key_id,activationEpoch:s.activation_epoch,sessionID:s.session_id};
-   return transaction(db,config,()=>{const current=db.prepare('SELECT revoked FROM sessions WHERE session_id=?').get(s.session_id);if(!current||current.revoked)fail('unauthorized',401);validate(ctx,{active:false});consumeNonce(s.session_id,proof.nonce);return ctx;});
+   return transaction(db,config,()=>{const current=db.prepare('SELECT revoked FROM sessions WHERE session_id=?').get(s.session_id);if(!current||current.revoked)fail('unauthorized',401);validate(ctx,{active:false});const operation=Object.entries(routes).find(([p])=>p===path)?.[1][0]??(method==='GET'?'requestQuery':'unknown');let payload;try{payload=method==='GET'?{requestID}:JSON.parse(bodyBytes);}catch{fail('unauthorized',401);}assertDeletionControlPurpose(state,ctx,operation,payload);consumeNonce(s.session_id,proof.nonce);return ctx;});
  }
  function watchResult(old){
    if(old.status==='knownAbandoned')return old;
@@ -95,7 +98,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    return {...old,credential:credential(s)};
  }
  function recoverWatch(ctx,r){validatePayload('recoverWatch',r);return transaction(db,config,()=>{
-   const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
+   assertDeletionControlPurpose(state,ctx,'registerWatch',r);const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
    const old=stored(ctx,r,'registerWatch');if(old)return watchResult(old);
    checkWatchFence(ctx,r);
    const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.watchID);
@@ -105,7 +108,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    return persist(ctx,r,'registerWatch',{status:'knownAbandoned',receipt:makeReceipt(config,ctx,r,'registerWatch','knownAbandoned',{}, {registration:{watchID:r.watchID,watchPublicKey:r.watchPublicKey}})});
  });}
  function registerWatch(ctx,r){validatePayload('registerWatch',r);return transaction(db,config,()=>{
-   const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
+   assertDeletionControlPurpose(state,ctx,'registerWatch',r);const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
    const old=stored(ctx,r,'registerWatch');if(old)return watchResult(old);
    checkWatchFence(ctx,r);
    checkChallenge(r,r.watchPublicKey,r.watchID);
@@ -117,5 +120,6 @@ export function createDeviceAuth({authority,appleVerifier}){
    const s=session({...ctx,deviceID:r.watchID,keyID});const result={receipt:makeReceipt(config,ctx,r,'registerWatch','registered',{}, {registration:{watchID:r.watchID,watchPublicKey:r.watchPublicKey}}),sessionClaims:{sessionID:s.session_id,expiresAt:s.expires_at}};persist(ctx,r,'registerWatch',result);return {...result,credential:credential(s)};
  });}
  authority.registerWatch=registerWatch;authority.recoverWatch=recoverWatch;
- return {challenge,authenticate,recover,authenticateRequest,registerWatch,recoverWatch,credential};
+ const control=createDeletionReauthentication(state,{appleVerifier,credential});
+ return {challenge,authenticate,recover,authenticateRequest,registerWatch,recoverWatch,credential,deletionControlChallenge:control.challenge,deletionControlAuthenticate:control.authenticate,deletionControlRecover:control.recover};
 }
