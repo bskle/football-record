@@ -6,6 +6,7 @@ import MatchSession
 import MatchPresentation
 import AccountKit
 import CryptoKit
+import CloudSync
 @testable import AppIntegration
 
 @MainActor final class M4AccountCompositionTests: XCTestCase {
@@ -719,3 +720,77 @@ private actor CompositionFreshAuthenticationRelay: AuthorityHTTPRelay {
   }
 }
 #endif
+
+
+extension M4AccountCompositionTests {
+  func testIdentityChangedUsesOriginalControlOwnerAndPreservesOriginalFacade() async throws {
+    let (prepared, trust) = try await identityFixture("m4-identity-action"), observer = CompositionIdentityFixture()
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer)
+    try await c.repository.bindAccountV4(binding(prepared)); try await c.admitCurrentIdentity()
+    let scope = try CloudScope(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", zoneID: "zone-fixture", activationEpoch: 1)
+    let ledger = try SQLiteCloudLedger(url: prepared.seed.controlDirectory.appendingPathComponent("identity-cloud.sqlite"))
+    try await c.installIdentityLifecycle(ledger: ledger, scope: scope)
+    let originalID = await c.repository.syncRepositoryIdentity(), before = try await c.repository.identityGenerationV4()
+    do { try await c.performAccount(.identityChanged) }
+    catch { XCTFail("original identity control must complete: \(error)") }
+    let retained = try await c.repository.accountBindingV4(), generation = try await c.repository.identityGenerationV4()
+    XCTAssertTrue(try XCTUnwrap(retained).suspended, "original Session must persist identity suspension")
+    XCTAssertGreaterThan(generation, before, "persist the original identity generation")
+    do { _ = try await prepared.material.vault.credential(); XCTFail("old credential cannot survive the original durable generation fence") } catch {}
+    do { _ = try await c.session.prepareStart(starter: true); XCTFail("identity action permanently retires the original Session") }
+    catch { XCTAssertEqual(error as? SessionError, .retired) }
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertTrue(c.context.account.requiresReload)
+    let after = await c.repository.syncRepositoryIdentity(), sessionID = await c.session.syncRepositoryIdentity()
+    XCTAssertEqual(after, originalID); XCTAssertEqual(sessionID, originalID)
+    let analytics = try await c.repository.analyticsEnabledV4(); XCTAssertFalse(analytics)
+    let fenced = try await ledger.scopeState(scope: scope); XCTAssertEqual(fenced.issue, .accountChanged)
+    try await c.close(); try await ledger.close()
+  }
+  func testIdentityChangedControlDoesNotJoinItselfOrReadmitHeldIdentity() async throws {
+    let (prepared, trust) = try await identityFixture("m4-identity-action-held"), observer = CompositionIdentityFixture(suspend: true)
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer)
+    try await c.repository.bindAccountV4(binding(prepared))
+    let scope = try CloudScope(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", zoneID: "zone-fixture", activationEpoch: 1)
+    let ledger = try SQLiteCloudLedger(url: prepared.seed.controlDirectory.appendingPathComponent("identity-cloud.sqlite"))
+    try await c.installIdentityLifecycle(ledger: ledger, scope: scope)
+    let admission = Task { try await c.admitCurrentIdentity() }; await observer.waitForEntry()
+    var done = false
+    let changed = Task { do { try await c.performAccount(.identityChanged) } catch { XCTFail("original identity control must complete: \(error)") }; done = true }
+    let deadline = ContinuousClock.now.advanced(by: .milliseconds(500)); var retired = false
+    while ContinuousClock.now < deadline {
+      do { _ = try await c.session.prepareStart(starter: true) }
+      catch { if error as? SessionError == .retired { retired = true; break } }
+      await Task.yield()
+    }
+    XCTAssertTrue(retired, "held observation must not delay the original Session permanent gate")
+    XCTAssertFalse(done, "control must join the original held observation without joining itself")
+    await observer.release(); _ = await admission.result; await changed.value
+    XCTAssertTrue(done); XCTAssertFalse(c.context.account.canEnterRecording)
+    let retained = try await c.repository.accountBindingV4(); XCTAssertTrue(try XCTUnwrap(retained).suspended)
+    try await c.close(); try await ledger.close()
+  }
+}
+
+
+extension M4AccountCompositionTests {
+  func testIdentityChangedMissingLedgerStaysRetiredAndRetriesWithOriginalScope() async throws {
+    let (prepared, trust) = try await identityFixture("m4-identity-action-retry"), observer = CompositionIdentityFixture()
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer)
+    try await c.repository.bindAccountV4(binding(prepared)); try await c.admitCurrentIdentity()
+    let original = try await c.repository.accountBindingV4(), before = try await c.repository.identityGenerationV4()
+    do { try await c.performAccount(.identityChanged); XCTFail("missing original ledger cannot claim full fencing") }
+    catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+    let retained = try await c.repository.accountBindingV4(), still = try await c.repository.identityGenerationV4()
+    XCTAssertEqual(retained, original); XCTAssertEqual(still, before)
+    XCTAssertTrue(c.context.account.requiresReload); XCTAssertFalse(c.context.account.canEnterRecording)
+    do { _ = try await c.session.prepareStart(starter: true); XCTFail("failure must not reopen business") }
+    catch { XCTAssertEqual(error as? SessionError, .retired) }
+    let scope = try CloudScope(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", zoneID: "zone-fixture", activationEpoch: 1)
+    let ledger = try SQLiteCloudLedger(url: prepared.seed.controlDirectory.appendingPathComponent("identity-cloud.sqlite"))
+    try await c.installIdentityLifecycle(ledger: ledger, scope: scope); try await c.performAccount(.identityChanged)
+    let suspended = try await c.repository.accountBindingV4(); XCTAssertTrue(try XCTUnwrap(suspended).suspended)
+    let once = try await c.repository.identityGenerationV4(); try await c.performAccount(.identityChanged)
+    let twice = try await c.repository.identityGenerationV4(); XCTAssertEqual(once, twice, "completed original owner is idempotent")
+    try await c.close(); try await ledger.close()
+  }
+}

@@ -51,6 +51,8 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private var finalClosing: Task<Void, any Error>?
   private let closeBridge: M4CompositionCloseBridge
   private var controlOwners: [ObjectIdentifier: M4WeakControlOwner] = [:]
+  private var identityLifecycle: LifecycleService?
+  private var identityChanging: Task<Void, any Error>?
   private(set) var lastCloseFailure: (any Error)?
   var namespace: String { prepared.seed.namespace }
   var localDeviceID: String { prepared.seed.installationID }
@@ -117,13 +119,42 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       return value
     } catch { try? await prepared.close(); throw error }
   }
+  /// Bind the actual retained ledger to its original scope; current observations
+  /// never choose or replace the scope of already owned transport data.
+  func installIdentityLifecycle(ledger: any CloudLedger, scope: CloudScope) async throws {
+    guard identityLifecycle == nil, !closed, finalClosing == nil,
+          let binding = try await repository.accountBindingV4(),
+          raw(binding.accountID, scope.accountID), raw(binding.cloudSpaceID, scope.cloudSpaceID),
+          binding.activationEpoch == scope.activationEpoch, binding.environment == client.trust.environment else { throw AuthorityError.identityChanged }
+    guard identityLifecycle == nil, !closed, finalClosing == nil else { throw AuthorityError.identityChanged }
+    identityLifecycle = LifecycleService(client: client, repository: repository, coordinator: session, scope: scope, ledger: ledger)
+  }
   /// The model callback always reaches this original owner and original services.
   func performAccount(_ action: AccountUserAction) async throws {
+    if action == .identityChanged { return try await identityChanged() }
     try requireBusiness(businessLifetime)
     // A new current observation invalidates old UI admission before any await.
     // Failure never leaves recording ready from the prior retained credential.
     admittedScope = nil; context.account.pauseIdentity()
     try await ownBusiness { try await self.accountAction(action) }
+  }
+  /// This control owner is deliberately outside businessOperations: it joins the
+  /// original business calls and must never wait on its own registration.
+  private func identityChanged() async throws {
+    guard !closed, finalClosing == nil else { throw AuthorityError.identityChanged }
+    context.account.pauseIdentity(); context.account.requireReload(); context.recording.beginRetirement()
+    if let identityChanging { return try await identityChanging.value }
+    let task = Task {
+      try await self.quiesceBusiness()
+      guard let service = self.identityLifecycle else { throw AuthorityError.unavailable }
+      // Preserve AccountKit's original SQL/vault/analytics/ledger ordering.
+      try await service.identityChanged()
+      try await self.identity.advanceIdentityFence(to: self.repository.identityGenerationV4())
+      try Task.checkCancellation()
+    }
+    identityChanging = task
+    do { try await task.value }
+    catch { identityChanging = nil; throw error }
   }
   /// The whole service call is owned, including a credential write after an
   /// already admitted original Session SQL mutation. Never close its DB early.
@@ -168,7 +199,6 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     }
   }
   private func accountAction(_ action: AccountUserAction) async throws {
-    guard action != .identityChanged else { throw AuthorityError.unavailable }
     let observed = try await freshBusinessIdentity(), token = businessLifetime
     let binding = try await repository.accountBindingV4()
     try requireBusiness(token)
@@ -334,9 +364,11 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     if let finalClosing { return try await finalClosing.value }
     businessStopped = true; businessLifetime = UUID(); lifetime = UUID(); admittedScope = nil
     context.account.stop(); context.lifecycle.stop(); context.recording.beginRetirement()
-    let owners = controlOwners.values.compactMap(\.value)
+    let owners = controlOwners.values.compactMap(\.value), identityChange = identityChanging
+    identityChange?.cancel()
     let task = Task {
       try await self.quiesceBusiness()
+      _ = await identityChange?.result
       for owner in owners { await owner.stopAndJoin() }
       await self.watchRelay.close()
       try await self.controlledAdapters?.finalClose()
