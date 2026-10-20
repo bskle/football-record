@@ -46,6 +46,10 @@ extension SQLiteCloudLedger: CloudLocalTransportErasing {
                 let receipt = try CloudLocalTransportEraseReceipt(requestID: request.requestID, requestDigest: oldDigest, stableZoneKey: oldStable)
                 guard oldDigest == digest, oldStable == stable else { throw CloudError(.identityConflict) }
                 guard try locallyErased(request.scope) else { throw CloudError(.invalidPayload) }
+                let current = try validateErasureCanonicalRows(sql, version: 4)
+                guard !current.contains(where: { $0.stableZoneKey == stable }) else {
+                    throw CloudError(.invalidPayload)
+                }
                 return receipt
             }
             let scopes = try validateErasureCanonicalRows(sql, version: 4)
