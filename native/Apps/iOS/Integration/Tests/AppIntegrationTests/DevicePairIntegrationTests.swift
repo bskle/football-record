@@ -37,7 +37,7 @@ import DeviceSync
     await ca.coordinator?.retry()
     do { _ = try await pa.authorize(.send, remoteDeviceID: b); XCTFail() } catch {}
     XCTAssertEqual(cb.model.feedbackCount, 0)
-    await ca.shutdown(); await cb.shutdown()
+    try await ca.shutdown(); try await cb.shutdown()
     let reopened = try DevicePeerTrustProvider(directory: directory(ra), namespace: DeviceDatasetGate.namespace, requested: nil)
     do { _ = try await reopened.authorize(.route, remoteDeviceID: nil); XCTFail() } catch {}
     XCTAssertEqual(try String(contentsOf: directory(ra).appendingPathComponent("device.identity"), encoding: .utf8), "football-record.identity.v1:" + a)

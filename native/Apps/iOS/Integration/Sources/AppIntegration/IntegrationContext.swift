@@ -17,6 +17,7 @@ import MatchPresentation
   private(set) var transportUnavailable = false
   private(set) var transportDiagnostic: String?
   private var closed = false
+  private var shuttingDown: Task<Void, any Error>?
   private init(repository: SQLiteSessionRepository?, session: MatchSession?, model: RecordingModel, coordinator: DeviceSyncCoordinator?, namespace: String?, localDeviceID: String?) {
     self.repository = repository; self.session = session; self.model = model; self.coordinator = coordinator; self.namespace = namespace; self.localDeviceID = localDeviceID
   }
@@ -48,10 +49,19 @@ import MatchPresentation
       return IntegrationContext(repository: composition.repository, session: composition.session, model: model, coordinator: coordinator, namespace: namespace, localDeviceID: localID)
     } catch { try? await composition.repository.close(); throw error }
   }
-  func shutdown() async {
-    guard !closed else { return }; closed = true
-    await model.shutdown()
-    try? await repository?.close()
+  func shutdown() async throws {
+    guard !closed else { return }
+    if let shuttingDown { return try await shuttingDown.value }
+    model.beginRetirement()
+    let session = session, model = model, repository = repository
+    let task = Task {
+      if let session { try await M4AccountComposition.retireBusiness(session: session, recording: model) }
+      else { await model.shutdown() }
+      try await repository?.close()
+    }
+    shuttingDown = task
+    do { try await task.value; closed = true; shuttingDown = nil }
+    catch { shuttingDown = nil; throw error }
   }
 }
 
@@ -60,7 +70,8 @@ import MatchPresentation
   private(set) var current: IntegrationContext?
   func replace(_ build: () async throws -> IntegrationContext) async throws -> IntegrationContext {
     var old = current; current = nil
-    await old?.shutdown()
+    do { try await old?.shutdown() }
+    catch { current = old; throw error }
     old = nil
     // No factory/capture/transport for the next environment exists before old shutdown joins.
     let next = try await build(); current = next

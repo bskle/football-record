@@ -13,7 +13,7 @@ import CryptoKit
     let c = try AppBootstrap.composition(databaseNamespace: "m4-retire-model", development: true, rootDirectory: location())
     await c.model.start(starter: true); await c.model.load()
     XCTAssertNotNil(c.model.snapshot); XCTAssertFalse(c.model.history.isEmpty)
-    await c.model.shutdown()
+    try await M4AccountComposition.retireBusiness(session: c.session, recording: c.model)
     XCTAssertNil(c.model.snapshot, "retired UI must release business snapshots")
     XCTAssertTrue(c.model.history.isEmpty, "retired UI must release business history")
     try await c.repository.close()
@@ -24,13 +24,13 @@ import CryptoKit
     await c.model.start(starter: true)
     let operation = await gateway.waitForEntry()
     var began = false, done = false
-    let retirement = Task { began = true; await c.model.shutdown(); done = true }
+    let retirement = Task { began = true; try await M4AccountComposition.retireBusiness(session: c.session, recording: c.model); done = true }
     for _ in 0..<1000 { if began { break }; await Task.yield() }
     XCTAssertTrue(began)
     XCTAssertFalse(done, "retirement cannot acknowledge completion while the original Session capture driver is still awaiting a gateway")
     var generationAtReturn: Int64?
     if done { generationAtReturn = try await c.repository.snapshotV2(matchID: operation.binding.matchID).business.generation }
-    await gateway.release(); await retirement.value
+    await gateway.release(); try await retirement.value
     if generationAtReturn == nil { generationAtReturn = try await c.repository.snapshotV2(matchID: operation.binding.matchID).business.generation }
     let deadline = ContinuousClock.now.advanced(by: .seconds(3))
     var settled = false
@@ -111,6 +111,45 @@ extension M4AccountCompositionTests {
     do { try await admission.value; XCTFail("old observation cannot cross durable identity generation") }
     catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
     XCTAssertFalse(c.context.account.canEnterRecording)
+    try await prepared.close()
+  }
+  func testQuiescencePermanentlyStopsBusinessButKeepsOriginalSagaFacadeWritable() async throws {
+    let (prepared, trust) = try await identityFixture("m4-compose-quiesce"), observer = CompositionIdentityFixture()
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer)
+    let original = try binding(prepared); try await c.repository.bindAccountV4(original)
+    try await c.admitCurrentIdentity()
+    let generation = try await c.repository.identityGenerationV4(), identity = await c.repository.syncRepositoryIdentity()
+    try await c.quiesceBusiness(); try await c.quiesceBusiness()
+    XCTAssertFalse(c.context.account.canEnterRecording)
+    do { _ = try await c.session.prepareStart(starter: true); XCTFail("old Session business retirement is permanent") }
+    catch { XCTAssertEqual(error as? SessionError, .retired) }
+    do { try await c.admitCurrentIdentity(); XCTFail("old composition cannot readmit after quiescence") }
+    catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    let capability = AuthorityWire.base64URL(Data(repeating: 7, count: 32)); var fields = AuthorityFields()
+    fields.reauthenticationID = "original-reauth"; fields.recoveryCapabilityDigest = AuthorityWire.hash(Data(capability.utf8))
+    let saga = try DeletionSagaV4(intent: ControlIntentV1(requestID: "retained-parent", operation: .deleteAccount, fields: fields), accountID: original.accountID, activationEpoch: original.activationEpoch, recoveryCapability: capability, cloudChoice: .keep, localChoice: .delete, healthChoice: .keep, healthConfirmed: false, originalScope: CloudScopeV1(accountID: original.accountID, cloudSpaceID: original.cloudSpaceID, zoneID: "zone-fixture", activationEpoch: original.activationEpoch))
+    try await c.session.createDeletionSaga(saga)
+    let persisted = try await c.repository.deletionSagaV4(requestID: saga.intent.requestID)
+    XCTAssertEqual(persisted, saga)
+    let currentGeneration = try await c.repository.identityGenerationV4(), repoIdentity = await c.repository.syncRepositoryIdentity(), sessionIdentity = await c.session.syncRepositoryIdentity()
+    XCTAssertEqual(currentGeneration, generation); XCTAssertEqual(repoIdentity, identity); XCTAssertEqual(sessionIdentity, identity)
+    XCTAssertNil(c.context.recording.snapshot); XCTAssertTrue(c.context.recording.history.isEmpty)
+    try await prepared.close()
+  }
+  func testQuiescenceJoinsUncooperativeIdentityObservationAndRejectsLateAdmission() async throws {
+    let (prepared, trust) = try await identityFixture("m4-compose-held-identity"), observer = CompositionIdentityFixture(suspend: true)
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer)
+    try await c.repository.bindAccountV4(binding(prepared))
+    let admission = Task { try await c.admitCurrentIdentity() }; await observer.waitForEntry()
+    var began = false, done = false
+    let retiring = Task { began = true; try await c.quiesceBusiness(); done = true }
+    while !began { await Task.yield() }
+    try await Task.sleep(for: .milliseconds(30))
+    XCTAssertFalse(done, "quiescence must join its original cancellation-insensitive identity observation")
+    await observer.release()
+    do { try await admission.value; XCTFail("late old observation cannot admit") } catch {}
+    try await retiring.value
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
     try await prepared.close()
   }
   private func binding(_ prepared: M4PreparedIdentity) throws -> AccountBindingV4 {

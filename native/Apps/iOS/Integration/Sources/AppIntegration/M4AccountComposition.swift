@@ -47,6 +47,10 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private let watchRelay: M4WatchRegistrationRelay
   private var lifetime = UUID()
   private var closed = false
+  private var businessStopped = false
+  private var quiesced = false
+  private var quiescing: Task<Void, any Error>?
+  private var identityTasks: [UUID: Task<Void, any Error>] = [:]
   private(set) var admittedScope: CloudScope?
   private init(prepared: M4PreparedIdentity, repository: SQLiteSessionRepository, session: MatchSession, context: AccountAppContext, client: AuthorityClient, accountService: AccountService, phoneRegistration: PhoneWatchRegistrationService, watchRegistration: WatchRegistrationService, cloudBridge: CloudSessionBridge, sync: MatchSyncService, identity: any M4CurrentIdentityObserving, cloudSpaceID: String, watchRelay: M4WatchRegistrationRelay) {
     self.prepared = prepared; self.repository = repository; self.session = session; self.context = context; self.client = client
@@ -84,7 +88,14 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   /// The provider must observe the current dual identity again. A retained vault
   /// credential by itself never calls this method or admits the presentation.
   func admitCurrentIdentity() async throws {
-    guard !closed else { throw AuthorityError.identityChanged }
+    guard !closed, !businessStopped else { throw AuthorityError.identityChanged }
+    let id = UUID(), task = Task { try await self.observeAndAdmitIdentity() }
+    identityTasks[id] = task
+    defer { identityTasks[id] = nil }
+    try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+  }
+  private func observeAndAdmitIdentity() async throws {
+    guard !closed, !businessStopped else { throw AuthorityError.identityChanged }
     let token = UUID(); lifetime = token; admittedScope = nil; context.account.pauseIdentity()
     do {
       let generation = try await repository.identityGenerationV4()
@@ -118,10 +129,35 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       throw error
     }
   }
+  /// The owner closes business entry synchronously, then joins the original
+  /// Session's real capture observations before clearing borrowed UI references.
+  /// A failed durable drain throws and retains the original facade for retry.
+  static func retireBusiness(session: MatchSession, recording: RecordingModel) async throws {
+    recording.beginRetirement()
+    try await session.retireBusiness()
+    await recording.shutdown()
+  }
+  func quiesceBusiness() async throws {
+    guard !closed else { throw AuthorityError.identityChanged }
+    if quiesced { return }
+    if let quiescing { return try await quiescing.value }
+    businessStopped = true; lifetime = UUID(); admittedScope = nil
+    context.account.pauseIdentity(); context.recording.beginRetirement()
+    let session = session, recording = context.recording, observations = Array(identityTasks.values)
+    observations.forEach { $0.cancel() }
+    let task = Task {
+      for observation in observations { _ = await observation.result }
+      try await Self.retireBusiness(session: session, recording: recording)
+    }
+    quiescing = task
+    do { try await task.value; quiesced = true; quiescing = nil }
+    catch { quiescing = nil; throw error }
+  }
   private func unchanged(_ binding: AccountBindingV4, generation: Int64, token: UUID) async throws {
-    guard !closed, lifetime == token, try await repository.identityGenerationV4() == generation,
+    guard !closed, !businessStopped, lifetime == token, try await repository.identityGenerationV4() == generation,
           let current = try await repository.accountBindingV4(), try AuthorityWire.encode(current) == AuthorityWire.encode(binding), !closed, lifetime == token,
-          try await repository.identityGenerationV4() == generation else { throw AuthorityError.identityChanged }
+          try await repository.identityGenerationV4() == generation,
+          !closed, !businessStopped, lifetime == token else { throw AuthorityError.identityChanged }
   }
   private func raw(_ lhs: String, _ rhs: String) -> Bool { Data(lhs.utf8) == Data(rhs.utf8) }
 }
