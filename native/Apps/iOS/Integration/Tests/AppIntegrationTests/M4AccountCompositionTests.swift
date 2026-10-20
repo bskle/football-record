@@ -579,3 +579,136 @@ private actor CompositionAuthenticationRelay: AuthorityHTTPRelay {
     return AuthorityHTTPResponse(status: 200, body: try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes]))
   }
 }
+
+#if DEBUG
+extension M4AccountCompositionTests {
+  func testFreshSignInUsesOriginalChallengeAppleProofAndCurrentIdentity() async throws {
+    let f = try await freshServiceFixture()
+    let action = Task { await f.composition.context.account.perform(.signIn) }
+    let apple = try await serviceMailboxRequest(f.protocolRoot, operation: "apple")
+    let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: apple.payload) as? [String: String])
+    XCTAssertEqual(payload["nonce"], AuthorityWire.hash(Data("original-service-challenge".utf8)))
+    try serviceMailboxReply(apple, payload: JSONSerialization.data(withJSONObject: ["identityToken": "explicit-current-token", "authorizationCode": "explicit-current-code"]))
+    await action.value
+    let binding = try await f.composition.repository.accountBindingV4(), current = try await f.composition.repository.currentAuthRequestIDV4()
+    let attempt = try await f.composition.repository.authAttemptV4(requestID: XCTUnwrap(current)), body = await f.relay.originalAuthBody
+    XCTAssertEqual(binding?.role, .phone); XCTAssertEqual(binding?.deviceID, f.prepared.seed.installationID)
+    XCTAssertEqual(attempt?.requestDigest, body.map(AuthorityWire.hash)); XCTAssertTrue(f.composition.context.account.canEnterRecording)
+    let reads = await f.observer.reads, calls = await f.relay.calls; XCTAssertEqual(reads, 2); XCTAssertEqual(calls, 2)
+    try await f.composition.close()
+  }
+  func testFreshWatchRegistrationUsesOriginalServiceAndTwoContexts() async throws {
+    try await freshWatchService(holdVault: false)
+  }
+  func testOriginalWatchVaultTailCannotOutliveBusinessDrain() async throws {
+    try await freshWatchService(holdVault: true)
+  }
+  private func freshWatchService(holdVault: Bool) async throws {
+    let f = try await freshServiceFixture(watch: true, holdVault: holdVault), c = f.composition
+    let context = try WatchRegistrationContextV4(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", phoneID: "independent-original-phone", activationEpoch: 1, environment: .development)
+    let action = Task { await c.context.account.perform(.registerWatch) }
+    let first = try await serviceMailboxRequest(f.protocolRoot, operation: "phone-context")
+    try serviceMailboxReply(first, payload: AuthorityWire.encode(context))
+    let registration = try await serviceMailboxRequest(f.protocolRoot, operation: "phone-register")
+    let forward = try JSONDecoder().decode(CompositionWatchForward.self, from: registration.payload)
+    XCTAssertEqual(forward.action, .submit); XCTAssertEqual(forward.attempt.context, context)
+    XCTAssertEqual(forward.attempt.payload.watchID, f.prepared.seed.installationID)
+    let receipt = try serviceFixtureReceipt(key: f.key, requestID: forward.attempt.requestID, digest: forward.attempt.requestDigest, operation: "registerWatch", registration: ["watchID": forward.attempt.payload.watchID, "watchPublicKey": forward.attempt.payload.watchPublicKey])
+    let expires = Int64(Date().timeIntervalSince1970) + 3600
+    let response: [String: Any] = ["receipt": receipt, "sessionClaims": ["sessionID": "original-watch-session", "expiresAt": expires], "credential": ["token": AuthorityWire.base64URL(Data(repeating: 15, count: 32)), "sessionID": "original-watch-session", "accountID": "account-fixture", "deviceID": f.prepared.seed.installationID, "keyID": try AuthorityWire.deviceKeyID(publicKey: f.prepared.material.signer.publicKey), "activationEpoch": 1, "expiresAt": expires]]
+    try serviceMailboxReply(registration, payload: JSONSerialization.data(withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes]))
+    if holdVault {
+      guard await waitForVault(f.vault) else { XCTFail("original Watch service must reach its credential tail"); await action.value; try await c.close(); return }
+      let committed = try await c.repository.accountBindingV4(); XCTAssertEqual(committed?.role, .watch)
+      var done = false; let drain = Task { try await c.quiesceBusiness(); done = true }
+      let retired = await waitForOriginalRetirement(c.session); XCTAssertTrue(retired)
+      let deadline = ContinuousClock.now.advanced(by: .milliseconds(100))
+      while !done, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+      XCTAssertFalse(done); let stillOpen = try? await c.repository.accountBindingV4(); XCTAssertEqual(stillOpen, committed)
+      await f.vault.release(); await action.value; try await drain.value
+      XCTAssertFalse(c.context.account.canEnterRecording)
+    } else {
+      let second = try await serviceMailboxRequest(f.protocolRoot, operation: "phone-context")
+      try serviceMailboxReply(second, payload: AuthorityWire.encode(context))
+      await action.value; XCTAssertTrue(c.context.account.canEnterRecording)
+      let reads = await f.observer.reads; XCTAssertEqual(reads, 2)
+    }
+    let actual = try await c.repository.watchRegistrationAttemptV4(requestID: forward.attempt.requestID), raw = try await c.repository.watchRegistrationReceiptV4(requestID: forward.attempt.requestID)
+    XCTAssertEqual(actual, forward.attempt); XCTAssertEqual(raw, try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys, .withoutEscapingSlashes]))
+    let credential = try await f.vault.credential(); XCTAssertEqual(credential.deviceID, f.prepared.seed.installationID)
+    let repoID = await c.repository.syncRepositoryIdentity(), sessionID = await c.session.syncRepositoryIdentity(); XCTAssertEqual(repoID, sessionID)
+    try await c.close()
+  }
+  private struct FreshServiceFixture {
+    let composition: M4AccountComposition
+    let prepared: M4PreparedIdentity
+    let observer: CompositionIdentityFixture
+    let vault: CompositionServiceVault
+    let relay: CompositionFreshAuthenticationRelay
+    let protocolRoot: URL
+    let key: Curve25519.Signing.PrivateKey
+  }
+  private func freshServiceFixture(watch: Bool = false, holdVault: Bool = false) async throws -> FreshServiceFixture {
+    let root = location(), protocolRoot = root.appendingPathComponent("protocol"), key = Curve25519.Signing.PrivateKey(), observer = CompositionIdentityFixture(), vault = CompositionServiceVault(hold: holdVault)
+    let namespace = watch ? "m4-ui-fresh-watch" : "m4-ui-fresh-phone", publicKey = AuthorityWire.base64URL(key.publicKey.rawRepresentation)
+    let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["service-key": publicKey])
+    let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("retained")) { _ in
+      M4IdentityMaterial(signer: try DevelopmentDeviceSigner(namespace: namespace, rawRepresentation: Data(repeating: watch ? 42 : 41, count: 32)), vault: vault)
+    }
+    let config = DevelopmentAuthorityConfiguration(dataset: "fresh", namespace: namespace, baseURL: "http://127.0.0.1:1", keyID: "service-key", publicKey: publicKey, cloudSpaceID: "cloud-fixture", subject: "configuration-does-not-admit-current-identity", role: watch ? "watch" : "phone")
+    let adapters = try M4ControlledAdapters.make(configuration: config, rootDirectory: protocolRoot)
+    let relay = CompositionFreshAuthenticationRelay(key: key, deviceID: prepared.seed.installationID, publicKey: prepared.material.signer.publicKey)
+    let composition = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", identity: observer, authorityRelay: relay, controlledAdapters: adapters)
+    return FreshServiceFixture(composition: composition, prepared: prepared, observer: observer, vault: vault, relay: relay, protocolRoot: protocolRoot, key: key)
+  }
+  private struct ServiceMailboxRequest { let response: URL; let payload: Data }
+  private func serviceMailboxRequest(_ root: URL, operation: String) async throws -> ServiceMailboxRequest {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(3)), directory = root.appendingPathComponent("development/mailbox/outgoing")
+    while ContinuousClock.now < deadline {
+      for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any], value["operation"] as? String == operation,
+              let id = value["id"] as? String, let encoded = value["payload"] as? String, let payload = Data(base64Encoded: encoded) else { continue }
+        return ServiceMailboxRequest(response: root.appendingPathComponent("development/mailbox/responses/" + id + ".json"), payload: payload)
+      }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    throw AuthorityError.unavailable
+  }
+  private func serviceMailboxReply(_ request: ServiceMailboxRequest, payload: Data) throws {
+    try JSONSerialization.data(withJSONObject: ["payload": payload.base64EncodedString()], options: [.sortedKeys]).write(to: request.response, options: .atomic)
+  }
+}
+private struct CompositionWatchForward: Decodable { let attempt: WatchRegistrationAttemptV4; let action: WatchRegistrationAction }
+private func serviceFixtureReceipt(key: Curve25519.Signing.PrivateKey, requestID: String, digest: String, operation: String, registration: [String: String]? = nil) throws -> [String: Any] {
+  var body: [String: Any] = ["version": 1, "environment": "development", "keyID": "service-key", "receiptID": requestID + "-receipt", "requestID": requestID, "requestDigest": digest, "operation": operation, "accountID": "account-fixture", "activationEpoch": 1, "matchID": "", "lockID": "", "recordingDeviceID": "", "result": "registered", "issuedAt": Int64(Date().timeIntervalSince1970)]
+  if let registration { body["registration"] = registration }
+  let raw = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+  return ["body": body, "signature": AuthorityWire.base64URL(try key.signature(for: AuthorityWire.signedInput("football-record.authority.receipt.v1", body: raw)))]
+}
+private actor CompositionFreshAuthenticationRelay: AuthorityHTTPRelay {
+  let key: Curve25519.Signing.PrivateKey
+  let deviceID, publicKey: String
+  private(set) var calls = 0
+  private(set) var originalAuthBody: Data?
+  init(key: Curve25519.Signing.PrivateKey, deviceID: String, publicKey: String) { self.key = key; self.deviceID = deviceID; self.publicKey = publicKey }
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    calls += 1
+    guard let object = try JSONSerialization.jsonObject(with: request.body) as? [String: Any], let id = object["requestID"] as? String,
+          object["deviceID"] as? String == deviceID, object["devicePublicKey"] as? String == publicKey else { throw AuthorityError.invalidWire }
+    if request.path == "/v1/auth/challenges" {
+      let value: [String: Any] = ["version": 1, "requestID": id, "challengeID": "fresh-original-challenge", "challenge": "original-service-challenge", "expiresAt": Int64(Date().timeIntervalSince1970) + 120]
+      return AuthorityHTTPResponse(status: 200, body: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]))
+    }
+    guard request.path == "/v1/auth/apple", object["identityToken"] as? String == "explicit-current-token", object["authorizationCode"] as? String == "explicit-current-code",
+          object["challengeID"] as? String == "fresh-original-challenge", object["cloudSpaceID"] as? String == "cloud-fixture", let proof = object["deviceProof"] as? String else { throw AuthorityError.invalidWire }
+    var signing = object; signing["deviceProof"] = nil; signing["challengeSHA256"] = AuthorityWire.hash(Data("original-service-challenge".utf8))
+    let signingBytes = try JSONSerialization.data(withJSONObject: signing, options: [.sortedKeys, .withoutEscapingSlashes]), deviceKey = try Curve25519.Signing.PublicKey(rawRepresentation: AuthorityWire.decodeBase64URL(publicKey, count: 32))
+    guard deviceKey.isValidSignature(try AuthorityWire.decodeBase64URL(proof, count: 64), for: AuthorityWire.signedInput("football-record.device.challenge.v1", body: signingBytes)) else { throw AuthorityError.invalidSignature }
+    originalAuthBody = request.body
+    let receipt = try serviceFixtureReceipt(key: key, requestID: id, digest: AuthorityWire.hash(request.body), operation: "authApple"), expires = Int64(Date().timeIntervalSince1970) + 3600
+    let keyID = try AuthorityWire.deviceKeyID(publicKey: publicKey)
+    let response: [String: Any] = ["receipt": receipt, "sessionClaims": ["sessionID": "fresh-original-session", "expiresAt": expires], "credential": ["token": AuthorityWire.base64URL(Data(repeating: 16, count: 32)), "sessionID": "fresh-original-session", "accountID": "account-fixture", "deviceID": deviceID, "keyID": keyID, "activationEpoch": 1, "expiresAt": expires], "context": ["accountID": "account-fixture", "deviceID": deviceID, "keyID": keyID, "activationEpoch": 1], "reauthenticationID": "fresh-original-reauth"]
+    return AuthorityHTTPResponse(status: 200, body: try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes]))
+  }
+}
+#endif
