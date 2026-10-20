@@ -307,6 +307,7 @@ struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
     service = LifecycleService(client: admission.composition.client, repository: admission.composition.repository,
       coordinator: M4GuardedLifecycleCoordinator(admission: admission), scope: admission.scope, ledger: admission.ledger,
       cloudDeletion: cloudDeletion, healthDeletion: healthDeletion, localTransportDeletion: M4GuardedLocalTransportDeletion(admission: admission))
+    if !admission.composition.registerControlOwner(self) { stopped = true }
   }
   func resume(requestID: String) async throws -> DeletionSagaV4 {
     guard !stopped else { throw AuthorityError.identityChanged }

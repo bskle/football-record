@@ -37,6 +37,7 @@ struct M4IdentityMaterial: Sendable {
   }
   func close() async throws {
     guard !closed else { return }
+    try lease.verifyIdentity()
     try await repository?.close(); repository = nil
     closed = true; lease.close()
   }

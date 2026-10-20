@@ -165,7 +165,7 @@ import HealthKitDeletion
     catch { XCTAssertEqual(error as? LocalBusinessErasureErrorV4, .residualBusiness(table: "lifecycle_steps_v4")) }
     XCTAssertEqual(try businessWitnessCount(f.database), 1)
     XCTAssertEqual(try M4CatalogIO.encode(catalog.receipts(requestID: plan.requestID)), try M4CatalogIO.encode([first]))
-    try catalog.close(); try await prepared.close()
+    try catalog.close(); try await composition.close()
   }
   private func sqlStrings(_ url: URL, _ query: String) throws -> [String] {
     var db: OpaquePointer?, statement: OpaquePointer?
@@ -496,6 +496,40 @@ import HealthKitDeletion
     XCTAssertFalse(actual?.backendDeleted ?? true); XCTAssertEqual(try businessWitnessCount(f.database), 1)
     try await f.close()
   }
+  func testPublicContextLeaseCloseFailurePreservesOriginalSagaAndRetriesSameOwner() async throws {
+    let f = try await deletionGuardFixture(healthIssue: .missingMapping)
+    let owner = f.prepared.seed.controlDirectory.appendingPathComponent("identity.owner"), retained = f.root.appendingPathComponent("original-identity-owner")
+    try FileManager.default.moveItem(at: owner, to: retained); try Data("foreign-owner-preserved".utf8).write(to: owner)
+    await f.composition.context.shutdown()
+    XCTAssertNotNil(f.composition.lastCloseFailure, "Void API records typed failure instead of pretending the original owner closed")
+    let retainedSaga = try? await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(retainedSaga?.intent, f.saga.intent); XCTAssertEqual(retainedSaga?.recoveryCapability, f.saga.recoveryCapability)
+    do { try await f.composition.close(); XCTFail("throwing owner close exposes the same real lease-preflight refusal") }
+    catch { XCTAssertEqual(error as? M4BootstrapError, .identityUnavailable) }
+    let foreign = f.root.appendingPathComponent("foreign-owner-preserved")
+    try FileManager.default.moveItem(at: owner, to: foreign); try FileManager.default.moveItem(at: retained, to: owner)
+    try await f.composition.close(); XCTAssertNil(f.composition.lastCloseFailure)
+    let prepared = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }
+    let reopened = try prepared.openRepository(authorityTrust: f.composition.client.trust)
+    let saga = try await reopened.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(saga?.intent, f.saga.intent); XCTAssertEqual(saga?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(try Data(contentsOf: foreign), Data("foreign-owner-preserved".utf8))
+    try f.catalog.close(); try await f.ledger.close(); try await prepared.close()
+  }
+  func testCompositionFinalCloseJoinsRegisteredControlBeforeClosingOriginalDB() async throws {
+    let f = try await deletionGuardFixture(healthIssue: .missingMapping), cloud = GateHeldCloud()
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger), cloudDeletion: cloud)
+    let operation = Task { try await controller.resume(requestID: f.saga.intent.requestID) }; await cloud.waitForEntry()
+    var began = false, done = false
+    let closing = Task { began = true; try await f.composition.close(); done = true }
+    while !began { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
+    XCTAssertFalse(done, "the original control HTTP/client lifetime ends after its Saga task joins")
+    let retained = try? await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertEqual(retained?.intent, f.saga.intent)
+    await cloud.release(); _ = await operation.result; try await closing.value
+    do { _ = try await controller.resume(requestID: f.saga.intent.requestID); XCTFail("owner final close permanently stops control admission") } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    try f.catalog.close(); try await f.ledger.close()
+  }
   private struct GateFixture {
     let root: URL
     let composition: M4AccountComposition
@@ -505,7 +539,7 @@ import HealthKitDeletion
     let scope: CloudScope
     let saga: DeletionSagaV4
     let database: URL
-    func close() async throws { try await composition.quiesceBusiness(); try catalog.close(); try await ledger.close(); try await prepared.close() }
+    func close() async throws { try await composition.close(); try catalog.close(); try await ledger.close() }
   }
   private func deletionGuardFixture(healthIssue: M4HealthSelectionIssue?, sealParent: Bool = true, acceptBackend: Bool = true, additionalTransport: Bool = false, additionalStore: Bool = false, authorityRelay: (any AuthorityHTTPRelay)? = nil, hasCredential: Bool = false, extraStore: M4AccountComposition? = nil) async throws -> GateFixture {
     let root = try root(), namespace = "guard-fixture", key = Curve25519.Signing.PrivateKey()

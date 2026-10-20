@@ -78,7 +78,7 @@ extension M4AccountCompositionTests {
     try await c.repository.bindAccountV4(binding(prepared))
     await c.context.refresh(); XCTAssertFalse(c.context.account.canEnterRecording)
     let observations = await observer.reads; XCTAssertEqual(observations, 0, "opening storage is not current identity admission")
-    try await prepared.close()
+    try await c.close()
   }
   func testProductionRejectsExplicitHTTPFixtureBeforeOpeningBusinessDB() async throws {
     let (prepared, _) = try await identityFixture(SQLiteSessionRepository.productionNamespace, signerNamespace: "m4-production-http-fixture")
@@ -96,7 +96,7 @@ extension M4AccountCompositionTests {
     do { try await c.admitCurrentIdentity(); XCTFail("default identity boundary cannot admit") }
     catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
     XCTAssertFalse(c.context.account.canEnterRecording)
-    try await prepared.close()
+    try await c.close()
   }
   func testExplicitAdmissionRequiresMatchingFreshAppleAndCloudObservation() async throws {
     let (prepared, trust) = try await identityFixture("m4-compose-three")
@@ -108,7 +108,7 @@ extension M4AccountCompositionTests {
     do { try await c.admitCurrentIdentity(); XCTFail("mismatched current cloud identity cannot admit") }
     catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
     XCTAssertFalse(c.context.account.canEnterRecording)
-    try await prepared.close()
+    try await c.close()
   }
   func testAdmissionRejectsGenerationChangedDuringCurrentIdentityAwait() async throws {
     let (prepared, trust) = try await identityFixture("m4-compose-four")
@@ -120,7 +120,7 @@ extension M4AccountCompositionTests {
     do { try await admission.value; XCTFail("old observation cannot cross durable identity generation") }
     catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
     XCTAssertFalse(c.context.account.canEnterRecording)
-    try await prepared.close()
+    try await c.close()
   }
   func testQuiescencePermanentlyStopsBusinessButKeepsOriginalSagaFacadeWritable() async throws {
     let (prepared, trust) = try await identityFixture("m4-compose-quiesce"), observer = CompositionIdentityFixture()
@@ -143,7 +143,7 @@ extension M4AccountCompositionTests {
     let currentGeneration = try await c.repository.identityGenerationV4(), repoIdentity = await c.repository.syncRepositoryIdentity(), sessionIdentity = await c.session.syncRepositoryIdentity()
     XCTAssertEqual(currentGeneration, generation); XCTAssertEqual(repoIdentity, identity); XCTAssertEqual(sessionIdentity, identity)
     XCTAssertNil(c.context.recording.snapshot); XCTAssertTrue(c.context.recording.history.isEmpty)
-    try await prepared.close()
+    try await c.close()
   }
   func testQuiescenceJoinsUncooperativeIdentityObservationAndRejectsLateAdmission() async throws {
     let (prepared, trust) = try await identityFixture("m4-compose-held-identity"), observer = CompositionIdentityFixture(suspend: true)
@@ -159,7 +159,64 @@ extension M4AccountCompositionTests {
     do { try await admission.value; XCTFail("late old observation cannot admit") } catch {}
     try await retiring.value
     XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
-    try await prepared.close()
+    try await c.close()
+  }
+  func testPublicContextShutdownJoinsOriginalHeldCaptureBeforeClosingFacade() async throws {
+    let (prepared, trust) = try await identityFixture("m4-public-close-capture"), gateway = CompositionSuspendedGateway()
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", workout: gateway)
+    let operation = try await seedOriginalPendingCapture(c, prepared: prepared)
+    await c.context.recording.load(); _ = await gateway.waitForEntry()
+    var began = false, done = false
+    let closing = Task { began = true; await c.context.shutdown(); done = true }
+    while !began { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
+    XCTAssertFalse(done, "public Void context shutdown must still join the original Session writer")
+    var ownerDone = false
+    let sameClose = Task { try await c.close(); ownerDone = true }
+    try await Task.sleep(for: .milliseconds(20)); XCTAssertFalse(ownerDone)
+    await gateway.release(); await closing.value; try await sameClose.value
+    // Drain the old implementation's late error path before reopening the same DB.
+    _ = try? await c.session.retireBusiness()
+    let next = try await M4IdentityBootstrap.prepare(root: prepared.seed.root, namespace: prepared.seed.namespace, controlDirectory: prepared.seed.controlDirectory) { _ in prepared.material }
+    let repo = try next.openRepository(authorityTrust: trust)
+    let snapshot = try await repo.snapshotV2(matchID: operation.binding.matchID)
+    XCTAssertEqual(snapshot.captureOperations.first(where: { $0.operation.id == operation.id })?.observation?.outcome, .running)
+    try await next.close()
+  }
+  func testAccountReplacementLeaseFailureKeepsOriginalAndBlocksQueuedFactories() async throws {
+    let (prepared, trust) = try await identityFixture("m4-account-replace-close"), gateway = CompositionSuspendedGateway()
+    let c = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: "cloud-fixture", workout: gateway)
+    _ = try await seedOriginalPendingCapture(c, prepared: prepared)
+    await c.context.recording.load(); _ = await gateway.waitForEntry()
+    let lifecycle = IntegrationLifecycle(), original = try await lifecycle.replace { IntegrationContext.account(c) }
+    let owner = prepared.seed.controlDirectory.appendingPathComponent("identity.owner"), retained = prepared.seed.root.deletingLastPathComponent().appendingPathComponent("retained-original-owner")
+    try FileManager.default.moveItem(at: owner, to: retained); try Data("foreign close owner".utf8).write(to: owner)
+    var firstBegan = false, factories = 0
+    let first = Task { firstBegan = true; return try await lifecycle.replace { factories += 1; throw CompositionCloseProbe.factoryReached } }
+    while !firstBegan { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
+    let second = Task { try await lifecycle.replace { factories += 1; throw CompositionCloseProbe.factoryReached } }
+    try await Task.sleep(for: .milliseconds(20)); XCTAssertEqual(factories, 0)
+    await gateway.release()
+    do { _ = try await first.value; XCTFail("original lease close must fail") } catch { XCTAssertEqual(error as? M4BootstrapError, .identityUnavailable) }
+    do { _ = try await second.value; XCTFail("queued replacement must retain the same failed owner") } catch { XCTAssertEqual(error as? M4BootstrapError, .identityUnavailable) }
+    XCTAssertEqual(factories, 0); XCTAssertTrue(lifecycle.current === original); XCTAssertNotNil(c.lastCloseFailure)
+    let foreign = prepared.seed.root.deletingLastPathComponent().appendingPathComponent("foreign-owner-preserved")
+    try FileManager.default.moveItem(at: owner, to: foreign); try FileManager.default.moveItem(at: retained, to: owner)
+    do { _ = try await lifecycle.replace { factories += 1; throw CompositionCloseProbe.factoryReached }; XCTFail("probe factory throws") }
+    catch { XCTAssertEqual(error as? CompositionCloseProbe, .factoryReached) }
+    XCTAssertEqual(factories, 1); XCTAssertNil(c.lastCloseFailure)
+  }
+  private func seedOriginalPendingCapture(_ c: M4AccountComposition, prepared: M4PreparedIdentity) async throws -> CaptureOperation {
+    // Explicit local unbound-development facts only, on the one original facade.
+    // This is not an authenticated account recording or an authority permit test.
+    let date = Date(), intent = StartIntent(id: "close-intent", matchID: "close-match", recordingDeviceID: prepared.seed.installationID, requestedAt: date)
+    let original = MatchDescriptor(startIntent: intent, starter: true)
+    _ = try await c.repository.commitV2(StoreCommitV2(commandID: intent.id, expectedGeneration: 0, descriptor: original, events: [], captureRevisions: [], newCaptureOperations: [], captureOperationUpdates: [], businessOutbox: []))
+    let descriptor = MatchDescriptor(startIntent: intent, starter: true, startPermit: DevelopmentStartFixture.permit(for: intent), backendLockState: .held)
+    var recorder = LiveMatchRecorder(descriptor: descriptor); try recorder.start(eventID: "close-start", sourceDeviceID: prepared.seed.installationID, now: date)
+    let operation = try CaptureOperation(id: "close-capture", binding: CaptureBinding(matchID: intent.matchID, recordingDeviceID: prepared.seed.installationID), associatedCommandID: "close-start-command", action: .start, requestedAt: date, externalToken: "close-capture")
+    let delta = try BusinessOutboxItem(id: "close-delta", matchID: intent.matchID, sourceDeviceID: prepared.seed.installationID, payload: BusinessDeltaV2(descriptor: descriptor, events: recorder.events, captureRevisions: []))
+    _ = try await c.repository.commitV2(StoreCommitV2(commandID: "close-start-command", expectedGeneration: 1, descriptor: descriptor, events: recorder.events, captureRevisions: [], newCaptureOperations: [operation], captureOperationUpdates: [], businessOutbox: [delta]))
+    return operation
   }
   private func binding(_ prepared: M4PreparedIdentity) throws -> AccountBindingV4 {
     try AccountBindingV4(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", deviceID: prepared.seed.installationID, activationEpoch: 1, role: .phone, environment: .development)
@@ -197,3 +254,5 @@ private actor CompositionIdentityFixture: M4CurrentIdentityObserving {
 private struct CompositionUnavailableRelay: AuthorityHTTPRelay {
   func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse { throw AuthorityError.unavailable }
 }
+
+private enum CompositionCloseProbe: Error { case factoryReached }

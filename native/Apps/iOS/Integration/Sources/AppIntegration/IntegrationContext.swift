@@ -17,9 +17,13 @@ import MatchPresentation
   private(set) var transportUnavailable = false
   private(set) var transportDiagnostic: String?
   private var closed = false
+  private let accountOwner: M4AccountComposition?
   private var shuttingDown: Task<Void, any Error>?
-  private init(repository: SQLiteSessionRepository?, session: MatchSession?, model: RecordingModel, coordinator: DeviceSyncCoordinator?, namespace: String?, localDeviceID: String?) {
-    self.repository = repository; self.session = session; self.model = model; self.coordinator = coordinator; self.namespace = namespace; self.localDeviceID = localDeviceID
+  private init(repository: SQLiteSessionRepository?, session: MatchSession?, model: RecordingModel, coordinator: DeviceSyncCoordinator?, namespace: String?, localDeviceID: String?, accountOwner: M4AccountComposition? = nil) {
+    self.repository = repository; self.session = session; self.model = model; self.coordinator = coordinator; self.namespace = namespace; self.localDeviceID = localDeviceID; self.accountOwner = accountOwner
+  }
+  static func account(_ owner: M4AccountComposition) -> IntegrationContext {
+    IntegrationContext(repository: owner.repository, session: owner.session, model: owner.context.recording, coordinator: nil, namespace: owner.namespace, localDeviceID: owner.localDeviceID, accountOwner: owner)
   }
   static func simulation(_ model: RecordingModel) -> IntegrationContext { IntegrationContext(repository: nil, session: nil, model: model, coordinator: nil, namespace: nil, localDeviceID: nil) }
   static func makeWithTransportFactory(root: URL, namespace: String, development: Bool, workout: any WorkoutGateway = UnavailableWorkoutGateway(), trust: any RevocablePeerTrust, transportFactory: () throws -> any SyncTransport & DeviceSyncEventSource) async throws -> IntegrationContext {
@@ -53,11 +57,14 @@ import MatchPresentation
     guard !closed else { return }
     if let shuttingDown { return try await shuttingDown.value }
     model.beginRetirement()
-    let session = session, model = model, repository = repository
+    let session = session, model = model, repository = repository, accountOwner = accountOwner
     let task = Task {
-      if let session { try await M4AccountComposition.retireBusiness(session: session, recording: model) }
-      else { await model.shutdown() }
-      try await repository?.close()
+      if let accountOwner { try await accountOwner.close() }
+      else {
+        if let session { try await M4AccountComposition.retireBusiness(session: session, recording: model) }
+        else { await model.shutdown() }
+        try await repository?.close()
+      }
     }
     shuttingDown = task
     do { try await task.value; closed = true; shuttingDown = nil }
