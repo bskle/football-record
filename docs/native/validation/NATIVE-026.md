@@ -319,3 +319,24 @@ Store and local-transport entrances apply the extra Health.delete condition: act
 | `deletion-guard-checkpoint-commit-match.json` | `d8c36c3a541dcbc01b8958927a60b0aa84ec56b4eb3d00148ff1c2163c471bac` |
 
 Root's newly reported S26-lifecycle-replace-overlap remains open: current=nil across awaited shutdown can let another MainActor replace build early and overwrite the first result. Its real RED/serial fix will follow root's044/045 dependency merge. The existing148/0 did not cover that overlap and is not treated as its closure. App action/AccountService task ownership, true full-Health aggregate admission/execution, creation-to-seal crash windows, final close and complete owned current-zero composition remain pending. No device/account/signing/App/UI/power-loss or whole-candidate acceptance is established.
+
+
+## Serial replacement overlap repair
+
+Source `ef557edd01bb099b145b57ce1980c9fd11ccba9d` adds a MainActor FIFO replacement gate across shutdown and the next factory. A second caller waits while the original positive capture observation is held, then retires/closes the first replacement before constructing the second. When the actual durable drain fails, both queued callers retry the same original retired context and neither factory runs. No cancellation or failure is converted into a successful close. The tests retain all earlier business and generation assertions.
+
+- Actual RED: two new tests / nine assertion failures, no unexpected failures. The broken implementation ran the second factory before the held original drain returned, produced second-before-first ordering, and allowed a factory through the failed drain. Exact pre-fix product/test bytes are preserved.
+- GREEN: one related AppIntegration run **15/0** (IntegrationContext6, Composition8, DevicePair1). All **346 inputs** are unchanged before/post and match the exact source commit. `git diff --check` passes. This does not rerun or combine the old148/0 and16/0 layers.
+- Base is root's actual044/045 merge `c01d5c067f39f473e95ebff136a5a7d2f33aac8e`. Their separate root current-zero checks are Store14/0, SessionRetirement11/0 and Cloud7/0; no combined whole-candidate claim follows. The empty ignored MatchCore `.swiftpm/xcode/` directories remain as the saved exception.
+
+| Evidence in the bootstrap folder | SHA256 |
+| --- | --- |
+| `replacement-overlap-red.log` | `feafdf73b8338dee43d6cdc8205b97e3bec02e5d0a5385ed617a52fc824014ab` |
+| `replacement-overlap-red-source.swift` | `f4a7589766883a3716af11fc6c9d92b20da43a9e4ad99ad7f6b26c0d91dbc55e` |
+| `replacement-overlap-red-tests.swift` | `aa8bf5e9cf0f90fa3b4f7506ffd3fdccb18c2263d45086c77ec396f77de02127` |
+| `replacement-overlap-related-green.log` | `1a5c974e737fd9fe2567622d02b0f37cb9ad3be45ef7329d25e387711b224633` |
+| `replacement-overlap-checkpoint-inputs.json` | `3c7772cc7b3cb9c84341c5f1e2f21c76a48fc05e68a9d56e5f5a9cb897c71b3a` |
+| `replacement-overlap-checkpoint-post.json` | `dc7a3caf7184696da2a7fb294a9e969b4670050de63f5c2cb528d1a8d2ed82ed` |
+| `replacement-overlap-checkpoint-commit-match.json` | `1bf340c1188a1749f778cea5218794337059311d35053ff9f36a58e2bdb35b22` |
+
+Independent review still controls finding closure. Remaining aggregate work must use accepted045 concrete read-only original Store witnesses and always invoke accepted044 Cloud replay, preserve first receipt bytes, and verify all owned components. Final Health selection must follow original capture writer join and match all retained original facts; an earlier immutable raw artifact that omits late positive facts cannot authorize Store erasure. Accepted043 mailbox drain inspection is still unavailable at this checkpoint. Default providers remain unavailable; real SDK, device/account, App/UI, power-loss and whole026 checks are pending.
