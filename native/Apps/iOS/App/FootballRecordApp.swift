@@ -13,6 +13,7 @@ private struct RecordingRoot: View {
     @State private var closeFailure: String?
     @State private var failure: String?
     @State private var replacing = false
+    @State private var initializing = false
     var body: some View {
         Group {
             if let context {
@@ -28,12 +29,22 @@ private struct RecordingRoot: View {
                 }.padding()
             }
             else { ProgressView("正在载入记录") }
-        }.disabled(replacing).task { if model == nil && context == nil { await initialize() } }
+        }.disabled(replacing || initializing)
+          .safeAreaInset(edge: .top, spacing: 0) {
+              if applicationOwner?.developmentSimulation == true {
+                  Text("开发演练 · 模拟身份").font(.caption2).padding(.vertical, 4)
+                      .frame(maxWidth: .infinity).background(.thinMaterial)
+                      .accessibilityIdentifier("m4-controlled-identity-marker")
+              }
+          }
+          .task { if model == nil && context == nil && applicationOwner == nil { await initialize() } }
           .alert("暂时无法关闭原记录", isPresented: Binding(get: { closeFailure != nil }, set: { if !$0 { closeFailure = nil } })) {
               Button("知道了", role: .cancel) {}
           } message: { Text(closeFailure ?? "") }
     }
     private func initialize() async {
+        guard !initializing, model == nil, context == nil, applicationOwner == nil else { return }
+        initializing = true; defer { initializing = false }
         do {
             #if DEBUG
             let arguments = ProcessInfo.processInfo.arguments
@@ -46,7 +57,12 @@ private struct RecordingRoot: View {
                 return
             }
             if arguments.contains("--m4-development") {
-                context = try await DevelopmentAuthorityScenario.fromPrivateFile()
+                let next = try await M4ApplicationBootstrap.controlledFromPrivateFile()
+                // Retain the original throwing close owner before activation can
+                // fail or be cancelled; reload must close it before another DB.
+                applicationOwner = next
+                try Task.checkCancellation(); try await next.activateControlled(); try Task.checkCancellation()
+                context = next.context
                 if arguments.contains("--m4-auto-signin"), let context { await context.account.perform(.signIn); await context.refresh() }
                 return
             }

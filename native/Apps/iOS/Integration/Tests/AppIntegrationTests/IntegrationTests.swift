@@ -5,6 +5,8 @@ import MatchSession
 import MatchStore
 import MatchPresentation
 import WorkoutCapture
+import AccountKit
+import CryptoKit
 @testable import AppIntegration
 
 @MainActor final class IntegrationTests: XCTestCase {
@@ -103,3 +105,66 @@ import WorkoutCapture
 }
 
 private struct TestIdentity: DeviceIdentityProvider { func localDeviceID() async throws -> String { "integration-test-device" } }
+
+#if DEBUG
+extension IntegrationTests {
+  func testControlledM4BootstrapRejectsMissingIndependentIdentityBeforeBusinessDB() async throws {
+    let (root, configuration) = try controlledApplicationFixture(observations: false)
+    do { _ = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: root); XCTFail("configuration cannot synthesize independent identity") } catch {}
+    XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(configuration.namespace).path))
+    XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("development/m4-controls").path))
+  }
+  func testControlledM4BootstrapUsesOriginalMaterialAndOneFacadeAcrossReopen() async throws {
+    for role in ["phone", "watch"] {
+      let (root, configuration) = try controlledApplicationFixture(role: role)
+      let first = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: root)
+      try await first.activateControlled()
+      let directory = root.appendingPathComponent(configuration.namespace), key = try Data(contentsOf: directory.appendingPathComponent("development.key"))
+      let provider = PersistentDeviceIdentityProvider(url: directory.appendingPathComponent("device.identity"), repository: first.context.repository)
+      let originalID = try await provider.localDeviceID(), repositoryID = await first.context.repository.syncRepositoryIdentity(), sessionID = await first.context.session.syncRepositoryIdentity()
+      XCTAssertEqual(repositoryID, sessionID); XCTAssertEqual(key.count, 32); XCTAssertTrue(first.developmentSimulation)
+      XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("authority.fixture").path)); XCTAssertTrue(FileManager.default.fileExists(atPath: directory.appendingPathComponent("development.vault").path))
+      XCTAssertFalse(first.context.account.canEnterRecording, "material/credential opening never admits current identity")
+      let binding = try await first.context.repository.accountBindingV4(); XCTAssertNil(binding)
+      let apple = root.appendingPathComponent("development/current-identity/apple-account.json"), cloud = root.appendingPathComponent("development/current-identity/cloud-space.json")
+      let originalApple = try Data(contentsOf: apple), originalCloud = try Data(contentsOf: cloud)
+      try await first.shutdown()
+      let reopened = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: root)
+      try await reopened.activateControlled()
+      let nextProvider = PersistentDeviceIdentityProvider(url: directory.appendingPathComponent("device.identity"), repository: reopened.context.repository)
+      let nextID = try await nextProvider.localDeviceID(); XCTAssertEqual(nextID, originalID)
+      XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("development.key")), key)
+      XCTAssertEqual(try Data(contentsOf: apple), originalApple); XCTAssertEqual(try Data(contentsOf: cloud), originalCloud)
+      XCTAssertFalse(reopened.context.account.canEnterRecording); try await reopened.shutdown()
+    }
+  }
+  func testControlledM4BootstrapDoesNotRegeneratePartialMaterialBesideOriginalDB() async throws {
+    let (root, configuration) = try controlledApplicationFixture()
+    let original = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: root)
+    try await original.shutdown()
+    let directory = root.appendingPathComponent(configuration.namespace), database = directory.appendingPathComponent("matches.sqlite"), key = directory.appendingPathComponent("development.key")
+    let bytes = try Data(contentsOf: database), identity = try Data(contentsOf: directory.appendingPathComponent("device.identity"))
+    try FileManager.default.moveItem(at: key, to: root.appendingPathComponent("saved-original-key"))
+    do { _ = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: root); XCTFail("missing original key is not a new installation") } catch {}
+    XCTAssertFalse(FileManager.default.fileExists(atPath: key.path)); XCTAssertEqual(try Data(contentsOf: database), bytes)
+    XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("device.identity")), identity)
+  }
+  private func controlledApplicationFixture(role: String = "phone", observations: Bool = true) throws -> (URL, DevelopmentAuthorityConfiguration) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("m4-application-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    let key = Curve25519.Signing.PrivateKey(), namespace = "m4-ui-assembly-" + role
+    let configuration = DevelopmentAuthorityConfiguration(dataset: "assembly", namespace: namespace, baseURL: "http://127.0.0.1:1", keyID: "application-fixture", publicKey: AuthorityWire.base64URL(key.publicKey.rawRepresentation), cloudSpaceID: "independent-cloud", subject: "configured-subject-does-not-admit", role: role)
+    if observations {
+      let directory = root.appendingPathComponent("development/current-identity")
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+      let observation = UUID().uuidString, common: [String: Any] = ["version": 1, "environment": "development", "namespace": namespace, "observationID": observation]
+      for (name, fields) in [("apple-account.json", ["accountID": "independent-account"]), ("cloud-space.json", ["cloudSpaceID": "independent-cloud", "zoneID": "independent-zone"])] {
+        let file = directory.appendingPathComponent(name), object = common.merging(fields) { _, new in new }
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]).write(to: file, options: .withoutOverwriting)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+      }
+    }
+    return (root, configuration)
+  }
+}
+#endif

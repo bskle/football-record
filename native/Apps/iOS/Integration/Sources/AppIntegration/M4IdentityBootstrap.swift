@@ -3,6 +3,9 @@ import Darwin
 import AccountKit
 import MatchStore
 import MatchSession
+#if DEBUG
+import MatchPresentation
+#endif
 
 enum M4BootstrapError: Error, Equatable {
   case invalidNamespace, identityUnavailable, foreignNamespace, storageUnavailable
@@ -43,6 +46,18 @@ struct M4IdentityMaterial: Sendable {
   }
 }
 @MainActor enum M4IdentityBootstrap {
+  #if DEBUG
+  static func readDevelopmentConfiguration(_ url: URL) throws -> DevelopmentAuthorityConfiguration {
+    let url = M4BootstrapFile.canonical(url)
+    let parents = try M4BootstrapFile.anchors([url.deletingLastPathComponent()]), original = try M4BootstrapFile.anchor(url, directory: false)
+    var st = stat()
+    guard lstat(url.path, &st) == 0, st.st_uid == geteuid(), st.st_nlink == 1, st.st_mode & 0o7777 == 0o600 else { throw M4BootstrapError.identityUnavailable }
+    let bytes = try M4BootstrapFile.read(url, maximum: 16384)
+    guard try M4BootstrapFile.encode(original) == M4BootstrapFile.encode(M4BootstrapFile.anchor(url, directory: false)),
+          try M4BootstrapFile.encode(parents) == M4BootstrapFile.encode(M4BootstrapFile.anchors([url.deletingLastPathComponent()])) else { throw M4BootstrapError.identityUnavailable }
+    return try JSONDecoder().decode(DevelopmentAuthorityConfiguration.self, from: bytes)
+  }
+  #endif
   static func prepare(root: URL, namespace: String, controlDirectory: URL, vaultFactory: @MainActor (M4IdentitySeed) async throws -> M4IdentityMaterial) async throws -> M4PreparedIdentity {
     try Task.checkCancellation()
     guard !namespace.isEmpty, namespace.utf8.count <= 128,

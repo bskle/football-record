@@ -169,17 +169,54 @@ import DeviceSync
 // Apps. The legacy SDK assembly above stays isolated until its real gate passes.
 import Foundation
 import MatchPresentation
+import AccountKit
+import MatchStore
 
 public enum M4ApplicationBootstrapError: Error, Sendable, Equatable { case unavailable }
 @MainActor public final class M4ApplicationContext {
   public let context: AccountAppContext
   private let original: M4AccountComposition
-  init(original: M4AccountComposition) { self.original = original; context = original.context }
+  public let developmentSimulation: Bool
+  private let servesPhoneInbox: Bool
+  init(original: M4AccountComposition, developmentSimulation: Bool = false, servesPhoneInbox: Bool = false) {
+    self.original = original; context = original.context; self.developmentSimulation = developmentSimulation; self.servesPhoneInbox = servesPhoneInbox
+  }
+  /// App callers retain this owner before any asynchronous activation so a
+  /// failed/cancelled activation never drops the original DB or close retry.
+  public func activateControlled() async throws {
+    guard developmentSimulation else { throw M4ApplicationBootstrapError.unavailable }
+    if servesPhoneInbox { try await original.startPhoneInbox() }
+    if let binding = try await context.repository.accountBindingV4(), !binding.suspended { try await original.admitCurrentIdentity() }
+    await context.refresh()
+  }
   /// Formal App/replacement callers receive actual owner failures and retain the
   /// original context. The public Void context callback uses the same owner.
   public func shutdown() async throws { try await original.close() }
 }
 @MainActor public enum M4ApplicationBootstrap {
+  #if DEBUG
+  public static func controlledFromPrivateFile(rootDirectory: URL? = nil) async throws -> M4ApplicationContext {
+    let root = try rootDirectory ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("football-record")
+    let configuration = try M4IdentityBootstrap.readDevelopmentConfiguration(root.appendingPathComponent("development/m4-fixture.json"))
+    return try await controlled(configuration: configuration, rootDirectory: root)
+  }
+  /// Explicit development assembly: independent borrowed inputs and original051
+  /// material are checked before this one original business facade is opened.
+  public static func controlled(configuration: DevelopmentAuthorityConfiguration, rootDirectory: URL) async throws -> M4ApplicationContext {
+    let identity = try M4ControlledCurrentIdentity(directory: rootDirectory.appendingPathComponent("development/current-identity"), namespace: configuration.namespace)
+    _ = try await identity.currentIdentity()
+    let prepared = try await M4IdentityBootstrap.prepare(root: rootDirectory, namespace: configuration.namespace,
+      controlDirectory: rootDirectory.appendingPathComponent("development/m4-controls/" + configuration.namespace + "/identity")) { seed in
+      let material = try DevelopmentAuthorityScenario.deviceMaterial(configuration: configuration, namespaceDirectory: seed.namespaceDirectory, installationID: seed.installationID)
+      guard Data(material.namespace.utf8) == Data(seed.namespace.utf8), Data(material.deviceID.utf8) == Data(seed.installationID.utf8) else { throw M4BootstrapError.identityUnavailable }
+      return M4IdentityMaterial(signer: material.signer, vault: material.vault)
+    }
+    let adapters = try M4ControlledAdapters.make(configuration: configuration, rootDirectory: rootDirectory)
+    let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
+    let original = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: configuration.cloudSpaceID, identity: identity, controlledAdapters: adapters)
+    return M4ApplicationContext(original: original, developmentSimulation: true, servesPhoneInbox: configuration.role == "phone")
+  }
+  #endif
   /// Production providers/vault are intentionally unavailable. Do not inspect a
   /// private Debug config, adopt legacy files, or open a DB before that boundary.
   public static func production(arguments: [String] = ProcessInfo.processInfo.arguments, rootDirectory: URL? = nil) async throws -> M4ApplicationContext {
