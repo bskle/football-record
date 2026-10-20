@@ -104,9 +104,11 @@ private actor DebugFailureRepository: SessionRepository {
   public let account: AccountStatusModel
   public let lifecycle: LifecycleStatusModel
   private let closeResources: @MainActor () async -> Void
+  private let shutdownOwner: (@MainActor () async -> Void)?
+  private var shutdownTask: Task<Void, Never>?
   private var closed = false
-  init(repository: SQLiteSessionRepository, session: MatchSession, recording: RecordingModel, account: AccountStatusModel, lifecycle: LifecycleStatusModel, close: @escaping @MainActor () async -> Void) {
-    self.repository = repository; self.session = session; self.recording = recording; self.account = account; self.lifecycle = lifecycle; closeResources = close
+  init(repository: SQLiteSessionRepository, session: MatchSession, recording: RecordingModel, account: AccountStatusModel, lifecycle: LifecycleStatusModel, shutdownOwner: (@MainActor () async -> Void)? = nil, close: @escaping @MainActor () async -> Void) {
+    self.repository = repository; self.session = session; self.recording = recording; self.account = account; self.lifecycle = lifecycle; self.shutdownOwner = shutdownOwner; closeResources = close
   }
   public func refresh() async {
     guard !closed else { return }
@@ -118,19 +120,30 @@ private actor DebugFailureRepository: SessionRepository {
     if account.canEnterRecording { await recording.load() }
     await lifecycle.refresh(matchID: recording.snapshot?.replay.matchID)
   }
+  /// An explicit owner performs the whole shutdown, including early Session retirement.
+  /// It must not call this method recursively. Its failure/retry state remains owner-owned.
   public func shutdown() async {
+    if let shutdownTask { await shutdownTask.value; return }
     guard !closed else { return }; closed = true
-    account.stop(); lifecycle.stop(); await recording.shutdown(); await closeResources()
+    account.stop(); lifecycle.stop(); recording.beginRetirement()
+    let shutdownOwner = shutdownOwner, recording = recording, closeResources = closeResources
+    let task = Task {
+      if let shutdownOwner { await shutdownOwner(); return }
+      await recording.shutdown()
+      await closeResources()
+    }
+    shutdownTask = task
+    await task.value
   }
 }
 public extension AppBootstrap {
-  @MainActor static func accountContext(repository: SQLiteSessionRepository, session: MatchSession, recording: RecordingModel, account: AccountStatusModel, lifecycle: LifecycleStatusModel, close: @escaping @MainActor () async -> Void) async throws -> AccountAppContext {
+  @MainActor static func accountContext(repository: SQLiteSessionRepository, session: MatchSession, recording: RecordingModel, account: AccountStatusModel, lifecycle: LifecycleStatusModel, shutdownOwner: (@MainActor () async -> Void)? = nil, close: @escaping @MainActor () async -> Void) async throws -> AccountAppContext {
     let identity = await repository.syncRepositoryIdentity()
     guard account.repository === repository, lifecycle.repository === repository,
           let originalSession = recording.session as? MatchSession, originalSession === session,
           await session.syncRepositoryIdentity() == identity,
           await recording.repository.syncRepositoryIdentity() == identity else { throw AuthorityError.identityChanged }
-    return AccountAppContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, close: close)
+    return AccountAppContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, shutdownOwner: shutdownOwner, close: close)
   }
   @MainActor static func accountContext(rootDirectory: URL? = nil) throws -> AccountAppContext {
     let c = try composition(rootDirectory: rootDirectory)
