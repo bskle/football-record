@@ -442,3 +442,33 @@ The additional routed Store regression uses two real controlled compositions and
 | `control-owner-checkpoint-commit-match.json` | `ade40255165ecf0f940d0e51a05bba42e86a9f412f91c414f97df557be883db4` |
 
 Composition's throwing final close, public Void context callback safety and App/serial-replacement routing are a following independent slice.043 mailbox,046 full Health inventory and047 strict Cloud reopen/replay remain blocked dependencies. No whole026, true SDK/device/account, App/UI, production or power-loss acceptance is established.
+
+
+## One original final resource-close owner (approvedB)
+
+Source `80e4d8148c79f2a10e440b281fa56e7b31856f79` keeps038's public AccountAppContext.shutdown Void signature. Its M4 callback now routes to the composition's one shared throwing close Task and explicitly records lastCloseFailure on refusal. The callback retains the original owner until successful close; success releases that link. The composition does not call context.shutdown inside its own shared Task, so concurrent callback/throwing callers do not await themselves. IntegrationContext.account holds the exact same owner/model/Session/facade and propagates close errors to the existing serial replacement gate.
+
+Final close synchronously gates UI/business/current identity entry, joins the original Session's durable capture facts, joins every live registered resume/reconcile controller, closes the original typed Watch relay, then invokes prepared.close. The original HTTP client remains available through control join. Client resource teardown from043 is still a subsequent accepted dependency. Controller registration after final close starts returns a permanently stopped controller. Existing fixtures now close through their actual owner; no new business facade or Session is constructed for closure.
+
+Prepared.close validates its original retained identity lease before DB closure or lease release. Moving that owner inode aside and placing foreign bytes at the path produces a real typed **identity-lease preflight refusal**. The original DB/lease and Saga/capability remain retained, public Void close exposes lastCloseFailure, throwing close rejects and queued replacement factories do not run. After restoring the same original inode, the same owner closes successfully and the original parent/capability reopen unchanged. This is not a test of SQLite.close itself failing, power loss or actual device failure. Foreign fixture bytes are retained separately.
+
+- Runtime RED: **4 tests /15 failures, zero unexpected**. Public context close returned before the held original capture and lost its positive observation; account replacement skipped lease refusal and ran queued factories; composition close skipped a held registered control; Void close dropped its failure and original Saga facade. Exact red product/context/controller/test snapshots are retained.
+- Selected GREEN: **4/0**. The held capture setup uses explicit unbound development facts on the one original M4 facade and its original Session/gateway. It does not claim authenticated authority recording or SDK exercise. Capture positive facts are read back after closing/reopening the same original DB.
+- Final frozen related run: **60 tests /6 failures, zero unexpected**, solely the same two047 cases/six assertions. The other58 pass: Composition11, Recovery29 passing out of31, Context7, Identity10 and DevicePair1. This run also overlaps public Void and throwing close while the original capture is held, proving both wait and complete without recursive join. **346 inputs** are identical before/post and match source80e4d81; `git diff --check` passes. All earlier source layers remain separate.
+- Explicit workout/HTTP protocol injection is DEBUG+development only. Default/Release/production remain unavailable and injection is refused before opening a production DB. No actual SDK factory, account, device, signature or capability is enabled.
+
+| Bootstrap evidence | SHA256 |
+| --- | --- |
+| `composition-close-four-red.log` | `571afc9b110ad80b8ee5fa0e93d7d81ccaf8e447c47a73f228e58b06dd4bfc64` |
+| `composition-close-red-source.swift` | `ef04956535c9eb58adef9a57f8d3a425b534abf571bdf287a7c7269d54318039` |
+| `composition-close-red-context.swift` | `22a70671f81ed222e75feba577bdd7a8a9d2ddaf281dbdb6828aee367a177250` |
+| `composition-close-red-controller.swift` | `a05c0d981a74629c67f27963d93106cf90c66c6a2a069b26e1d20f3d4a5ce7d9` |
+| `composition-close-red-composition-tests.swift` | `f129242768ebb5beea0216cedd2ef277740be5ce5fca0a04c1d0d5fa29d8dbbf` |
+| `composition-close-red-recovery-tests.swift` | `2e48d5296104d24529cc67b7c8439f2967b4588d0fb6f9723d3e04685f7a4640` |
+| `composition-close-four-green.log` | `a394284b9606e77abfd03c4c759913a92be3c5f8d61b76fd292fc0ea11ea9f9e` |
+| `composition-close-frozen-related.log` (single60/6) | `a257b937f1fec74bfbbd5d7b67f439dd616968144847ea28fb80b8f4b656e512` |
+| `composition-close-checkpoint-inputs.json` | `11325aa57e5f51fbe8ef764303f8a84c68d6d2101e8ca6ab4589fcd62d575806` |
+| `composition-close-checkpoint-post.json` | `dc7a3caf7184696da2a7fb294a9e969b4670050de63f5c2cb528d1a8d2ed82ed` |
+| `composition-close-checkpoint-commit-match.json` | `0bfa5fd20221b95eb5e19f6d7cc969779defc0402dcf32b00d482367c6e07343` |
+
+This clean dependency handoff stops author writes until root returns the tree. Accepted043/046/047 must be ordinary-merged and their actual APIs consumed after review. Both known047 tests remain intact. Final App route assembly, full Health selection coverage, mailbox drain and strict Cloud replay, complete build/test matrix, real SDK/device/account/App/UI/power-loss and whole026 acceptance remain pending. Empty ignored `.swiftpm/xcode/` metadata remains the saved exception; no cleanup or long-lived branch promotion is performed.
