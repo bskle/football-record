@@ -861,3 +861,20 @@ extension M4AccountCompositionTests {
   }
 }
 #endif
+
+
+extension M4AccountCompositionTests {
+  func testRenewRequiresControlPurposeAuthenticationAndNeverFallsBackToGenericSignIn() async throws {
+    let f = try await serviceFixture(), c = f.composition
+    await c.context.account.perform(.recover); XCTAssertTrue(c.context.account.canEnterRecording)
+    let original = try await c.repository.accountBindingV4(), credential = try await f.vault.credential(), generation = try await c.repository.identityGenerationV4()
+    let callsBefore = await f.relay.calls
+    do { try await c.performAccount(.renew); XCTFail("control renewal is unavailable until the accepted purpose-specific control API is integrated") }
+    catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+    let callsAfter = await f.relay.calls, binding = try await c.repository.accountBindingV4(), current = try await f.vault.credential(), afterGeneration = try await c.repository.identityGenerationV4()
+    XCTAssertEqual(callsAfter, callsBefore, "matching current identity cannot authorize a generic auth/challenge fallback")
+    XCTAssertEqual(binding, original); XCTAssertEqual(current, credential); XCTAssertEqual(afterGeneration, generation)
+    XCTAssertFalse(c.context.account.canEnterRecording, "explicit unavailable renewal must pause the old admission")
+    try await c.close()
+  }
+}

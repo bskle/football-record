@@ -205,6 +205,8 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     }
   }
   private func accountAction(_ action: AccountUserAction) async throws {
+    // Pending-deletion renewal requires its purpose-specific control service.
+    guard action != .renew else { throw AuthorityError.unavailable }
     let observed = try await freshBusinessIdentity(), token = businessLifetime
     let binding = try await repository.accountBindingV4()
     try requireBusiness(token)
