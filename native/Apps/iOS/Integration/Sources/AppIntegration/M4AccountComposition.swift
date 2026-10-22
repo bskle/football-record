@@ -218,7 +218,21 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     // An existing active reservation already fixes this namespace, even when a
     // capsule/seal response was lost. Never dispatch a new generic auth here.
     guard (retained == nil && retainedWatch == nil) || action == .recover else { throw AuthorityError.identityChanged }
-    let observed = try await freshBusinessIdentity(), token = businessLifetime
+    let token = businessLifetime
+    var setup: CheckedLocalWatchRegistrationSetupEvidenceV4?
+    // Only an explicit, unbound Watch setup can use059. Classify locally before
+    // either independent identity observation or actual Phone-context exchange.
+    if action == .registerWatch {
+      let initialBinding = try await repository.accountBindingV4()
+      let initialPending = try await repository.pendingWatchRegistrationAttemptsV4()
+      try requireBusiness(token)
+      if initialBinding == nil && initialPending.isEmpty {
+        let generation = try await repository.identityGenerationV4()
+        setup = try await checkedWatchSetup(generation: generation, token: token)
+      }
+    }
+    let observed = try await freshBusinessIdentity()
+    if let original = setup?.admittedContext { try requireWatchContext(original, original: original, observed: observed) }
     if let retained { try requireObservation(observed, scope: retained.scope, environment: retained.binding.environment) }
     if let retainedWatch { try requireObservation(observed, scope: retainedWatch.scope, environment: retainedWatch.binding.environment) }
     let binding = try await repository.accountBindingV4()
@@ -226,7 +240,8 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     guard binding?.role != .waiting else { throw AuthorityError.unavailable }
     let watchPending = try await repository.pendingWatchRegistrationAttemptsV4()
     try requireBusiness(token)
-    if binding == nil && watchPending.isEmpty {
+    if setup != nil { guard binding == nil, watchPending.isEmpty else { throw AuthorityError.identityChanged } }
+    if binding == nil && watchPending.isEmpty && setup == nil {
       let generation = try await repository.identityGenerationV4()
       // Absence of binding/pending is insufficient: a retained registration
       // receipt/admission without a current055 marker is not fresh protocol.
@@ -258,6 +273,18 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       try requireBusiness(token)
       guard raw(originalContext.accountID, observed.accountID), raw(originalContext.cloudSpaceID, observed.cloudSpaceID), originalContext.environment == observed.environment else { throw AuthorityError.identityChanged }
       if let pending = watchPending.first { try requireWatchContext(originalContext, original: pending.context, observed: observed) }
+      if let setup {
+        _ = try WatchRegistrationContextV4(accountID: originalContext.accountID, cloudSpaceID: originalContext.cloudSpaceID, phoneID: originalContext.phoneID, activationEpoch: originalContext.activationEpoch, environment: originalContext.environment)
+        try requireWatchContext(originalContext, original: setup.admittedContext ?? originalContext, observed: observed)
+        let finalObserved = try await freshBusinessIdentity()
+        try requireBusiness(token)
+        guard raw(finalObserved.accountID, observed.accountID), raw(finalObserved.cloudSpaceID, observed.cloudSpaceID),
+              raw(finalObserved.zoneID, observed.zoneID), finalObserved.environment == observed.environment else { throw AuthorityError.identityChanged }
+        try requireWatchContext(originalContext, original: setup.admittedContext ?? originalContext, observed: finalObserved)
+        let current = try await checkedWatchSetup(generation: setup.identityGeneration, token: token)
+        guard try sameWatchSetup(setup, current) else { throw AuthorityError.identityChanged }
+        try requireBusiness(token); try prepared.requireUnboundResources()
+      }
       expectedWatchContext = originalContext
       try await watchRegistration.admitCurrentIdentity(context: originalContext)
       try requireBusiness(token)
@@ -266,6 +293,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       if let original = pending.first { result = try await watchRegistration.recover(requestID: original.requestID) }
       else {
         guard action != .recover else { throw LifecycleClientError.unknownOriginal }
+        guard setup != nil else { throw AuthorityError.unavailable }
         result = try await watchRegistration.register(requestID: UUID().uuidString, challengeRequestID: UUID().uuidString)
       }
     } else {
@@ -300,6 +328,25 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     try await observeAndAdmitIdentity(expectedIdentity: observed, expectedWatchContext: expectedWatchContext)
     try requireBusiness(token)
     reauthenticationID = result.reauthenticationID
+  }
+  private func checkedWatchSetup(generation: Int64, token: UUID) async throws -> CheckedLocalWatchRegistrationSetupEvidenceV4 {
+    try requireBusiness(token); try prepared.requireUnboundResources()
+    let publicKey = prepared.material.signer.publicKey
+    let value = try await repository.watchRegistrationSetupEvidenceV4(expectedIdentityGeneration: generation, deviceID: prepared.seed.installationID, publicKey: publicKey)
+    try requireBusiness(token); try prepared.requireUnboundResources()
+    guard value.identityGeneration == generation, raw(value.watchDeviceID, prepared.seed.installationID),
+          raw(value.watchPublicKey, publicKey), raw(value.watchDeviceKeyID, try AuthorityWire.deviceKeyID(publicKey: publicKey)) else { throw AuthorityError.identityChanged }
+    switch value.state {
+    case .empty: guard value.admittedContext == nil else { throw AuthorityError.unavailable }
+    case .admissionOnly: guard value.admittedContext != nil else { throw AuthorityError.unavailable }
+    }
+    return value
+  }
+  private func sameWatchSetup(_ lhs: CheckedLocalWatchRegistrationSetupEvidenceV4, _ rhs: CheckedLocalWatchRegistrationSetupEvidenceV4) throws -> Bool {
+    let context = try AuthorityWire.encode(lhs.admittedContext) == AuthorityWire.encode(rhs.admittedContext)
+    return lhs.state == rhs.state && lhs.identityGeneration == rhs.identityGeneration &&
+      raw(lhs.watchDeviceID, rhs.watchDeviceID) && raw(lhs.watchPublicKey, rhs.watchPublicKey) &&
+      raw(lhs.watchDeviceKeyID, rhs.watchDeviceKeyID) && context
   }
   private func requireUnboundProtocolState(token: UUID) async throws {
     let generation = try await repository.identityGenerationV4()

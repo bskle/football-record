@@ -2244,3 +2244,155 @@ extension M4AccountCompositionTests {
   }
 }
 #endif
+
+#if DEBUG && os(macOS)
+extension M4AccountCompositionTests {
+  private func pureWatchAdmissionFixture() async throws -> (FreshServiceFixture, WatchScopeBroker) {
+    let (f, broker) = try await watchScopeFixture()
+    await f.relay.failNextChallengeHTTP(); await f.composition.context.account.perform(.registerWatch)
+    let generation = try await f.composition.repository.identityGenerationV4()
+    let setup = try await f.composition.repository.watchRegistrationSetupEvidenceV4(expectedIdentityGeneration: generation, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey)
+    XCTAssertEqual(setup.state, .admissionOnly); XCTAssertNotNil(setup.admittedContext)
+    return (f, broker)
+  }
+  private func watchSetupRows(_ f: FreshServiceFixture) throws -> String {
+    try watchScopeSQL(f.prepared.seed.businessDatabaseURL, "SELECT id,hex(payload),checksum FROM lifecycle_steps_v4 ORDER BY id;")
+  }
+  private func requireWatchSetupRefusal(_ f: FreshServiceFixture, broker: WatchScopeBroker, rows: String, challenges: Int, fences: Int) async throws {
+    let calls = await f.relay.calls, writes = await f.vault.replacements, movements = await f.vault.fenceMovements
+    XCTAssertEqual(calls, challenges); XCTAssertEqual(writes, 0); XCTAssertEqual(movements, fences)
+    XCTAssertTrue(broker.authorizationIDs.isEmpty); XCTAssertEqual(broker.appleCalls, 0)
+    XCTAssertEqual(try watchSetupRows(f), rows); XCTAssertNil(try f.prepared.activeWatchAttachment()); XCTAssertNil(try f.prepared.activePhoneAttachment())
+    XCTAssertFalse(f.composition.context.account.canEnterRecording); XCTAssertNil(f.composition.admittedScope)
+  }
+  func testWatchScopePureAdmissionReopensSame051MaterialsBeforeExplicitRetry() async throws {
+    let root = location(), f = try await durablePhoneFixture(root: root, createObservation: true, watch: true), c = f.composition
+    let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 77, count: 32))
+    let broker = try WatchScopeBroker(root: f.protocolRoot, key: key, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey); broker.start()
+    await f.relay.failNextChallengeHTTP(); await c.context.account.perform(.registerWatch)
+    let directory = f.prepared.seed.namespaceDirectory
+    let originals = try ["device.identity", "development.key", "authority.fixture", "development.vault"].map { name -> (URL, M4CatalogPath, Data) in
+      let file = directory.appendingPathComponent(name); return (file, try M4CatalogIO.anchor(file), try Data(contentsOf: file))
+    }
+    let main = f.prepared.seed.businessDatabaseURL, database = try M4CatalogIO.anchor(main)
+    let catalogPath = root.appendingPathComponent("retained/catalog"), catalogBefore = try M4OwnedDataCatalog(directory: catalogPath)
+    let physical = try M4CatalogIO.encode(catalogBefore.physicalBootstrap()?.reservation); try catalogBefore.close()
+    let before = try watchScopeSQL(main, "SELECT id,hex(payload),checksum FROM lifecycle_steps_v4 ORDER BY id;")
+    let generation = try await c.repository.identityGenerationV4(), setup = try await c.repository.watchRegistrationSetupEvidenceV4(expectedIdentityGeneration: generation, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey)
+    XCTAssertEqual(setup.state, .admissionOnly); XCTAssertTrue(broker.authorizationIDs.isEmpty)
+    let id = f.prepared.seed.installationID, publicKey = f.prepared.material.signer.publicKey
+    try await c.close(); await broker.stop()
+    let reopened = try await durablePhoneFixture(root: root, createObservation: false, watch: true), next = reopened.composition
+    XCTAssertEqual(reopened.prepared.seed.installationID, id); XCTAssertEqual(reopened.prepared.material.signer.publicKey, publicKey)
+    let catalogAfter = try M4OwnedDataCatalog(directory: catalogPath)
+    XCTAssertEqual(try M4CatalogIO.encode(catalogAfter.physicalBootstrap()?.reservation), physical); try catalogAfter.close()
+    XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(main)), try M4CatalogIO.encode(database))
+    for (file, anchor, bytes) in originals { XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(file)), try M4CatalogIO.encode(anchor)); XCTAssertEqual(try Data(contentsOf: file), bytes) }
+    XCTAssertEqual(try watchScopeSQL(main, "SELECT id,hex(payload),checksum FROM lifecycle_steps_v4 ORDER BY id;"), before)
+    let nextBroker = try WatchScopeBroker(root: reopened.protocolRoot, key: key, deviceID: id, publicKey: publicKey); nextBroker.start()
+    await next.context.account.perform(.registerWatch)
+    let calls = await reopened.relay.calls; XCTAssertEqual(calls, 1)
+    XCTAssertEqual(nextBroker.authorizationIDs.count, 1); XCTAssertGreaterThanOrEqual(nextBroker.contexts, 1)
+    XCTAssertTrue(next.context.account.canEnterRecording); XCTAssertNotNil(next.admittedScope)
+    if next.context.account.canEnterRecording {
+      let catalog = try M4OwnedDataCatalog(directory: root.appendingPathComponent("retained/catalog")); _ = try catalog.requireWatchSeal(); try catalog.close()
+    }
+    for (file, anchor, bytes) in originals where file.lastPathComponent != "development.vault" { XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(file)), try M4CatalogIO.encode(anchor)); XCTAssertEqual(try Data(contentsOf: file), bytes) }
+    print("R26-W1 actual051-reopen root=\(root.path) deviceID=\(id) generation=\(generation)")
+    try await next.close(); await nextBroker.stop(); XCTAssertNil(nextBroker.failure)
+  }
+  func testWatchScopeSetupRejectsFreshPhoneContextMismatchBeforeService() async throws {
+    for field in ["account", "cloud", "phone", "epoch", "environment"] {
+      let (f, broker) = try await pureWatchAdmissionFixture(), original = broker.context
+      let rows = try watchSetupRows(f), calls = await f.relay.calls, fences = await f.vault.fenceMovements
+      broker.context = try WatchRegistrationContextV4(accountID: field == "account" ? "foreign-account" : original.accountID, cloudSpaceID: field == "cloud" ? "foreign-cloud" : original.cloudSpaceID, phoneID: field == "phone" ? "foreign-phone" : original.phoneID, activationEpoch: field == "epoch" ? 2 : original.activationEpoch, environment: field == "environment" ? .production : original.environment)
+      await f.composition.context.account.perform(.registerWatch)
+      try await requireWatchSetupRefusal(f, broker: broker, rows: rows, challenges: calls, fences: fences)
+      try await f.composition.close(); await broker.stop()
+    }
+  }
+  func testWatchScopeSetupRejectsInitialIndependentMismatchBeforePhoneContext() async throws {
+    for field in ["account", "cloud", "environment"] {
+      let (f, broker) = try await pureWatchAdmissionFixture()
+      let rows = try watchSetupRows(f), calls = await f.relay.calls, fences = await f.vault.fenceMovements, contexts = broker.contexts
+      switch field {
+      case "account": await f.observer.setAccount("changed-initial-account")
+      case "cloud": await f.observer.setCloud("changed-initial-cloud")
+      default: await f.observer.setEnvironment(.production)
+      }
+      await f.composition.context.account.perform(.registerWatch)
+      XCTAssertEqual(broker.contexts, contexts, "known original admission identity mismatch needs no Phone context exchange")
+      try await requireWatchSetupRefusal(f, broker: broker, rows: rows, challenges: calls, fences: fences)
+      try await f.composition.close(); await broker.stop()
+    }
+  }
+  func testWatchScopeSetupRechecksFourIndependentFieldsAcrossContextAwait() async throws {
+    for field in ["account", "cloud", "zone", "environment"] {
+      let (f, broker) = try await pureWatchAdmissionFixture(), barrier = PhoneScopeBarrier()
+      let rows = try watchSetupRows(f), calls = await f.relay.calls, fences = await f.vault.fenceMovements
+      broker.nextContextGate = barrier
+      let task = Task { await f.composition.context.account.perform(.registerWatch) }; await barrier.waitForEntry()
+      switch field {
+      case "account": await f.observer.setAccount("changed-account")
+      case "cloud": await f.observer.setCloud("changed-cloud")
+      case "zone": await f.observer.setZone("changed-zone")
+      default: await f.observer.setEnvironment(.production)
+      }
+      barrier.release(); await task.value
+      try await requireWatchSetupRefusal(f, broker: broker, rows: rows, challenges: calls, fences: fences)
+      try await f.composition.close(); await broker.stop()
+    }
+  }
+  func testWatchScopeSetupRereadRejectsSameGenerationEmptyToAdmissionOnly() async throws {
+    let (f, broker) = try await watchScopeFixture(), barrier = PhoneScopeBarrier(), c = f.composition
+    broker.nextContextGate = barrier
+    let task = Task { await c.context.account.perform(.registerWatch) }; await barrier.waitForEntry()
+    let generation = try await c.repository.identityGenerationV4()
+    let admitted = try await c.session.admitWatchRegistrationContext(broker.context, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey)
+    XCTAssertEqual(admitted, generation, "the real original coordinator changes setup without changing generation")
+    let rows = try watchSetupRows(f), calls = await f.relay.calls, fences = await f.vault.fenceMovements
+    barrier.release(); await task.value
+    try await requireWatchSetupRefusal(f, broker: broker, rows: rows, challenges: calls, fences: fences)
+    try await c.close(); await broker.stop()
+  }
+  func testWatchScopeSetupRereadRejectsChangedContextKeyAndGeneration() async throws {
+    for field in ["context", "key", "generation"] {
+      let (f, broker) = try await pureWatchAdmissionFixture(), barrier = PhoneScopeBarrier(), c = f.composition
+      broker.nextContextGate = barrier
+      let task = Task { await c.context.account.perform(.registerWatch) }; await barrier.waitForEntry()
+      if field == "generation" {
+        let old = broker.context, new = try WatchRegistrationContextV4(accountID: old.accountID, cloudSpaceID: old.cloudSpaceID, phoneID: old.phoneID, activationEpoch: old.activationEpoch + 1, environment: old.environment)
+        _ = try await c.session.admitWatchRegistrationContext(new, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey)
+      } else {
+        var object: [String: Any] = ["context": try JSONSerialization.jsonObject(with: AuthorityWire.encode(broker.context)), "publicKey": f.prepared.material.signer.publicKey]
+        if field == "context" { var context = try XCTUnwrap(object["context"] as? [String: Any]); context["phoneID"] = "changed-negative-phone"; object["context"] = context }
+        else { object["publicKey"] = AuthorityWire.base64URL(Curve25519.Signing.PrivateKey().publicKey.rawRepresentation) }
+        let bytes = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), hex = bytes.map { String(format: "%02x", $0) }.joined()
+        _ = try watchScopeSQL(f.prepared.seed.businessDatabaseURL, "UPDATE lifecycle_steps_v4 SET payload=X'" + hex + "',checksum='" + AuthorityWire.hash(bytes) + "' WHERE id='watch-admission:" + f.prepared.seed.installationID + "';")
+      }
+      let rows = try watchSetupRows(f), calls = await f.relay.calls, fences = await f.vault.fenceMovements
+      barrier.release(); await task.value
+      try await requireWatchSetupRefusal(f, broker: broker, rows: rows, challenges: calls, fences: fences)
+      try await c.close(); await broker.stop()
+    }
+  }
+  func testWatchScopeSetupRejectsLegacyBeforeIndependentObservationAndKeepsOtherActionsClosed() async throws {
+    let (f, broker) = try await watchScopeFixture(); broker.expiresIn = -1
+    await f.composition.context.account.perform(.registerWatch)
+    let reads = await f.observer.reads, contexts = broker.contexts, calls = await f.relay.calls
+    await f.composition.context.account.perform(.registerWatch)
+    let afterReads = await f.observer.reads, afterCalls = await f.relay.calls
+    XCTAssertEqual(afterReads, reads, "local legacy preflight must precede even independent observation")
+    XCTAssertEqual(broker.contexts, contexts); XCTAssertEqual(afterCalls, calls)
+    await watchScopeRefuseEveryEntry(f, broker: broker)
+    try await f.composition.close(); await broker.stop()
+    let (pure, nextBroker) = try await pureWatchAdmissionFixture()
+    let rows = try watchSetupRows(pure), challenges = await pure.relay.calls, fences = await pure.vault.fenceMovements, nextContexts = nextBroker.contexts
+    for action: AccountUserAction in [.signIn, .recover] { await pure.composition.context.account.perform(action) }
+    do { try await pure.composition.admitCurrentIdentity(); XCTFail("pure setup never substitutes for055 current proof") } catch {}
+    XCTAssertEqual(nextBroker.contexts, nextContexts)
+    try await requireWatchSetupRefusal(pure, broker: nextBroker, rows: rows, challenges: challenges, fences: fences)
+    try await pure.composition.close(); await nextBroker.stop()
+  }
+}
+#endif
