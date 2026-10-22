@@ -44,6 +44,7 @@ extension MatchStore {
     }
     private func captureInventoryLockedV4() throws -> [CaptureInventoryMatchV4] {
         try db.validateLocalErasureLayoutV4()
+        try validateDeletionControlRowsLockedV4()
         // A rejected positive observation may live only in a diagnostic under an unknown parent.
         for row in try db.rows("SELECT match_id,code,key,raw,severity,CAST(match_id AS BLOB),CAST(code AS BLOB),CAST(key AS BLOB),CAST(severity AS BLOB) FROM diagnostics") {
             for (index, raw) in [(0,5),(1,6),(2,7),(4,8)] { _ = try inventoryTextV4(row[index], raw: row[raw], table: "diagnostics") }

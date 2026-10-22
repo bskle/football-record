@@ -313,3 +313,23 @@ AccountKit跨模块HTTP test沿既有Support找repo root启动真实Node，new S
 固定 `18dcd916c2290c421ec0f324a8c2534d9f0f1e04` 是首个 backend slice，未通过整体源码审。原 closing 状态与当前授权分开验证：过期或撤销仍须原 signed authorization、原 requests/auth_records/parent/session 元信息和所有 scope/expiry claims 相符；缺坏不能签新 knownRevoked。原 ready bytes 不覆盖，首次 expired/revoked resolution 用既有 requests 的 `deleteControlResolution` 私有 kind；ID 为 `dcr.` 加固定 `football-record.deletion-control-record.v1` 域的 `["resolution", parentID, parentDigest, authRequestID]` SHA256。该行闭合字段为原 parent envelope + `authRequestID, authRequestDigest, readyDigest, authorization, originalAcquire`，readyDigest 是原 signed ready envelope canonical bytes 的 SHA256，originalAcquire 明确 null。原 wire、旧 receipt domain 与 schema 不变。
 
 每 parent 4MiB 计入全部新控制 payload，含 requests、auth_records 副本、原 session/reauth/challenge 与其索引、专用 parent nonce/absence fence 和 PoP nonce；以每列 UTF8/BLOB 实际字节、INTEGER 8 bytes、NULL 0 bytes 核算，另保留32KiB单 envelope及64/256 challenge+auth计数。它不是 SQLite页/文件大小承诺。所有相关 mutation 仍在原 SQL事务，nonce/副本插入前检查候选总量；非 attempt session/首 closing 不因恰好64个 attempt误拒，但仍计 payload。未知私有 kind/列结构保留拒绝；原普通 nonce 分支机械兼容。旧 challenge_requests 全局ID与原 ordinary absence fence 不可被新 purpose重分类。
+
+
+## 2026-10-22 恢复及只读接缝具体声明
+
+原工作目录已由启动清理移除；恢复快照 `08a387fae82c56837585e8d389b61f97356f35e7` 的六个未提交文件已与最后204输入清单逐字核对，在原 `fix/deletion-control-reauth` 分支的新受管目录 `/Users/liam/.codex/worktrees/m4-deletion-control-reauth-resume/20260830_足球记录` 恢复。当前唯一作者为 `/root/m4_deletion_resume`；初始base、effectiveBase、20路径和held026目标保持原登记。新attachment为 `01a16137-5f80-7890-ae1f-6e9ef60cd196`。未修改或删除原快照、未改写历史。
+
+root已批准在新增optional repository中加入以下历史只读声明，供unknown恢复、COMMIT响应丢失读回和原锁明确确认使用：
+
+```swift
+func deletionControlAttemptsV4(parentID: String) async throws -> [DeletionControlAttemptV1]
+func deletionControlAuthorizationV4(parentID: String, authRequestID: String) async throws -> DeletionControlAuthorizationRecordV1?
+func deletionControlLockConfirmationV4(parentID: String) async throws -> DeletionControlLockConfirmationV1?
+public struct DeletionControlAuthorizationRecordV1: Sendable {
+    public let authorization: VerifiedDeletionControlAuthorizationV1
+    public let originalAcquire: Data?
+    public let resolution: VerifiedDeletionControlAuthorizationV1?
+}
+```
+
+这些读取只返回已按原parent、原attempt、固定trust和严格闭合kind重验的历史bytes；不代表当前授权、ready或vault写入准入。所有活动操作仍须原 `deletionControlContextV4` 的current SQL门。原protocol required API和普通业务退休门保持不变。独立Session coordinator只取原 `_authority-account` mutex，时间从原Session clock取得，不进行网络、业务mutation或新建facade。
