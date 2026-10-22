@@ -95,13 +95,21 @@ extension MatchStore {
     }
     public func createDeletionSagaV4(_ saga:DeletionSagaV4)throws {
         try db.transaction {
-            try validateDeletionScopeLockedV4(saga)
-            if let prior=try deletionSagaV4(requestID:saga.intent.requestID) {guard prior.originalScope==saga.originalScope,prior.intent==saga.intent,prior.accountID==saga.accountID,prior.recoveryCapability==saga.recoveryCapability,prior.cloudChoice==saga.cloudChoice,prior.localChoice==saga.localChoice,prior.healthChoice==saga.healthChoice else {throw AuthorityError.conflict};return}
-            let b=try activeBindingV4();guard b.role == .phone,b.accountID==saga.accountID,b.activationEpoch==saga.activationEpoch,saga.revision==0,!saga.backendDeleted,try !migrationBlocksBusinessV4() else {throw AuthorityError.identityChanged}
-            for id in try matchIDs() {let state=try authorityStateV4(matchID:id,now:Date());guard ![.held,.terminationPending].contains(state.status) else {throw AuthorityError.terminalLock}}
-            _=try prepareControlLockedV4(saga.intent)
-            try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+saga.intent.requestID);try fail(.afterReceipt);try fail(.beforeCommit)
+            let rows = try validateInitialDeletionRowsLockedV1()
+            let consumption = try initialDeletionConsumptionForSagaLockedV1(saga, rows: rows)
+            let priorExists = try deletionSagaV4(requestID:saga.intent.requestID) != nil
+            try createDeletionSagaLockedV4(saga, initialDeletionConsumption: consumption)
+            if let consumption { try finishInitialDeletionConsumptionLockedV1(consumption, rows: rows) }
+            try validateInitialDeletionRowsLockedV1(); if !priorExists { try fail(.beforeCommit) }
         };if fault == .afterCommit {throw StoreError.responseLost}
+    }
+    func createDeletionSagaLockedV4(_ saga:DeletionSagaV4,initialDeletionConsumption:InitialDeletionSagaConsumptionV1?)throws {
+        try validateDeletionScopeLockedV4(saga)
+        if let prior=try deletionSagaV4(requestID:saga.intent.requestID) {guard prior.originalScope==saga.originalScope,prior.intent==saga.intent,prior.accountID==saga.accountID,prior.recoveryCapability==saga.recoveryCapability,prior.cloudChoice==saga.cloudChoice,prior.localChoice==saga.localChoice,prior.healthChoice==saga.healthChoice else {throw AuthorityError.conflict};return}
+        let b=try activeBindingV4();guard b.role == .phone,b.accountID==saga.accountID,b.activationEpoch==saga.activationEpoch,saga.revision==0,!saga.backendDeleted,try !migrationBlocksBusinessV4() else {throw AuthorityError.identityChanged}
+        for id in try matchIDs() {let state=try authorityStateV4(matchID:id,now:Date());guard ![.held,.terminationPending].contains(state.status) else {throw AuthorityError.terminalLock}}
+        _=try prepareControlLockedV4(saga.intent,initialDeletionConsumption:initialDeletionConsumption)
+        try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+saga.intent.requestID);try fail(.afterReceipt)
     }
     func writeDeletionV4(_ saga:DeletionSagaV4,expectedRevision:Int64)throws {
         try validateDeletionScopeLockedV4(saga)

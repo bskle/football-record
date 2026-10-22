@@ -13,6 +13,7 @@ public struct AuthAttemptV4:Codable,Sendable,Equatable {
 public enum AuthResolutionV4:String,Codable,Sendable {case knownRevoked,knownExpired,knownNotFound,knownAbandoned}
 public protocol AccountLifecycleRepository:Sendable {
     func syncRepositoryIdentity() async->SyncRepositoryIdentity
+    func requireOrdinaryAuthenticationV4(authRequestID:String,challengeRequestID:String?) async throws
     func identityGenerationV4() async throws->Int64
     func currentAuthRequestIDV4() async throws->String?
     func authAttemptsV4() async throws->[AuthAttemptV4]
@@ -23,6 +24,9 @@ public protocol AccountLifecycleRepository:Sendable {
     func authAttemptV4(requestID:String) async throws->AuthAttemptV4?
     func saveAuthAttemptV4(_ attempt:AuthAttemptV4,expectedIdentityGeneration:Int64) async throws
     func acceptAuthenticationV4(attempt:AuthAttemptV4,binding:AccountBindingV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64) async throws
+}
+public extension AccountLifecycleRepository {
+    func requireOrdinaryAuthenticationV4(authRequestID:String,challengeRequestID:String?) async throws { throw AuthorityError.unavailable }
 }
 
 public enum LifecycleIssueV4:String,Codable,Sendable {case unavailable,reauthenticationRequired,accountChanged,waitingPeriod,blocked,unknown}

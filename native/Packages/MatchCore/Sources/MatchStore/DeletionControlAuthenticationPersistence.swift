@@ -77,6 +77,8 @@ extension MatchStore {
     public func saveDeletionControlAttemptV4(_ attempt:DeletionControlAttemptV1)throws {
         try db.transaction {
             try validateDeletionControlRowsLockedV4()
+            let initialIDs = try initialDeletionClaimedIDsLockedV1()
+            guard !initialIDs.contains(Data(attempt.authentication.requestID.utf8)), !initialIDs.contains(Data(attempt.challengeRequestID.utf8)) else { throw AuthorityError.conflict }
             let (c,header)=try sourceDeletionControlV1(parentID:attempt.parentRequestID,expectedIdentityGeneration:attempt.identityGeneration)
             guard attempt.parentDigest==c.saga.intent.digest,DeletionControlWireV1.scope(attempt.originalScope,c.originalScope),try Canonical.data(attempt.binding)==Canonical.data(c.binding),attempt.publicKey==c.publicKey,attempt.keyID==c.keyID else {throw AuthorityError.identityChanged}
             if let prior=try loadDeletionControlAttemptV1(parentID:attempt.parentRequestID,authRequestID:attempt.authentication.requestID) {guard try Canonical.data(prior)==Canonical.data(attempt) else {throw AuthorityError.conflict};return}
@@ -159,6 +161,7 @@ extension MatchStore {
     public func deletionControlAuthorizationV4(parentID:String,authRequestID:String)throws->DeletionControlAuthorizationRecordV1? {try db.transaction {try validateDeletionControlRowsLockedV4();return try loadDeletionControlAuthorizationV1(parentID:parentID,authRequestID:authRequestID)}}
     public func deletionControlLockConfirmationV4(parentID:String)throws->DeletionControlLockConfirmationV1? {try db.transaction {try validateDeletionControlRowsLockedV4();return try loadDeletionControlConfirmationV1(parentID:parentID)}}
     func validateDeletionControlRowsLockedV4()throws {
+        let initialIDs = try initialDeletionClaimedIDsLockedV1()
         let rows=try db.rows("SELECT id,payload,checksum,CAST(id AS BLOB) FROM lifecycle_steps_v4 WHERE id LIKE 'delete-control-%' ORDER BY rowid")
         guard rows.count<=512 else {throw DeletionControlIssueV1.capacity};var total=0,parents:[String:StoredDeletionControlParentV1]=[:],attempts:[String:DeletionControlAttemptV1]=[:],proofs:[StoredDeletionControlProofV1]=[],confirmations:[DeletionControlLockConfirmationV1]=[]
         for row in rows {
@@ -185,6 +188,7 @@ extension MatchStore {
         }
         for c in confirmations {guard let p=parents[c.parentRequestID],c.parentDigest==p.parentDigest else {throw AuthorityError.intentMismatch};try claim(c.confirmationID);try claim(c.intent.requestID);try validateDeletionControlConfirmationV1(c)}
         for id in ids {
+            guard !initialIDs.contains(Data(id.utf8)) else { throw AuthorityError.conflict }
             guard try controlV4(id)==nil,try authAttemptV4(requestID:id)==nil,try watchRegistrationAttemptV4(requestID:id)==nil else {throw AuthorityError.conflict}
             for prefix in ["auth-resolved:","auth-receipt:","auth-admission:","watch-attempt:","watch-receipt:","watch-admission:"] {guard try db.rows("SELECT 1 FROM lifecycle_steps_v4 WHERE id=?",[.text(prefix+id)]).isEmpty else {throw AuthorityError.conflict}}
         }
@@ -248,6 +252,8 @@ extension MatchStore {
     }
     public func saveDeletionControlLockConfirmationV4(parentID:String,confirmation:DeletionControlLockConfirmationV1,expectedIdentityGeneration:Int64)throws {
         try db.transaction {
+            let initialIDs = try initialDeletionClaimedIDsLockedV1()
+            guard !initialIDs.contains(Data(confirmation.confirmationID.utf8)), !initialIDs.contains(Data(confirmation.intent.requestID.utf8)) else { throw AuthorityError.conflict }
             try validateDeletionControlRowsLockedV4();let (c,_)=try sourceDeletionControlV1(parentID:parentID,expectedIdentityGeneration:expectedIdentityGeneration)
             guard confirmation.parentRequestID==parentID,confirmation.parentDigest==c.saga.intent.digest else {throw AuthorityError.intentMismatch}
             _=try activeDeletionControlAuthorizationV1(parentID:parentID,generation:expectedIdentityGeneration,at:confirmation.confirmedAt);try validateDeletionControlConfirmationV1(confirmation)

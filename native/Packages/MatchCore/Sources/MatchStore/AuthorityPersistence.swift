@@ -54,7 +54,8 @@ extension MatchStore {
         let result=try db.transaction {try prepareControlLockedV4(intent)}
         if fault == .afterCommit {throw StoreError.responseLost};return result
     }
-    func prepareControlLockedV4(_ intent:ControlIntentV1)throws->ControlIntentReceiptV4 {
+    func prepareControlLockedV4(_ intent:ControlIntentV1,initialDeletionConsumption:InitialDeletionSagaConsumptionV1?=nil)throws->ControlIntentReceiptV4 {
+        try requireInitialDeletionControlClaimLockedV1(intent, consumption: initialDeletionConsumption)
         if let prior=try controlV4(intent.requestID) { guard prior==intent else { throw AuthorityError.conflict };return ControlIntentReceiptV4(requestID:intent.requestID,digest:intent.digest) }
         let b=try activeBindingV4()
         if let epoch=intent.fields.activationEpoch { guard epoch==b.activationEpoch else { throw AuthorityError.identityChanged } }

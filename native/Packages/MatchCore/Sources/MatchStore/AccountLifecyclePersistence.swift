@@ -5,7 +5,16 @@ extension MatchStore {
     public func currentAuthRequestIDV4()throws->String? {try readLifecycleV4(String.self,"auth-current")}
 
     public func pendingAuthAttemptsV4()throws->[AuthAttemptV4] {
-        try pendingOrdinaryAuthAttemptsLockedV4()
+        try validateInitialDeletionRowsLockedV1()
+        return try pendingOrdinaryAuthAttemptsLockedV4()
+    }
+    public func requireOrdinaryAuthenticationV4(authRequestID:String,challengeRequestID:String?)throws {
+        try db.transaction { try requireOrdinaryAuthenticationLockedV4(authRequestID:authRequestID,challengeRequestID:challengeRequestID) }
+    }
+    func requireOrdinaryAuthenticationLockedV4(authRequestID:String,challengeRequestID:String?)throws {
+        try AuthorityWire.identifier(authRequestID)
+        if let challengeRequestID { try AuthorityWire.identifier(challengeRequestID) }
+        guard try !validateInitialDeletionRowsLockedV1().exists else { throw AuthorityError.unavailable }
     }
     // No transaction and no purpose validator callback: initial source absence uses this body.
     func pendingOrdinaryAuthAttemptsLockedV4()throws->[AuthAttemptV4] {
@@ -26,6 +35,7 @@ extension MatchStore {
     public func resolveTerminalAuthenticationV4(requestID:String,resolution:AuthResolutionV4,expectedIdentityGeneration:Int64)throws->Int64? {
         guard resolution == .knownRevoked || resolution == .knownExpired else {throw AuthorityError.invalidWire}
         let generation=try db.transaction {()->Int64? in
+            try requireOrdinaryAuthenticationLockedV4(authRequestID:requestID,challengeRequestID:nil)
             guard try authAttemptV4(requestID:requestID) != nil else {throw AuthorityError.intentMismatch}
             try writeV4(resolution,table:"lifecycle_steps_v4",id:"auth-resolved:"+requestID)
             let current=try currentAuthRequestIDV4()
@@ -38,7 +48,7 @@ extension MatchStore {
     }
     public func resolveAuthAttemptV4(requestID:String,resolution:AuthResolutionV4)throws {
         guard Self.authResolutionClosesV4(resolution) else {throw AuthorityError.invalidWire}
-        try db.transaction {guard try authAttemptV4(requestID:requestID) != nil else {throw AuthorityError.intentMismatch};try writeV4(resolution,table:"lifecycle_steps_v4",id:"auth-resolved:"+requestID);try fail(.beforeCommit)}
+        try db.transaction {try requireOrdinaryAuthenticationLockedV4(authRequestID:requestID,challengeRequestID:nil);guard try authAttemptV4(requestID:requestID) != nil else {throw AuthorityError.intentMismatch};try writeV4(resolution,table:"lifecycle_steps_v4",id:"auth-resolved:"+requestID);try fail(.beforeCommit)}
     }
 
     public func authAttemptV4(requestID:String)throws->AuthAttemptV4? {
@@ -47,6 +57,7 @@ extension MatchStore {
     }
     public func saveAuthAttemptV4(_ attempt:AuthAttemptV4,expectedIdentityGeneration:Int64=0)throws {
         try db.transaction {
+            try requireOrdinaryAuthenticationLockedV4(authRequestID:attempt.requestID,challengeRequestID:nil)
             guard try identityGenerationV4()==expectedIdentityGeneration else {throw AuthorityError.identityChanged}
             guard let trust=authorityTrust,trust.environment==attempt.environment else {throw AuthorityError.unavailable}
             if let b=try currentBindingV4() {guard b.deviceID==attempt.deviceID,b.cloudSpaceID==attempt.cloudSpaceID,b.environment==attempt.environment else {throw AuthorityError.identityChanged}}
@@ -55,7 +66,7 @@ extension MatchStore {
                 guard prior.deviceID != attempt.deviceID || prior.publicKey==attempt.publicKey else {throw AuthorityError.identityChanged}
             }
             if let prior=try authAttemptV4(requestID:attempt.requestID) {guard prior==attempt else {throw AuthorityError.conflict};return}
-            guard try pendingAuthAttemptsV4().isEmpty else {throw AuthorityError.conflict}
+            guard try pendingOrdinaryAuthAttemptsLockedV4().isEmpty else {throw AuthorityError.conflict}
             try writeV4(attempt,table:"lifecycle_steps_v4",id:"auth-attempt:"+attempt.requestID)
             try writeV4(expectedIdentityGeneration,table:"lifecycle_steps_v4",id:"auth-admission:"+attempt.requestID);try fail(.beforeCommit)
         };if fault == .afterCommit {throw StoreError.responseLost}
@@ -63,6 +74,7 @@ extension MatchStore {
     public func acceptAuthenticationV4(attempt:AuthAttemptV4,binding:AccountBindingV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64=0)throws {
         var changedIdentity=false
         try db.transaction {
+            try requireOrdinaryAuthenticationLockedV4(authRequestID:attempt.requestID,challengeRequestID:nil)
             guard try identityGenerationV4()==expectedIdentityGeneration else {throw AuthorityError.identityChanged}
             guard let trust=authorityTrust,trust.environment==attempt.environment,try authAttemptV4(requestID:attempt.requestID)==attempt else {throw AuthorityError.intentMismatch}
             let verified=try VerifiedAuthorityReceiptV1.verify(receipt.raw,expected:AuthorityExpectedIntent(requestID:attempt.requestID,digest:attempt.requestDigest,operation:.authApple,accountID:binding.accountID,epoch:binding.activationEpoch),trust:trust)

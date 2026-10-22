@@ -147,6 +147,7 @@ extension MatchStore {
     @discardableResult
     func validateInitialDeletionRowsLockedV1() throws -> InitialDeletionRowsV1 {
         let rows = try initialDeletionRowsLockedV1()
+        guard rows.exists else { return rows }
         if let head = rows.head {
             _ = try initialDeletionSignedAuthV1(head.source.receiptRaw, attempt: head.source.attempt, source: head.source)
             for result in rows.results.values {
@@ -220,6 +221,8 @@ extension MatchStore {
             rows.rowCount + addedRows + slots + (terminal ? 1 : 0) <= 49 else { throw InitialDeletionIssueV1.capacity }
     }
     private func initialDeletionAbsenceLockedV1() throws {
+        try validateDeletionControlRowsLockedV4()
+        try validateCurrentWatchRegistrationRowsLockedV4()
         guard try deletionSagasV4().isEmpty else { throw InitialDeletionIssueV1.parentExists }
         guard try pendingControlsV4().isEmpty, try pendingOrdinaryAuthAttemptsLockedV4().isEmpty,
             try pendingWatchRegistrationAttemptsV4().isEmpty, try !migrationBlocksBusinessV4() else { throw AuthorityError.conflict }
@@ -228,6 +231,63 @@ extension MatchStore {
         }
     }
     private func completedInitialDeletionMutationV1() throws { if fault == .afterCommit { throw StoreError.responseLost } }
+
+    /// Only this original write transaction can mint a token for its exact canonical intent.
+    func initialDeletionConsumptionForSagaLockedV1(_ saga: DeletionSagaV4, rows: InitialDeletionRowsV1) throws -> InitialDeletionSagaConsumptionV1? {
+        guard rows.exists else { return nil }
+        let request: InitialDeletionRequestV1
+        if let head = rows.head { request = head.request }
+        else if let terminal = rows.terminal { request = terminal.request }
+        else { throw AuthorityError.intentMismatch }
+        guard request.creationID == saga.intent.requestID else { throw InitialDeletionIssueV1.parentExists }
+        guard saga.originalScope == request.originalScope, saga.cloudChoice == request.cloud,
+            saga.localChoice == request.local, saga.healthChoice == request.health, saga.healthConfirmed == request.healthConfirmed,
+            saga.accountID == request.originalScope.accountID, saga.activationEpoch == request.originalScope.activationEpoch else { throw AuthorityError.intentMismatch }
+        if rows.terminal != nil || rows.head?.phase == .consumed {
+            guard let prior = try deletionSagaV4(requestID: request.creationID), prior.intent == saga.intent,
+                prior.recoveryCapability == saga.recoveryCapability else { throw AuthorityError.conflict }
+            return nil
+        }
+        guard let head = rows.head, head.phase == .reserved, let selected = head.selectedAuthRequestID,
+            let result = rows.results[selected], let reauthenticationID = result.opaqueReauthenticationID,
+            saga.intent.fields.reauthenticationID == reauthenticationID, try deletionSagasV4().isEmpty else { throw AuthorityError.intentMismatch }
+        _ = try initialDeletionCurrentSourceLockedV1(generation: head.source.identityGeneration, expected: head.source)
+        _ = try DeletionSagaV4(intent: saga.intent, accountID: saga.accountID, activationEpoch: saga.activationEpoch,
+            recoveryCapability: saga.recoveryCapability, cloudChoice: saga.cloudChoice, localChoice: saga.localChoice,
+            healthChoice: saga.healthChoice, healthConfirmed: saga.healthConfirmed, originalScope: saga.originalScope)
+        return InitialDeletionSagaConsumptionV1(creationID: request.creationID,
+            sourceDigest: AuthorityWire.hash(try Canonical.data(head.source)), selectedAuthRequestID: selected, intentDigest: saga.intent.digest)
+    }
+    func finishInitialDeletionConsumptionLockedV1(_ token: InitialDeletionSagaConsumptionV1, rows: InitialDeletionRowsV1) throws {
+        guard let head = rows.head, head.phase == .reserved, head.request.creationID == token.creationID,
+            head.selectedAuthRequestID == token.selectedAuthRequestID,
+            AuthorityWire.hash(try Canonical.data(head.source)) == token.sourceDigest else { throw AuthorityError.intentMismatch }
+        var next = head; next.phase = .consumed; next.parentIntentDigest = token.intentDigest
+        try replaceInitialDeletionHeadLockedV1(next, prior: head)
+    }
+    func requireInitialDeletionControlClaimLockedV1(_ intent: ControlIntentV1, consumption: InitialDeletionSagaConsumptionV1?) throws {
+        let rows = try initialDeletionRowsLockedV1()
+        guard rows.claimedIDs.contains(Data(intent.requestID.utf8)) else {
+            guard consumption == nil else { throw AuthorityError.intentMismatch }
+            return
+        }
+        if let consumption, let head = rows.head, head.phase == .reserved {
+            guard intent.operation == .deleteAccount, intent.requestID == consumption.creationID,
+                intent.requestID == head.request.creationID, intent.digest == consumption.intentDigest,
+                head.selectedAuthRequestID == consumption.selectedAuthRequestID,
+                AuthorityWire.hash(try Canonical.data(head.source)) == consumption.sourceDigest,
+                let selected = head.selectedAuthRequestID, let result = rows.results[selected],
+                result.opaqueReauthenticationID == intent.fields.reauthenticationID else { throw AuthorityError.intentMismatch }
+            return
+        }
+        let creationID = rows.head?.request.creationID ?? rows.terminal?.request.creationID
+        guard consumption == nil, creationID == intent.requestID,
+            rows.head?.phase == .consumed || rows.terminal != nil,
+            let saga = try deletionSagaV4(requestID: intent.requestID),
+            let control = try controlV4(intent.requestID), try Canonical.data(saga.intent) == Canonical.data(intent),
+            try Canonical.data(control) == Canonical.data(intent) else { throw AuthorityError.conflict }
+        try validateInitialDeletionRowsLockedV1()
+    }
 
     public func initialDeletionContextV4(creationID: String, expectedIdentityGeneration: Int64) throws -> InitialDeletionContextV1? {
         try db.transaction { try initialDeletionContextLockedV1(validateInitialDeletionRowsLockedV1(), creationID: creationID, generation: expectedIdentityGeneration) }

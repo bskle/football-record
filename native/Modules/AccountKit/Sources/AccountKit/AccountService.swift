@@ -44,7 +44,7 @@ public actor AccountService {
     func object<T:Encodable>(_ value:T)throws->[String:Any] {try JSONSerialization.jsonObject(with:AuthorityWire.encode(value)) as! [String:Any]}
     func bytes(_ value:[String:Any])throws->Data {try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.withoutEscapingSlashes])}
     public func signIn(requestID:String,challengeRequestID:String) async throws->AccountAuthentication {
-        try await ensureFacade();let generation=try await requireAdmission()
+        try await ensureFacade();try await repository.requireOrdinaryAuthenticationV4(authRequestID:requestID,challengeRequestID:challengeRequestID);let generation=try await requireAdmission()
         if try await repository.authAttemptV4(requestID:requestID) != nil {
             guard case .authenticated(let result)=try await recover(authRequestID:requestID) else {throw AuthorityError.identityChanged};return result
         }
@@ -65,7 +65,7 @@ public actor AccountService {
         return try await accept(response,attempt:attempt,generation:generation)
     }
     public func recover(authRequestID:String) async throws->AuthenticationRecovery {
-        try await ensureFacade();let generation=try await requireAdmission()
+        try await ensureFacade();try await repository.requireOrdinaryAuthenticationV4(authRequestID:authRequestID,challengeRequestID:nil);let generation=try await requireAdmission()
         guard let attempt=try await repository.authAttemptV4(requestID:authRequestID),attempt.deviceID==deviceID,attempt.cloudSpaceID==cloudSpaceID,attempt.publicKey==client.signer.publicKey,attempt.environment==client.trust.environment else {throw AuthorityError.identityChanged}
         let request=RecoverRequest(requestID:UUID().uuidString,authRequestID:authRequestID,deviceID:deviceID,keyID:attempt.keyID,nonce:UUID().uuidString,devicePublicKey:attempt.publicKey,issuedAt:try seconds())
         let unsigned=try object(request),signature=try await client.signer.sign(AuthorityWire.signedInput("football-record.device.auth-recover.v1",body:bytes(unsigned)))

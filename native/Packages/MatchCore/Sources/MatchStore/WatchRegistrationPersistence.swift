@@ -49,6 +49,8 @@ extension MatchStore {
     }
     public func saveWatchRegistrationAttemptV4(_ attempt:WatchRegistrationAttemptV4,expectedIdentityGeneration:Int64)throws {
         try db.transaction {
+            let initialIDs = try initialDeletionClaimedIDsLockedV1()
+            guard !initialIDs.contains(Data(attempt.requestID.utf8)), !initialIDs.contains(Data(attempt.challengeRequestID.utf8)) else { throw AuthorityError.conflict }
             try attempt.validate();guard try identityGenerationV4()==expectedIdentityGeneration else {throw AuthorityError.identityChanged};try validateWatchParticipantV4(attempt,allowSuspended:true)
             if let prior=try watchRegistrationAttemptV4(requestID:attempt.requestID) {guard prior==attempt else {throw AuthorityError.conflict};return}
             for row in try db.rows("SELECT payload,checksum FROM lifecycle_steps_v4 WHERE id LIKE 'watch-attempt:%'") {
