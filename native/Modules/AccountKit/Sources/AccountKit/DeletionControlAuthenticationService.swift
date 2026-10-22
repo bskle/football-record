@@ -242,12 +242,17 @@ public actor DeletionControlAuthenticationService {
             guard readback?.authorization.raw == proof.raw, readback?.resolution == nil else { throw original }
         }
         _ = try await checked(parentID, generation, token)
-        let accepted = try await repository.deletionControlAuthorizationV4(parentID: parentID, authRequestID: attempt.authentication.requestID)
-        _ = try await checked(parentID, generation, token)
-        guard accepted?.authorization.raw == proof.raw, accepted?.resolution == nil else { throw DeletionControlIssueV1.needsFreshAuthorization }
+        let beforeVault = try await repository.deletionControlReadyContextV4(parentID: parentID, authorization: proof, expectedIdentityGeneration: generation, at: client.now())
+        try running(token)
+        try requireAttempt(attempt, context: beforeVault, generation: generation)
         try requireFresh(credential, proof: proof)
         try await client.vault.replace(credential, expectedIdentityGeneration: generation)
         _ = try await checked(parentID, generation, token)
+        // The last asynchronous read proves current parent/gen AND this exact
+        // attempt's unclosed first proof in one original SQL transaction.
+        let afterVault = try await repository.deletionControlReadyContextV4(parentID: parentID, authorization: proof, expectedIdentityGeneration: generation, at: client.now())
+        try running(token)
+        try requireAttempt(attempt, context: afterVault, generation: generation)
         try requireFresh(credential, proof: proof)
         return .ready(reauthenticationID: b.reauthenticationID, lockState: b.lockState)
     }

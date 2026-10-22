@@ -567,4 +567,28 @@ final class DeletionControlAuthenticationTests: XCTestCase, @unchecked Sendable 
         await s.stopAndJoin(); try await x.h.repo.close()
     }
 
+    func testTrustedClosingDuringAdmittedVaultAwaitCannotReturnReadyAfterJoinedWrite() async throws {
+        let f = try NodeAuthorityFixture(); defer { f.close() }
+        let x = try await fixture(f), held = DeletionControlHeldVault(x.h.vault), scope = x.scope
+        let client = AuthorityClient(relay: x.relay, vault: held, signer: x.h.signer, trust: x.h.client.trust, now: x.h.client.now)
+        let first = DeletionControlAuthenticationService(client: client, repository: x.h.repo, coordinator: x.h.session, scope: scope, apple: x.h.apple, currentScope: { scope })
+        let call = Task { try await first.renew(parentID: x.saga.intent.requestID, authRequestID: "vault-closing-race", challengeRequestID: "vault-closing-challenge", expectedIdentityGeneration: 0) }
+        let until = ContinuousClock.now.advanced(by: .seconds(3))
+        while !(await held.entered), ContinuousClock.now < until { try await Task.sleep(for: .milliseconds(2)) }
+        let entered = await held.entered; XCTAssertTrue(entered)
+        let original = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "vault-closing-race")
+        _ = try f.command(["op": "inspect", "sql": "UPDATE sessions SET revoked=1 WHERE session_id IN (SELECT session_id FROM auth_records WHERE auth_request_id='vault-closing-race') RETURNING revoked"])
+        let closing = service(x)
+        guard case .knownRevoked = try await closing.recover(parentID: x.saga.intent.requestID, authRequestID: "vault-closing-race", expectedIdentityGeneration: 0) else { return XCTFail("trusted revocation must be committed while original vault callback is held") }
+        let generation = try await x.h.repo.identityGenerationV4(), beforeRelease = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "vault-closing-race")
+        XCTAssertEqual(generation, 0); XCTAssertEqual(beforeRelease?.resolution?.body.result, .knownRevoked)
+        XCTAssertGreaterThan(try XCTUnwrap(original?.authorization.body.expiresAt), Int64(x.h.client.now().timeIntervalSince1970))
+        await held.release()
+        do { let outcome = try await call.value; if case .ready = outcome { XCTFail("unchanged parent/gen/TTL cannot hide trusted closing during admitted vault await") } } catch {}
+        let retained = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "vault-closing-race"), admittedWrite = try await x.h.vault.credential()
+        XCTAssertEqual(retained?.authorization.raw, original?.authorization.raw); XCTAssertEqual(retained?.resolution?.body.result, .knownRevoked)
+        XCTAssertEqual(admittedWrite.sessionID, original?.authorization.body.sessionID)
+        await first.stopAndJoin(); await closing.stopAndJoin(); try await x.h.repo.close()
+    }
+
 }

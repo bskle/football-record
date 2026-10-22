@@ -120,6 +120,8 @@ public enum DeletionControlOutcomeV1:Sendable {case ready(reauthenticationID:Str
 public protocol DeletionControlAuthenticationRepository:Sendable {
     func syncRepositoryIdentity() async->SyncRepositoryIdentity
     func deletionControlContextV4(parentID:String,expectedIdentityGeneration:Int64) async throws->DeletionControlContextV1
+    /// Same-transaction active admission for this exact first proof; historical reads do not grant readiness.
+    func deletionControlReadyContextV4(parentID:String,authorization:VerifiedDeletionControlAuthorizationV1,expectedIdentityGeneration:Int64,at:Date) async throws->DeletionControlContextV1
     func deletionControlAttemptsV4(parentID:String) async throws->[DeletionControlAttemptV1]
     func deletionControlAttemptV4(parentID:String,authRequestID:String) async throws->DeletionControlAttemptV1?
     func deletionControlAuthorizationV4(parentID:String,authRequestID:String) async throws->DeletionControlAuthorizationRecordV1?

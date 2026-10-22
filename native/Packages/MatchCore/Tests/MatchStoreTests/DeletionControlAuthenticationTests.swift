@@ -189,4 +189,45 @@ final class DeletionControlAuthenticationTests:XCTestCase,@unchecked Sendable {
         try await s.close()
     }
 
+    func retainedControlRows(_ context: LifecycleStateTests.Context) throws -> [[String?]] {
+        let db = try SQLite(url: context.url, fault: nil); defer { try? db.close() }
+        return try db.rows("SELECT id,hex(payload),checksum FROM lifecycle_steps_v4 ORDER BY id").map { $0.map(\.string) }
+    }
+    func testSameSQLReadyContextRequiresExactFirstProofNoClosingAndCurrentExpiryWithoutWrites() async throws {
+        let f = try await fixture(), s = try h.store(f.context), c = try await s.deletionControlContextV4(parentID: f.saga.intent.requestID, expectedIdentityGeneration: 0), a = try attempt(c), raw = try authorization(f, a)
+        let ready = try VerifiedDeletionControlAuthorizationV1.verify(raw, expectedParent: f.saga, expectedAttempt: a, trust: f.context.trust)
+        try await s.saveDeletionControlAttemptV4(a); try await s.acceptDeletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authorization: ready, originalAcquire: nil, expectedIdentityGeneration: 0, at: h.h.t)
+        let before = try retainedControlRows(f.context)
+        let admitted = try await s.deletionControlReadyContextV4(parentID: f.saga.intent.requestID, authorization: ready, expectedIdentityGeneration: 0, at: h.h.t)
+        XCTAssertEqual(admitted.binding, c.binding); XCTAssertEqual(admitted.identityGeneration, 0); XCTAssertEqual(admitted.saga.intent.digest, f.saga.intent.digest)
+        let alternateRaw = try authorization(f, a, changes: ["proofID": "other-valid-signed-proof"]), alternate = try VerifiedDeletionControlAuthorizationV1.verify(alternateRaw, expectedParent: f.saga, expectedAttempt: a, trust: f.context.trust)
+        do { _ = try await s.deletionControlReadyContextV4(parentID: f.saga.intent.requestID, authorization: alternate, expectedIdentityGeneration: 0, at: h.h.t); XCTFail("same claims with different signed raw cannot replace first proof") } catch {}
+        do { _ = try await s.deletionControlReadyContextV4(parentID: f.saga.intent.requestID, authorization: ready, expectedIdentityGeneration: 0, at: Date(timeIntervalSince1970: Double(ready.body.expiresAt))); XCTFail("current expiry cannot pass") } catch {}
+        do { _ = try await s.deletionControlReadyContextV4(parentID: f.saga.intent.requestID, authorization: ready, expectedIdentityGeneration: 1, at: h.h.t); XCTFail("wrong generation cannot pass") } catch {}
+        XCTAssertEqual(try retainedControlRows(f.context), before)
+        let closing = try closing(f, a, result: "knownRevoked")
+        try await s.resolveDeletionControlAttemptV4(parentID: f.saga.intent.requestID, authorization: closing, expectedIdentityGeneration: 0)
+        let closedRows = try retainedControlRows(f.context)
+        do { _ = try await s.deletionControlReadyContextV4(parentID: f.saga.intent.requestID, authorization: ready, expectedIdentityGeneration: 0, at: h.h.t); XCTFail("trusted closing is checked with current parent/gen in one SQL transaction") } catch {}
+        XCTAssertEqual(try retainedControlRows(f.context), closedRows)
+        let history = try await s.deletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authRequestID: a.authentication.requestID)
+        XCTAssertEqual(history?.authorization.raw, raw); XCTAssertEqual(history?.resolution?.raw, closing.raw)
+        try await s.close()
+    }
+    func testSameSQLReadyContextRejectsOldAttemptNewGenerationAndCompletedParentPreservingHistory() async throws {
+        let f = try await fixture(), s = try h.store(f.context), c = try await s.deletionControlContextV4(parentID: f.saga.intent.requestID, expectedIdentityGeneration: 0), a = try attempt(c), raw = try authorization(f, a)
+        let ready = try VerifiedDeletionControlAuthorizationV1.verify(raw, expectedParent: f.saga, expectedAttempt: a, trust: f.context.trust)
+        try await s.saveDeletionControlAttemptV4(a); try await s.acceptDeletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authorization: ready, originalAcquire: nil, expectedIdentityGeneration: 0, at: h.h.t)
+        try await s.suspendAccountV4(); let currentGeneration = try await s.identityGenerationV4(), before = try retainedControlRows(f.context)
+        do { _ = try await s.deletionControlReadyContextV4(parentID: f.saga.intent.requestID, authorization: ready, expectedIdentityGeneration: currentGeneration, at: h.h.t); XCTFail("same original scope cannot lend a new generation to old proof") } catch {}
+        XCTAssertEqual(try retainedControlRows(f.context), before)
+        let deleted = try h.receipt(f.context, requestID: f.saga.intent.requestID, digest: f.saga.intent.digest, operation: .deleteAccount, result: .deleted, extra: ["deletion": ["backend": "backendDeleted", "apple": "revoked", "cloud": "clientManaged", "local": "clientManaged", "health": "separateConfirmation"]])
+        _ = try await s.acceptDeletionV4(requestID: f.saga.intent.requestID, receipt: deleted, expectedRevision: 0)
+        let terminalGeneration = try await s.identityGenerationV4(), terminal = try retainedControlRows(f.context)
+        do { _ = try await s.deletionControlReadyContextV4(parentID: f.saga.intent.requestID, authorization: ready, expectedIdentityGeneration: terminalGeneration, at: h.h.t); XCTFail("completed parent is never active ready") } catch {}
+        XCTAssertEqual(try retainedControlRows(f.context), terminal)
+        let history = try await s.deletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authRequestID: a.authentication.requestID)
+        XCTAssertEqual(history?.authorization.raw, raw); try await s.close()
+    }
+
 }

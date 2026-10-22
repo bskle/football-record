@@ -61,6 +61,9 @@ extension SQLiteSessionRepository: DeletionControlAuthenticationRepository {
     public func deletionControlContextV4(parentID: String, expectedIdentityGeneration: Int64) async throws -> DeletionControlContextV1 {
         return try await store.deletionControlContextV4(parentID: parentID, expectedIdentityGeneration: expectedIdentityGeneration)
     }
+    public func deletionControlReadyContextV4(parentID: String, authorization: VerifiedDeletionControlAuthorizationV1, expectedIdentityGeneration: Int64, at: Date) async throws -> DeletionControlContextV1 {
+        return try await store.deletionControlReadyContextV4(parentID: parentID, authorization: authorization, expectedIdentityGeneration: expectedIdentityGeneration, at: at)
+    }
     public func deletionControlAttemptsV4(parentID: String) async throws -> [DeletionControlAttemptV1] {
         return try await store.deletionControlAttemptsV4(parentID: parentID)
     }

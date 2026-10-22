@@ -37,6 +37,24 @@ extension MatchStore {
     public func deletionControlContextV4(parentID:String,expectedIdentityGeneration:Int64)throws->DeletionControlContextV1 {
         try db.transaction {try validateDeletionControlRowsLockedV4();return try sourceDeletionControlV1(parentID:parentID,expectedIdentityGeneration:expectedIdentityGeneration).0}
     }
+    /// A read-only linearization point for one exact authorization, never a cached ready flag.
+    public func deletionControlReadyContextV4(parentID:String,authorization:VerifiedDeletionControlAuthorizationV1,expectedIdentityGeneration:Int64,at:Date)throws->DeletionControlContextV1 {
+        try db.transaction {
+            try validateDeletionControlRowsLockedV4()
+            let (context,_)=try sourceDeletionControlV1(parentID:parentID,expectedIdentityGeneration:expectedIdentityGeneration)
+            guard let attempt=try loadDeletionControlAttemptV1(parentID:parentID,authRequestID:authorization.body.requestID),
+                  attempt.identityGeneration==expectedIdentityGeneration,attempt.parentDigest==context.saga.intent.digest,
+                  DeletionControlWireV1.scope(attempt.originalScope,context.originalScope),
+                  try Canonical.data(attempt.binding)==Canonical.data(context.binding),
+                  attempt.publicKey==context.publicKey,attempt.keyID==context.keyID,let trust=authorityTrust else {throw AuthorityError.identityChanged}
+            let original=try VerifiedDeletionControlAuthorizationV1.verify(authorization.raw,expectedParent:context.saga,expectedAttempt:attempt,trust:trust)
+            guard let stored=try loadDeletionControlAuthorizationV1(parentID:parentID,authRequestID:attempt.authentication.requestID),
+                  stored.authorization.raw==original.raw,stored.authorization.body.result == .ready,stored.resolution==nil else {throw DeletionControlIssueV1.needsFreshAuthorization}
+            let now=try DeletionControlWireV1.seconds(at)
+            guard original.body.issuedAt<=now+60,original.body.expiresAt>now else {throw AuthorityError.staleAttestation}
+            return context
+        }
+    }
     private func loadDeletionControlAttemptsV1(parentID:String)throws->[DeletionControlAttemptV1] {
         try AuthorityWire.identifier(parentID)
         return try db.rows("SELECT payload,checksum FROM lifecycle_steps_v4 WHERE id LIKE 'delete-control-v1:attempt:%' ORDER BY rowid").map {try checkedV4(DeletionControlAttemptV1.self,row:$0,table:"lifecycle_steps_v4",key:parentID)}.filter {$0.parentRequestID==parentID}

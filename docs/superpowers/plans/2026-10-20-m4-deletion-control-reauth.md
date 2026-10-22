@@ -360,3 +360,22 @@ public struct DeletionControlAuthorizationRecordV1: Sendable {
 专用服务在ready解析、SQL读回异常路径、全部current-proof/parent awaits后且紧贴vault mutation前、vault及最后current检查后分别重验固定签名issuedAt/expiry与真实当前clock。过期原proof保留供原ID可信closing恢复，不能变ready或以缓存raw绕过当前时间门。vault自身await期间的正面写入仍属于原owned尾部，退出前join；SQL与vault/clock不称原子事务，签名请求本身继续拒绝过期credential。
 
 历史attempt必须在构造recover、调用原signer及发HTTP前与本次checked context的parentID/digest、完整原UTF8 scope、binding全字段、原publicKey/keyID、auth设备/云域/environment和当前generation相等。renew发现已有attempt时走同样门；响应接受仍复验，不借新代数查询旧attempt后才拒绝。历史只读API保持可读，不代表活动网络或vault准入。
+
+
+## 2026-10-22 C52-6：最后同SQL active-ready 只读门
+
+`1c41d88`的628/0与四SDK仍保留原输入层，whole审发现其post-vault门只验证parent/gen/TTL，未查同attempt可信closing。实际HeldVault+原server撤销+第二受控recover回归在旧产品为1 test/1 failure。计划 `active-ready-gate-plan.json` SHA256 `4c8478eb70e96f0468185912e5cec52471f3b46d9675886d214506dfc3dbdc63` 已由root与m4_recovery_audit双审PASS_PLAN。
+
+现optional repository增加以下唯一只读声明，SQLiteSessionRepository在原新增Coordinator文件转发；不加旧required协议、Session业务入口、schema、kind或row：
+
+```swift
+func deletionControlReadyContextV4(parentID: String,
+    authorization: VerifiedDeletionControlAuthorizationV1,
+    expectedIdentityGeneration: Int64, at: Date) async throws -> DeletionControlContextV1
+```
+
+原Store同一个同步SQL事务内严格校验所有retained kind，重读原current Saga/control/cap/rawscope/binding/key/gen/非terminal门，绑定原attempt全tuple，按repository固定trust重验传入signed raw，再要求已存第一条authorization raw逐字相同、ready、resolution=nil及at/issuedAt/expiry有效。只返回既有非Codable原Context，零row写入；历史只读API不被改为ready授权。
+
+AccountKit在vault准入前和完整vault尾部之后均先完成独立currentScope/source与原context的checked awaits，最后await这项sameSQL gate。其后到vault调用或return.ready之间只有同步running/lifetime、完整attempt/context与当前clock检查，不再插入异步history/context读取。最后sameSQL gate是本次返回的线性化点；不承诺独立并发状态之后永不改变，不持SQL锁跨network/vault/SDK。已准入vault正面write必须join/保留，不能假称rollback或SQL/vault/time全局原子性。
+
+新增gate实际编译缺API红与旧context-only占位2 tests/4 failures分开保留，覆盖原first raw、trustedclosing、expiry、旧attempt借新gen、当前parent完成和控制rows不变。下一轮只重跑受影响完整Core+AccountKit与四最低SDK；Backend未改，Node228保留58ff/1c41独立已验证输入层，不与新轮累加为一次全host。
