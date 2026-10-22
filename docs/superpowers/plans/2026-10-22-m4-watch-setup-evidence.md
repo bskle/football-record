@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户已选择子代理开发；NATIVE-059 唯一作者执行。产品/测试写入前，须 root 与第二位非作者对本计划 exact commit 双审 PASS，作者随后只按 root 的明确放行继续。
 
-**Goal:** 从原 Store 的单个受检快照，区分无历史的空 setup 与同一原 Watch identity/key/完整 Phone context 的唯一 admission，使 026 能另行接入原协议 setup 重试。
+**Goal:** 从原 Store 的单个受检快照，在无需 Phone context 或 relay 的本地 preflight 中，区分空 setup 与同一原 Watch identity/key 的唯一 admission，并只返回原受检 admitted context，供 026 随后精确核对 fresh Phone context 再重试原协议。
 
 **Architecture:** 新增独立 optional setup reader，返回 factory-only、非 Codable 的只读 projection。原 SQLiteSessionRepository 只转发原 store；055 current reader、原 Watch 服务和持久化顺序保持不变。任何注册、已封闭、Phone/control 或未知历史均拒绝，不能把当前接受证明失败解释为空 setup。
 
@@ -38,7 +38,10 @@
 
 不改 `CurrentWatchRegistrationEvidence.swift`、`WatchRegistrationModels.swift`、`WatchRegistrationPersistence.swift`、AccountKit、任何 026/058 源、required protocol、Package/lock、project/scheme/target/capability/entitlements；不改 wire、PoP、schema、原服务或持久化时序。需要扩路径时先提交具体理由，由 root 重新审阅所有权，不自行扩写。
 
-## 2. 已固定问题与证据界限
+## 2. 已固定问题、R59-P1 修订与证据界限
+
+旧计划 commit `de7b9c357e789825be04429c28dc3dbdb830365f` 因 R59-P1 未获准实现：mandatory context 参数会要求 026 在本地辨别 legacy/history 前调用 `watchRelay.registrationContext()`；这是实际 context exchange，不是本地 getter，重开 owner 也无现成完整 context getter，因而违反四入口零 dispatch。本次只修订三文档，不实现或运行。移除 reader 的 context 输入，projection 只返回受检 `admittedContext?`；先本地拒绝历史，再由 026 获取 fresh context、比对并复读 setup。旧 de7 计划/副本/checkpoint 与审阅报告保留，不改写；修订提交重新接受 root 与第二位非作者 exact 计划审。
+
 
 R26-W1 的 rejected source 为 `04d994899b08fe43ab0642358272664b33b502b9`。原 `WatchRegistrationService.admitCurrentIdentity(context:)` 先通过原 coordinator 提交 `watch-admission:<device>`，之后才调用首次 challenge HTTP、校验响应及 signer；`saveWatchRegistrationAttempt` 在这些步骤之后，登记转发又在 save 之后。首次 HTTP503、非法 challenge 或 signer 失败可留下纯 admission，尚无注册 requestID/attempt 可恢复。
 
@@ -57,8 +60,7 @@ public protocol WatchRegistrationSetupEvidenceReadingV4: Sendable {
     func watchRegistrationSetupEvidenceV4(
         expectedIdentityGeneration: Int64,
         deviceID: String,
-        publicKey: String,
-        context: WatchRegistrationContextV4
+        publicKey: String
     ) async throws -> CheckedLocalWatchRegistrationSetupEvidenceV4
 }
 
@@ -70,25 +72,24 @@ public struct CheckedLocalWatchRegistrationSetupEvidenceV4: Sendable {
     public let watchDeviceID: String
     public let watchPublicKey: String
     public let watchDeviceKeyID: String
-    public let context: WatchRegistrationContextV4
+    public let admittedContext: WatchRegistrationContextV4?
     fileprivate init(state: State, identityGeneration: Int64,
                      watchDeviceID: String, watchPublicKey: String,
-                     watchDeviceKeyID: String, context: WatchRegistrationContextV4) {
+                     watchDeviceKeyID: String, admittedContext: WatchRegistrationContextV4?) {
         self.state = state; self.identityGeneration = identityGeneration
         self.watchDeviceID = watchDeviceID; self.watchPublicKey = watchPublicKey
-        self.watchDeviceKeyID = watchDeviceKeyID; self.context = context
+        self.watchDeviceKeyID = watchDeviceKeyID; self.admittedContext = admittedContext
     }
 }
 ```
 
-结果无 public/memberwise initializer、Codable、原始 receipt、binding、permit、credential 或 ready 字段。`.empty` 的 context 是已校验的输入，表示本快照尚无 admission；`.admissionOnly` 的 context 必须取受检原 admission，且 canonical bytes 与输入逐字节相等。两类都只准后续显式原协议 setup；均不是 055 accepted/current 证据或录制准入。外部不能自行构造一个正例；协议仍可被测试 double 实现，026 必须使用原受管 facade，不能把任意实现当生产凭据。
+结果无 public/memberwise initializer、Codable、原始 receipt、binding、permit、credential 或 ready 字段。`.empty` 必须 `admittedContext == nil`，不编造调用方 context；`.admissionOnly` 必须带受检原 admission 的完整 `admittedContext`。reader 不要求也不获取 fresh Phone context，结果不声称该 context 是 Phone 当前观察，不能据其推断旧 epoch 是否仍有效。两类都只准后续显式原协议 setup；均不是 055 accepted/current 证据或录制准入。外部不能自行构造一个正例；协议仍可被测试 double 实现，026 必须使用原受管 facade，不能把任意实现当生产凭据。
 
 MatchStore 提供同步 actor 方法作为 async protocol witness，并增加仅 internal 测试 hook：
 
 ```swift
 func checkedWatchRegistrationSetupEvidenceV4(
     expectedIdentityGeneration: Int64, deviceID: String, publicKey: String,
-    context: WatchRegistrationContextV4,
     afterSnapshot: (@Sendable () throws -> Void)? = nil
 ) throws -> CheckedLocalWatchRegistrationSetupEvidenceV4
 ```
@@ -98,19 +99,18 @@ func checkedWatchRegistrationSetupEvidenceV4(
 ```swift
 extension SQLiteSessionRepository: WatchRegistrationSetupEvidenceReadingV4 {
     public func watchRegistrationSetupEvidenceV4(
-        expectedIdentityGeneration: Int64, deviceID: String, publicKey: String,
-        context: WatchRegistrationContextV4
+        expectedIdentityGeneration: Int64, deviceID: String, publicKey: String
     ) async throws -> CheckedLocalWatchRegistrationSetupEvidenceV4 {
         try await store.watchRegistrationSetupEvidenceV4(
             expectedIdentityGeneration: expectedIdentityGeneration,
-            deviceID: deviceID, publicKey: publicKey, context: context)
+            deviceID: deviceID, publicKey: publicKey)
     }
 }
 ```
 
 ## 4. 同一快照的严格生产规则
 
-先重跑 `WatchRegistrationContextV4` initializer、`AuthorityWire.identifier(deviceID)`、`AuthorityWire.deviceKeyID(publicKey:)`，要求 deviceID 与 phoneID 的原 UTF-8 不同；expected generation 在 `0...9_007_199_254_740_991`。要求原 Store 的固定 `authorityTrust` 存在、environment 与 context 相等，并按实际 `syncEnvironment` 的 production/development case 核环境，不接收调用方提供另一份 trust。
+先核 `AuthorityWire.identifier(deviceID)`、`AuthorityWire.deviceKeyID(publicKey:)`，expected generation 在 `0...9_007_199_254_740_991`。要求原 Store 的固定 `authorityTrust` 存在，按实际 `syncEnvironment` 的 production/development case 核其固定 environment；不接收调用方提供另一份 trust 或任何 Phone context，不触发 relay。若 snapshot 有 admission，再对实际 stored context 重跑 `WatchRegistrationContextV4` initializer、要求 deviceID 与其 phoneID 原 UTF-8 不同，并核其 environment 等于原固定 trust。
 
 然后只开一次 `BEGIN DEFERRED`。先 budget/read 原 identity-generation 以建立快照，调用 internal hook，再比 expected generation；不在任何 await 中持有事务。其余完整检查、结果构造及 COMMIT 都在同一个同步 actor 调用；任意失败 ROLLBACK 并抛原 typed error。不得嵌套 `db.transaction` 或另一个 reader 的 BEGIN。
 
@@ -132,8 +132,8 @@ FROM lifecycle_steps_v4 ORDER BY rowid LIMIT 3
 - 最多 2 行，key 原 bytes 长度 1...160、SQL type 为 text；从有限 BLOB 用严格 UTF-8 解码，并验证解码再编码与原 bytes 相等。NUL、非法 UTF-8、非 exact key、第二 admission 或未知状态拒绝。
 - 仅允许的行，payload SQL type 必须 blob、每行 0...32,768 bytes，checksum SQL type text 且 length 64，总 payload 至多 65,536 bytes。先 budget 再 decode，不能 SELECT 全部大 payload 后才限量。
 - generation 行若存在必须经原 `identityGenerationV4()` 完整 checksum/canonical/range 核验；缺行沿原语义为 0，不新增行。
-- admission key 必须与 `watch-admission:` + 输入 deviceID 原 bytes 精确相等。经 `watchEvidenceValueV4(StoredWatchAdmission.self,id:)` 校验；重建 context、严格公钥解码/keyID，完整 canonical context 与输入相等，公钥 UTF-8 与输入相等，再返回原 context。
-- 没有 admission 返回 `.empty`；有且仅有上述原 admission 返回 `.admissionOnly`。非零 generation 也只按本快照与 expected 值核验，不声称它是首次 generation；跨 epoch/同 generation 异身份的 expected context 不匹配必须拒绝。
+- admission key 必须与 `watch-admission:` + 输入 deviceID 原 bytes 精确相等。经 `watchEvidenceValueV4(StoredWatchAdmission.self,id:)` 完整校验原 admission checksum/canonical bytes；重建实际 stored context，核其 account/cloud/phone identifier、epoch 正数/上限、environment 与 fixed trust、phoneID 不等于原 Watch deviceID；严格公钥解码/keyID，公钥 UTF-8 与输入相等，再原样返回完整 `admittedContext`。没有 expected context 参数，不能在此承诺与尚未获取的 fresh Phone context 相等。
+- 没有 admission 返回 `.empty` + `admittedContext:nil`；有且仅有上述原 admission 返回 `.admissionOnly` + 原完整 `admittedContext`。非零 generation 也只按本快照与 expected 值核验，不声称它是首次 generation。有效但属于旧 Phone epoch/身份的 stored context 不会因某个不存在的 expected context 参数被拒绝；其 freshness 与完整身份不匹配必须由 026 在本地 preflight 之后、原服务之前拒绝。
 
 任何 `watch-attempt:*` / `watch-receipt:*` / `watch-current*`（包括合法 closed、legacy registered 缺 marker、孤立/partial/损坏变体）、`auth-*`、`control-queue:*`、`lifecycle-result:*`、`normal-intent:*`、`migration-*`、`deletion:*`、`delete-control-*`、`analytics-state` 或未知行都拒绝，不因其“已完成”而过滤。
 
@@ -162,9 +162,9 @@ sync_receive_progress_v3
 
 | 情形 | 确定行为 |
 | --- | --- |
-| expected generation/context/device/key 无效、预算/SQL类型/key非法 | `AuthorityError.invalidWire` |
+| expected generation/device/key 或实际 stored context 无效、预算/SQL类型/key非法 | `AuthorityError.invalidWire` |
 | 缺固定 trust | `AuthorityError.unavailable` |
-| trust/sync 环境或 expected 完整身份/context/generation 不符 | `AuthorityError.identityChanged` |
+| trust/sync/stored context 环境、原 device/key 或 expected generation 不符 | `AuthorityError.identityChanged` |
 | 任意其他事实/历史、第二 admission、未知状态 | `AuthorityError.unavailable`；不降级 `.empty` |
 | 允许行 checksum/canonical 损坏 | 原 `StoreError.corruptPayload`；DecodingError 在本边界映射为 `AuthorityError.invalidWire` |
 | schema、SQLite、close 或 rollback 错误 | 保留原 typed Store/SQLite 错误；不能 catch 后返回正例 |
@@ -173,9 +173,18 @@ sync_receive_progress_v3
 
 ## 5. root 后续交给 026 的消费契约（不在本任务实现）
 
-026 原作者仅可在显式 `.registerWatch`、无绑定且无 Watch pending 的原 unbound managed-empty Watch owner、无 attachment/capsules/pair seal 时请求 setup projection；必须从原 facade 读取。不得把它通用替换全动作的 055 pre-gate：`.signIn` 与没有 attempt 的 `.recover` 不因此获得 fresh 资格；原 Phone pending auth recover 和已有 Watch pending 的原 ID recover 继续原路径。纯 admission 的重试是用户显式 registerWatch，不推断旧 registrationID。用 fresh 独立 installation identity 与原 signer 公钥/keyID，fresh 获取完整原 Phone context，将 account/cloud/phone/epoch/environment 和原 UTF-8 与 projection 精确比对。所有 await 后核 lifetime/owner、原 generation 与原身份；进入原 `WatchRegistrationService.admitCurrentIdentity` 前重新读取 setup、核 context/identity，随后仍由原服务控制 admission、challenge、签名、保存 attempt、转发、接受和 vault 时序。
+026 原作者仅可在显式 `.registerWatch`、无绑定且无 Watch pending 的原 unbound managed-empty Watch owner、无 attachment/capsules/pair seal 时请求 setup projection；必须从原 facade 读取。不得把它通用替换全动作的 055 pre-gate：`.signIn` 与没有 attempt 的 `.recover` 不因此获得 fresh 资格；原 Phone pending auth recover 和已有 Watch pending 的原 ID recover 继续原路径。纯 admission 的重试是用户显式 registerWatch，不推断旧 registrationID。
 
-只有原请求尚未持久化且原服务尚未向 registerWatch 发送时，本地受检 setup 才允许显式重新取 challenge、创建注册 requestID。HTTP challenge 成功本身不等于 registerWatch 已发送；一旦存在 attempt/unknown，不用本 API 换 ID，只能原 requestID recover。knownAbandoned 证明原 attempt 封闭而非历史从未 commit；其历史也不属于此 setup reader 的正例，显式重新登记沿既有独立流程处理。
+消费顺序必须保持如下，不得先拿 context 再本地分类：
+
+1. 只用原 generation、原独立 installation deviceID 与原 signer publicKey/keyID，调用本地 setup reader。遇 legacy/receipt-only/closed/partial/未知历史立即 typed 拒绝，**此时 relay context exchange、register dispatch、vault/SQL修复计数均为零**；不能从配置或缓存补 context。
+2. 仅本地 `.empty` / `.admissionOnly` 正例后，才调用实际 relay 获取 fresh 完整 Phone context。核 fresh 独立 identity、完整 account/cloud/phone/epoch/environment、原 bytes 与原 owner/signer 相符。若首个 projection 有 admittedContext，必须与 fresh context 的完整 canonical/raw 关联逐字节相等；empty 的 nil 不冒称已匹配 Phone，也不把历史 context 当 fresh getter。
+3. 任意 await 后复核原 owner/lifetime、独立 identity/device/key、原 generation。用相同 expected generation/device/key 再读本地 setup，比较两次原 state、optional admittedContext（nil状态及完整 canonical bytes）、device/publicKey/keyID/generation 全等。若首次 empty 在 await 中变成 admissionOnly，或任何 context/key/generation 变化，即拒绝，不把它视作本次可继续的新 setup。
+4. 只有上述全部通过才调用原 `WatchRegistrationService.admitCurrentIdentity`。随后仍由原服务控制 admission、challenge、签名、保存 attempt、转发、接受和 vault 时序；这些步骤及其最终 tails 仍受原 generation/lifetime 检查。
+
+026 必须新增 fresh Phone context 的 account/cloud/phone/epoch/environment 逐项不匹配、原 admission 与 relay context 不同、复读 state/context/key/generation 变化、重开无缓存 context、四 legacy 入口零 context-exchange/零 dispatch 回归。它们属于 026 消费测试，不伪装成本 reader 的 expected-context 权限保证。
+
+只有原请求尚未持久化且原服务尚未向 registerWatch 发送时，本地受检 setup 才允许显式重新取 challenge、创建注册 requestID。HTTP challenge 成功本身不等于 registerWatch 已发送；一旦存在 attempt/unknown，不用本 API 换 ID，只能原 requestID recover。knownAbandoned 证明原 attempt 封闭而非历史从未 commit；本叶子仍拒绝其历史，不开放 closed/abandoned 后的新登记，也不宣称当前已有受验证的 fresh 后续流程。它只解决未形成 attempt 的纯 setup 重试，其他流程保持原 scope，后续另案处理。
 
 禁止 catch 055 异常或 nil 当 fresh、清 admission、造 current marker/placeholder attempt、猜旧 ID、切 Phone 或从旧 receipt 回填证明。055 对纯 admission 继续 unavailable。legacy registered 缺 marker、receipt-only、closed/unknown attempt、partial/corrupt 四类入口仍须零网络、零 vault、零 SQL 修复。真实注册后仍必须重新取得 055 current proof、精确原 scope/pair seal、credential TTL、独立身份/generation/lifetime/common gate，才能 ready。
 
@@ -202,9 +211,9 @@ func testPureOriginalAdmissionIsSetupOnlyAnd055StillRejects() async throws {
     do {
         let value = try await store.watchRegistrationSetupEvidenceV4(
             expectedIdentityGeneration: 0, deviceID: attempt.payload.watchID,
-            publicKey: attempt.payload.watchPublicKey, context: attempt.context)
+            publicKey: attempt.payload.watchPublicKey)
         XCTAssertEqual(value.state, .admissionOnly)
-        XCTAssertEqual(value.context, attempt.context)
+        XCTAssertEqual(value.admittedContext, attempt.context)
         XCTAssertEqual(value.watchDeviceKeyID,
             try AuthorityWire.deviceKeyID(publicKey: attempt.payload.watchPublicKey))
     } catch { XCTFail("the exact original admission must remain setup-retryable: \(error)") }
@@ -216,7 +225,7 @@ func testPureOriginalAdmissionIsSetupOnlyAnd055StillRejects() async throws {
 }
 ```
 
-- [ ] 增加 `testFreshNativeStoreReturnsCheckedEmptyAndWritesNothing`：真实新 Store+固定 trust；context/device/key 有效、无 admission，返回 `.empty`、generation0、所有输入完整相同；全表/user_version/changes 不变。再测试关闭重开相同 Store URL、同固定 trust 后两正例仍成立。
+- [ ] 增加 `testFreshNativeStoreReturnsCheckedEmptyAndWritesNothing`：真实新 Store+固定 trust；只给原 device/key 与 expected generation，无 Phone context、无 admission，返回 `.empty`、generation0、原 device/key 全等及 `admittedContext == nil`；全表/user_version/changes 不变。再测试关闭重开相同 Store URL、同固定 trust 后两正例仍成立。
 - [ ] 按第 4 节实现完整最小快照；给 metadata/38表检查使用新文件 private literal helpers，所有 helper 必须同步、不另开事务。跑新类 GREEN，保留输入副本、raw log、argv/exit/实际 counts。
 - [ ] 明确路径提交 `fix: expose checked Watch setup evidence`；body 记录该阶段真实 RED/GREEN 和剩余负例，不声称全包通过。
 
@@ -231,10 +240,10 @@ func testPureOriginalAdmissionIsSetupOnlyAnd055StillRejects() async throws {
 | `testRegisteredLegacyWithoutMarkerNeverBecomesSetup` | 用原 save+accept 产生真实签名 registered，再由测试 SQL 仅去 marker；新 reader 拒绝，055 也拒绝，原历史 receipt bytes 保留 |
 | `testAnyAttemptReceiptCurrentOrClosedHistoryBlocks` | 分别原 pending、真实 knownAbandoned close、registered receipt-only（nil binding）、孤立 receipt、只有 current/partial current；均拒绝，不能借 pending 过滤 |
 | `testForeignMultipleAndUnknownRowsBlock` | 同 device 换 key、异 device 唯一 admission、第二 admission、大小写/非法 UTF-8/NUL/partial key、未知 lifecycle row；原 rows 全保留 |
-| `testFullExpectedContextAndGenerationAreRequired` | 同 generation 逐项改 account/cloud/phone/epoch/environment，另 expectedGeneration±1、负数/越界；正确全 context 正例仍通过，旧 epoch/原 bytes 不同拒绝 |
+| `testStoredContextIdentityAndGenerationAreChecked` | 对实际stored admission分别放非法account/cloud/phone identifier、Watch等于phone、epoch0/越界、不同fixedtrust环境，全部拒绝；expectedGeneration±1、负数/越界也拒绝。有效完整stored context原样返回，不声称fresh；freshPhonecontext/account/cloud/phone/epoch不匹配移交026消费测试 |
 | `testCanonicalChecksumTypesAndBudgetsFailClosed` | allowed generation/admission checksum坏、JSON缺字段/额外字段/非canonical/错误SQL类型；payload32,769、id161、3行；先metadata限量，拒绝且不rewrite |
 | `testPhoneControlMigrationDeletionAndAllOtherTablesBlock` | 遍历实际38表各自插入一条符合该表原schema的 fixture；Phone/watch/waiting/suspended binding；auth-current/attempt/admission/receipt/resolved、migration-latest/checkpoint、deletion/delete-control未知版本、analytics-state；每次拒绝 |
-| `testSnapshotNeverMixesOriginalAdmissionWithSecondConnection` | 原连接先读generation建立snapshot后，hook用真实第二 SQLite connection 同事务改 admission完整context/key及generation；第一次只得旧 exact projection，下一次旧expected被拒，新expected+旧context也拒 |
+| `testSnapshotNeverMixesOriginalAdmissionWithSecondConnection` | 原连接先读generation建立snapshot后，hook用真实第二 SQLite connection 同事务改 admission完整context及generation、保持原device/key；第一次只得旧generation+原完整admittedContext且不混新值；下一次旧expected被拒。用新expected和原device/key可读取新合法stored context，但不因此把它认作fresh；另以第二连接换key仍拒绝原key输入。026复读比较必须拒绝原state/context/key/generation变化 |
 | `testDeferredSnapshotDoesNotNeedWriterAndFailureReleasesIt` | 第二连接持BEGIN IMMEDIATE，reader仍可读旧已提交snapshot；expected错拒绝后释放，writer提交后下一读见新事实，无事务遗留 |
 | `testUnknownSchemaOrPartialFactsArePreserved` | 加未知table/trigger或缺失原layout，reader typed拒绝；不迁移、不修schema、不清事实 |
 
@@ -295,10 +304,12 @@ xcrun swift build --package-path native/Packages/MatchCore --target MatchSession
 - [ ] 双审PASS后只收尾任务/验证两卡，提交 final 并停写；两位审阅者复核 exact final、产品/输入bytes与source一致。root 决定 no-ff 到 clean/stopped held026并核 actual merge，作者不merge/push/rebase/archive/delete。
 - [ ] 原026作者独立实现第5节消费、原真实HTTP503同owner+重开GREEN、新fresh full Integration及相关SDK；失败保全并重新收口。未完成前059保留活跃依赖，不提前归档；目标接收且依赖结束、全部成果保存后由root native archive、确认实际完成再safe `git branch -d`，queued请求不盲重试/强删。
 
-## 7. 本轮静态证据与限制
+## 7. 两个计划检查点的静态证据与限制
 
 本轮以 writing-plans / receiving-code-review 和 commit-conventions 编制计划；路径定位先以 `rg --files` 核准，避免把猜测文件名当接口事实。作者只读子任务已在同一 own base 完成 helper inventory 后停读，无第二 writer。
 
-树外 `E059 = /Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-059/planning`。直接保存 own effective base 全部 **402** tracked blob 的实际文件副本、mode/Git blob/SHA256/bytes；manifest `effective-base-input-manifest.json` SHA256 `452d3f65251e7830ce946a69cbb739dab29f6bcb315600cb957cd86ac68353f5`，直接bytes与Git全部相等。固定四份026 JSON另存副本与hash，不读取其活跃树。
+原 de7 计划层树外 `E059 = /Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-059/planning`。直接保存 own effective base 全部 **402** tracked blob 的实际文件副本、mode/Git blob/SHA256/bytes；manifest `effective-base-input-manifest.json` SHA256 `452d3f65251e7830ce946a69cbb739dab29f6bcb315600cb957cd86ac68353f5`，直接bytes与Git全部相等。固定四份026 JSON另存副本与hash，不读取其活跃树。
 
-本轮只有文档/只读源码/Git/文件hash/链接/diff静态检查；零 Swift/Node/HTTP/SQL/tests/build/device/simulator运行。真机不适用：本轮仅规划；后续叶子只验本机Store/reader及SDK编译。它不证明实际Apple/Keychain/iCloud/CloudKit/Health/WC、真实配对/账号/签名/安装/部署、原协议E2E、整包026/M4或App/UI，production仍Unavailable，main/release及原型tag不动。
+本次修订独立保存于 `E059v2 = /Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-059/planning-v2`。编辑前直接冻结 de7 全405份tracked实际输入；`base-plan-input-manifest.json` SHA256 `0fc88ce5af64b9f9a1ca5faf9acd853a4dc2deb28d144ac69cd305bd66202e5f`。root R59-P1报告 `plan-review-root-de7b9c3.json` SHA256 `f01396a9472b636a915689ac57340f47b227e32e9c6f0dd8a3f01f001b96c827` 固定副本单列。旧de7计划/checkpoint/输入不覆盖；修订完整tree与增量diff、全部类型/签名/示例一致性、两卡链接及新commit绑定独立checkpoint/manifest。原effective-base402份非本任务输入保持。
+
+两层计划均只有文档/只读源码/Git/文件hash/链接/diff静态检查；零 Swift/Node/HTTP/SQL/tests/build/device/simulator运行。真机不适用：本轮仅规划；后续叶子只验本机Store/reader及SDK编译。它不证明实际Apple/Keychain/iCloud/CloudKit/Health/WC、真实配对/账号/签名/安装/部署、原协议E2E、整包026/M4或App/UI，production仍Unavailable，main/release及原型tag不动。

@@ -1,6 +1,6 @@
 # NATIVE-059 验证记录
 
-状态：**planning-only；零runtime**。本卡不宣称产品实现、测试通过或SDK构建通过。[计划](../../superpowers/plans/2026-10-22-m4-watch-setup-evidence.md)与[任务卡](../tasks/NATIVE-059.md)待exact planning commit双非作者审阅，作者提交后停止写入。
+状态：**planning-v2-only；零runtime**。旧de7计划因R59-P1未获实现放行，旧证据全部保留。本卡不宣称产品实现、测试通过或SDK构建通过。[计划](../../superpowers/plans/2026-10-22-m4-watch-setup-evidence.md)与[任务卡](../tasks/NATIVE-059.md)待新的exact planning commit双非作者重审，作者提交后停止写入。
 
 ## 本轮实际输入与静态检查
 
@@ -25,13 +25,21 @@
 
 静态结果：只准三文档；完整tree差异、文件hash/链接存在性、计划API一致性和placeholder检查、`git diff --check`与exact提交/clean含ignored记录在`planning-checkpoint.json`及其引用文件。planning SHA只能在提交后由该树外checkpoint绑定，三文档不自指尚不存在的commit。原base所有402个tracked输入在文档添加后仍逐bytes相等；无产品、测试或配置改动。
 
+## R59-P1 三文档修订的独立证据
+
+旧计划`de7b9c357e789825be04429c28dc3dbdb830365f`要求Phonecontext作为reader参数，026重开owner必须先调用实际`watchRelay.registrationContext()` exchange才能本地排除legacy，违反四入口零dispatch。root固定报告`E059/plan-review-root-de7b9c3.json` SHA256 `f01396a9472b636a915689ac57340f47b227e32e9c6f0dd8a3f01f001b96c827`，本次只处理该已明确finding，不自行扩写其他发现。
+
+修订目录`E059v2 = /Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-059/planning-v2`。编辑前直接复制de7全部405份tracked实际输入并逐Gitblob核对；`base-plan-input-manifest.json` SHA256 `0fc88ce5af64b9f9a1ca5faf9acd853a4dc2deb28d144ac69cd305bd66202e5f`。R59-P1报告与旧checkpoint固定副本放独立references；旧计划层原件/manifest/checkpoint不覆盖。
+
+新API仅expectedGeneration/deviceID/publicKey；projection改`admittedContext: WatchRegistrationContextV4?`，empty=nil，admissionOnly来自原受检storedcontext。全部protocol/Store-hook/facade-signature/调用示例/测试矩阵/两卡同步；没有expectedPhonecontext权限保证。原固定trust与storedcontext initializer/canonical/key/环境预算、38表与全history拒绝保持；本叶子不开放closed/abandoned后新登记、不宣称已有受验证fresh后续流程，只处理未形成attempt的纯setup重试，其余保持原scope、后续另案。原402个非本任务输入逐bytes不变；修订全tree/增量diff、类型/链接检查及newSHA/clean含ignored绑定新`planning-checkpoint.json`与manifest。
+
 ## 后续必须执行的叶子矩阵（本轮未执行）
 
 | 分层 | 后续方法与期望 |
 | --- | --- |
 | 有意义runtime RED | 新API先用可编译fail-closed scaffold，真实空Store/原唯一admission通过XCTFail断言失败；编译诊断另存，不能充当RED |
-| Store focused GREEN | 原coordinator admission、真实registered/closed签名、legacy缺marker、receipt-only、attempt/partial/未知、异device/key/context/epoch、canonical/checksum/预算、全38表presence；成功/拒绝都全rows/user_version/changes不变 |
-| 第二真实SQLite connection | 旧snapshot不混新generation/admission；expected mismatch拒绝；持writer时可读；失败释放snapshot |
+| Store focused GREEN | 原coordinator admission、真实registered/closed签名、legacy缺marker、receipt-only、attempt/partial/未知、异device/key、实际storedcontext identifier/epoch/环境与canonical/checksum/预算、全38表presence；empty的admittedContext=nil、admissionOnly完整原storedcontext；无expected Phonecontext参数，成功/拒绝都全rows/user_version/changes不变 |
+| 第二真实SQLite connection | 旧snapshot不混新generation/原完整admittedContext；旧expected拒绝，新expected返回实际storedcontext且不称fresh；持writer时可读；失败释放snapshot |
 | 原facade真实正例/回归 | 原Provider外部identity文件+原facade+实际lane/coordinator，关闭重开同identity；独立库不能混用；055空nil/纯admission拒绝/真实accepted成功原语义保持 |
 | fresh full Core | 单次完整命令，记实际各suite/总数、0failure/0unexpected、exit0；focused含于full不相加 |
 | 四最低SDK | MatchSession target（含Store）；iOS17 sim/device、watchOS10 sim/device，各独立scratch/实际SDK path、exit0；只证明编译 |
@@ -41,7 +49,7 @@
 
 ## held026与真实门槛
 
-本叶子没有验证026的真实M4 make全表默认项，且不改任何composition。root将双审final no-ff合入clean/stopped held026后，由原026作者实现fresh完整独立identity/Phonecontext、originalmanagedowner、generation/lifetime复核及原服务消费。必须取得原R26-W1实际HTTP503同owner与关闭重开GREEN、fresh full Integration和相关SDK；如正常初始化事实与叶子契约不同，按actual差异独立收口，不能清数据或放行未知历史。
+本叶子没有验证026的真实M4 make全表默认项，且不改任何composition。root将双审final no-ff合入clean/stopped held026后，由原026作者先本地preflight排除legacy（在任何relaycontext exchange前），然后取fresh完整Phonecontext与fresh独立identity核对；若有admittedContext则原bytes全等，再samegen/lifetime复读setup比较原state/optional完整context/key，全部通过才原Service。freshPhonecontext逐字段/跨epoch不匹配及复读变化、重开无缓存和四入口零relaydispatch都归026消费回归。必须取得原R26-W1实际HTTP503同owner与关闭重开GREEN、fresh full Integration和相关SDK；如正常初始化事实与叶子契约不同，按actual差异独立收口，不能清数据或放行未知历史。
 
 055纯admission继续unavailable；legacyregistered缺marker/receipt-only/closed或unknown/partial异常仍零网络、vault和SQL修复。setup只返回当前受检快照，不证明历史从未commit；仅显式registerWatch且无绑定/无Watchpending可消费，signIn/无attempt recover不得借此变fresh，Phone pending auth和已有Watch pending原IDrecover仍保留原路径。存在attempt/unknown仍用原IDrecover。真正registered后仍需055、原scope/pairseal、credentialTTL与commongate才ready。
 
