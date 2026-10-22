@@ -1114,7 +1114,7 @@ private actor GateHeldCloud: CloudAccountDeletionDriver {
   }
   func release() { held?.resume(); held = nil }
 }
-@MainActor private final class M4ReturnTailProbe {
+@MainActor final class M4ReturnTailProbe {
   private enum Failure: Error { case timeout, closed }
   private enum Signal {
     case queue(M4DeletionResumeController.QueueEvent)

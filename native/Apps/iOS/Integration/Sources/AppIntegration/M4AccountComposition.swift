@@ -54,11 +54,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private var controlOwners: [ObjectIdentifier: M4WeakControlOwner] = [:]
   private var managedController: M4DeletionResumeController?
   private var managedControlLifetime = UUID()
-  private struct ManagedFirstAuthentication: Sendable {
-    let reauthID, authRequestID, authReceiptDigest: String
-    let identityGeneration: Int64
-  }
-  private var managedFirstAuthentication: ManagedFirstAuthentication?
+  private var initialDeletionService: InitialDeletionAuthenticationService?
   private var identityLifecycle: LifecycleService?
   private var identityChanging: Task<Void, any Error>?
   private(set) var lastCloseFailure: (any Error)?
@@ -127,6 +123,11 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       let lifecycle = LifecycleStatusModel(repository: repository, development: development, action: { try await closeBridge.performLifecycle($0) })
       let context = try await AppBootstrap.accountContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, shutdownOwner: { await closeBridge.closeFromContext() }, close: { await closeBridge.closeFromContext() })
       let value = M4AccountComposition(prepared: prepared, repository: repository, session: session, context: context, client: client, accountService: accountService, phoneRegistration: phone, watchRegistration: watch, cloudBridge: bridge, sync: sync, identity: identity, cloudSpaceID: cloudSpaceID, watchRelay: watchRelay, closeBridge: closeBridge, controlledAdapters: controlledAdapters)
+      value.initialDeletionService = InitialDeletionAuthenticationService(client: client, repository: repository,
+        coordinator: session, apple: apple, currentScope: { [weak value] in
+          guard let value else { throw AuthorityError.identityChanged }
+          return try await value.initialDeletionScope()
+        })
       // The public context retains its resource owner until successful final close.
       // Breaking this link only after success also retains failed-close retry state.
       closeBridge.owner = value
@@ -150,14 +151,11 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     // A new current observation invalidates old UI admission before any await.
     // Failure never leaves recording ready from the prior retained credential.
     admittedScope = nil; context.account.pauseIdentity()
-    managedFirstAuthentication = nil
-    do {
-      try await ownBusiness {
-        guard !self.scopeBusy else { throw AuthorityError.conflict }
-        self.scopeBusy = true; defer { self.scopeBusy = false }
-        try await self.accountAction(action)
-      }
-    } catch { managedFirstAuthentication = nil; throw error }
+    try await ownBusiness {
+      guard !self.scopeBusy else { throw AuthorityError.conflict }
+      self.scopeBusy = true; defer { self.scopeBusy = false }
+      try await self.accountAction(action)
+    }
   }
   /// Only the original controlled Phone owner can save/release business data.
   /// Every call owns one service unit; failed/missing evidence never loops into
@@ -259,7 +257,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   /// original business calls and must never wait on its own registration.
   private func identityChanged() async throws {
     guard !closed, finalClosing == nil else { throw AuthorityError.identityChanged }
-    managedControlLifetime = UUID(); managedFirstAuthentication = nil
+    managedControlLifetime = UUID()
     context.account.pauseIdentity(); context.account.requireReload(); context.recording.beginRetirement()
     if let identityChanging { return try await identityChanging.value }
     let task = Task {
@@ -438,22 +436,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     // independent current observation and the existing checked038 projection.
     try await observeAndAdmitIdentity(expectedIdentity: observed, expectedWatchContext: expectedWatchContext)
     try requireBusiness(token)
-    try await captureManagedAuthentication(result, businessToken: token)
-    try requireBusiness(token)
     reauthenticationID = result.reauthenticationID
-  }
-  private func captureManagedAuthentication(_ result: AccountAuthentication, businessToken: UUID) async throws {
-    managedFirstAuthentication = nil
-    guard result.binding.role == .phone, let reauth = result.reauthenticationID, !reauth.isEmpty,
-          let handle = managedPhoneResources else { return }
-    guard let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: handle.attachment.identityGeneration),
-          try handle.attachment.matches(proof), proof.receipt.raw == result.receipt.raw,
-          try AuthorityWire.encode(proof.binding) == AuthorityWire.encode(result.binding),
-          raw(proof.binding.deviceID, prepared.seed.installationID),
-          raw(proof.attempt.publicKey, prepared.material.signer.publicKey) else { throw AuthorityError.identityChanged }
-    try requireBusiness(businessToken); try prepared.requirePhoneResources(handle)
-    managedFirstAuthentication = ManagedFirstAuthentication(reauthID: reauth, authRequestID: proof.currentAuthRequestID,
-      authReceiptDigest: M4CatalogIO.hash(proof.receipt.raw), identityGeneration: handle.attachment.identityGeneration)
   }
   private func checkedWatchSetup(generation: Int64, token: UUID) async throws -> CheckedLocalWatchRegistrationSetupEvidenceV4 {
     try requireBusiness(token); try prepared.requireUnboundResources()
@@ -565,16 +548,11 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       _ = try prepared.activePhoneAttachment() // no unmanaged/binding-only bypass
       let generation = try await repository.identityGenerationV4()
       if try await repository.accountBindingV4()?.role == .watch {
-        managedFirstAuthentication = nil
         try await observeAndAdmitWatch(generation: generation, token: token, expectedIdentity: expectedIdentity, expectedContext: expectedWatchContext)
         return
       }
       guard let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: generation),
             proof.binding.role == .phone, !proof.binding.suspended else { throw AuthorityError.unavailable }
-      if let first = managedFirstAuthentication,
-         first.identityGeneration != proof.identityGeneration || !raw(first.authRequestID, proof.currentAuthRequestID) || first.authReceiptDigest != M4CatalogIO.hash(proof.receipt.raw) {
-        managedFirstAuthentication = nil
-      }
       try requireIdentityLifetime(token)
       try await identity.advanceIdentityFence(to: generation)
       let observed = try await identity.currentIdentity()
@@ -619,7 +597,6 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       try finalCheck() // no new vault await before the scope publication
       admittedScope = handle.scope
     } catch {
-      managedFirstAuthentication = nil
       if lifetime == token { admittedScope = nil; context.account.pauseIdentity() }
       throw error
     }
@@ -751,60 +728,196 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     try validateOriginalStoreCapsule(borrow.storeCapsule, scope: handle.scope)
     try borrow.verify()
   }
-  private func managedCreationProof(_ controller: M4DeletionResumeController, handle: M4ManagedPhoneResources) async throws {
+  /// Original source observations are vetoes, not dedicated deletion authority.
+  /// In particular this deliberately permits the already-reserved read branch
+  /// after business retirement without readmitting recording or replacing owners.
+  private func managedCreationProof(_ controller: M4DeletionResumeController, handle: M4ManagedPhoneResources) async throws -> VerifiedLocalAuthenticationEvidenceV4 {
     try requireManagedDeletionController(controller)
-    guard identityChanging == nil, client.trust.environment == .development,
-          let first = managedFirstAuthentication,
-          first.identityGeneration == handle.attachment.identityGeneration,
-          raw(first.authRequestID, handle.attachment.currentAuthRequestID),
-          first.authReceiptDigest == M4CatalogIO.hash(handle.attachment.receiptRaw) else { throw AuthorityError.identityChanged }
+    guard identityChanging == nil, client.trust.environment == .development else { throw AuthorityError.identityChanged }
     try prepared.requirePhoneResources(handle)
-    let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: first.identityGeneration)
+    let observed = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: handle.attachment.identityGeneration)
     try requireManagedDeletionController(controller)
-    guard let proof, try handle.attachment.matches(proof), proof.binding.role == .phone, !proof.binding.suspended,
-          raw(proof.currentAuthRequestID, first.authRequestID), M4CatalogIO.hash(proof.receipt.raw) == first.authReceiptDigest,
+    guard let proof = observed, try handle.attachment.matches(proof), proof.binding.role == .phone, !proof.binding.suspended,
           raw(proof.attempt.publicKey, prepared.material.signer.publicKey), raw(proof.binding.deviceID, prepared.seed.installationID) else { throw AuthorityError.identityChanged }
     let credential = try await prepared.material.vault.credential()
     try requireManagedDeletionController(controller); try requireCredential(credential, binding: proof.binding)
-    try await identity.advanceIdentityFence(to: first.identityGeneration)
+    try controller.requireCreationCredential(credentialBytes(credential))
+    try await identity.advanceIdentityFence(to: proof.identityGeneration)
     try requireManagedDeletionController(controller)
-    let observed = try await identity.currentIdentity()
+    let identityValue = try await identity.currentIdentity()
     try requireManagedDeletionController(controller)
-    try requireObservation(observed, scope: handle.scope, environment: proof.binding.environment)
-    let current = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: first.identityGeneration)
+    try requireObservation(identityValue, scope: handle.scope, environment: proof.binding.environment)
+    let afterCredential = try await prepared.material.vault.credential()
+    try requireManagedDeletionController(controller); try requireCredential(afterCredential, binding: proof.binding)
+    guard try credentialBytes(credential) == credentialBytes(afterCredential) else { throw AuthorityError.identityChanged }
+    try controller.requireCreationCredential(credentialBytes(afterCredential))
+    // The last awaited observation is the original SQL source, not an external
+    // value that could substitute for its complete signed admission evidence.
+    let current = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: proof.identityGeneration)
     try requireManagedDeletionController(controller)
-    guard let current, try sameProof(proof, current),
-          let after = managedFirstAuthentication, raw(after.reauthID, first.reauthID),
-          raw(after.authRequestID, first.authRequestID), after.authReceiptDigest == first.authReceiptDigest,
-          after.identityGeneration == first.identityGeneration else { throw AuthorityError.identityChanged }
+    guard let current, try sameProof(proof, current) else { throw AuthorityError.identityChanged }
     try prepared.requirePhoneResources(handle)
+    return current
+  }
+  private func credentialBytes(_ value: DeviceCredential) throws -> Data {
+    try AuthorityWire.encode([value.token, value.sessionID, value.accountID, value.deviceID, value.keyID,
+      String(value.activationEpoch), String(value.expiresAt)])
+  }
+  private func initialDeletionScope() async throws -> CloudScopeV1 {
+    guard let controller = managedController, let handle = managedPhoneResources else { throw AuthorityError.unavailable }
+    _ = try await managedCreationProof(controller, handle: handle)
+    return try CloudScopeV1(accountID: handle.scope.accountID, cloudSpaceID: handle.scope.cloudSpaceID,
+      zoneID: handle.scope.zoneID, activationEpoch: handle.scope.activationEpoch)
+  }
+  private func initialRequest(_ requestID: String, confirmedAt: Int64, scope: CloudScope) throws -> InitialDeletionRequestV1 {
+    try InitialDeletionRequestV1(creationID: requestID, originalScope: CloudScopeV1(accountID: scope.accountID,
+      cloudSpaceID: scope.cloudSpaceID, zoneID: scope.zoneID, activationEpoch: scope.activationEpoch),
+      cloud: .keep, local: .delete, health: .keep, healthConfirmed: false, confirmedAt: confirmedAt)
+  }
+  private func descriptorBytes(_ value: InitialDeletionReservationV1) throws -> Data {
+    try AuthorityWire.encode([AuthorityWire.encode(value.request).base64EncodedString(), String(value.identityGeneration),
+      value.originalAuthRequestID, value.originalAuthReceiptDigest, value.initialAuthRequestID,
+      value.initialAuthRequestDigest, value.initialAuthReceiptDigest, value.opaqueReauthenticationID])
+  }
+  private func creationMetadata(_ descriptor: InitialDeletionReservationV1, scope: CloudScope) throws -> M4DeletionCreationMetadata {
+    let request = descriptor.request
+    let result = M4DeletionCreationMetadata(version: 1, requestID: request.creationID, scope: scope,
+      choices: M4DeletionChoices(cloud: request.cloud, local: request.local, health: request.health, healthConfirmed: request.healthConfirmed),
+      firstReauthID: descriptor.opaqueReauthenticationID, authRequestID: descriptor.originalAuthRequestID,
+      authReceiptDigest: descriptor.originalAuthReceiptDigest, identityGeneration: descriptor.identityGeneration,
+      confirmedAt: request.confirmedAt, dispatch: .reserved)
+    try result.validate(); return result
+  }
+  private func initialContext(controller: M4DeletionResumeController, request: InitialDeletionRequestV1,
+    handle: M4ManagedPhoneResources, source: VerifiedLocalAuthenticationEvidenceV4) async throws -> InitialDeletionContextV1? {
+    try requireManagedDeletionController(controller); try prepared.requirePhoneResources(handle)
+    let context = try await repository.initialDeletionContextV4(creationID: request.creationID, expectedIdentityGeneration: source.identityGeneration)
+    try requireManagedDeletionController(controller); try prepared.requirePhoneResources(handle)
+    if let context {
+      guard try AuthorityWire.encode(context.request) == AuthorityWire.encode(request),
+            try sameProof(context.originalAuthentication, source) else { throw AuthorityError.conflict }
+    }
+    return context
+  }
+  /// Revalidate already-reserved authority from the original Store snapshot.
+  /// This is not the first reservation mutation or a cached service result.
+  private func checkedInitialReservation(controller: M4DeletionResumeController, request: InitialDeletionRequestV1,
+    handle: M4ManagedPhoneResources) async throws -> InitialDeletionReservationV1 {
+    let source = try await managedCreationProof(controller, handle: handle)
+    guard let context = try await initialContext(controller: controller, request: request, handle: handle, source: source),
+          context.phase == .reserved, let actual = context.reservation,
+          try AuthorityWire.encode(actual.request) == AuthorityWire.encode(request),
+          actual.identityGeneration == source.identityGeneration, raw(actual.originalAuthRequestID, source.currentAuthRequestID),
+          actual.originalAuthReceiptDigest == AuthorityWire.hash(source.receipt.raw) else { throw AuthorityError.intentMismatch }
+    // initialContext's original SQL snapshot also verifies the full original
+    // authentication and signed selected association; no external await follows.
+    try requireManagedDeletionController(controller); try prepared.requirePhoneResources(handle)
+    return actual
+  }
+  private func reservedInitialDeletion(controller: M4DeletionResumeController, request: InitialDeletionRequestV1,
+    handle: M4ManagedPhoneResources) async throws -> InitialDeletionReservationV1 {
+    try requireManagedDeletionController(controller); try prepared.requirePhoneResources(handle)
+    guard let service = initialDeletionService else { throw AuthorityError.unavailable }
+    let descriptor = try await service.reserve(creationID: request.creationID, expectedIdentityGeneration: handle.attachment.identityGeneration)
+    try requireManagedDeletionController(controller)
+    let actual = try await checkedInitialReservation(controller: controller, request: request, handle: handle)
+    guard try descriptorBytes(actual) == descriptorBytes(descriptor) else { throw AuthorityError.intentMismatch }
+    return actual
+  }
+  private func requireInitialBusiness(_ controller: M4DeletionResumeController, handle: M4ManagedPhoneResources) throws {
+    try requireManagedDeletionController(controller); try requireBusiness(businessLifetime)
+    guard context.account.canEnterRecording, admittedScope == handle.scope else { throw AuthorityError.identityChanged }
+    try prepared.requirePhoneResources(handle)
+  }
+  /// A single existing business suboperation owns all fresh/recover/first-reserve
+  /// work. Its real return tail exits before the outer create retires business.
+  private func authenticateInitialDeletion(controller: M4DeletionResumeController, request: InitialDeletionRequestV1,
+    handle: M4ManagedPhoneResources) async throws -> InitialDeletionReservationV1 {
+    try requireInitialBusiness(controller, handle: handle)
+    guard let service = initialDeletionService else { throw AuthorityError.unavailable }
+    let source = try await managedCreationProof(controller, handle: handle)
+    let context = try await initialContext(controller: controller, request: request, handle: handle, source: source)
+    try requireInitialBusiness(controller, handle: handle)
+    var association: InitialDeletionAssociationV1?
+    if let context, context.phase == .associated {
+      guard context.reservation == nil, let selected = context.association else { throw AuthorityError.intentMismatch }
+      association = selected
+    } else {
+      guard context == nil || context?.phase == .preparing, context?.association == nil, context?.reservation == nil else { throw AuthorityError.intentMismatch }
+      let unresolved = context?.attempts.filter { $0.resolution == nil } ?? []
+      guard unresolved.count <= 1 else { throw InitialDeletionIssueV1.unresolved }
+      let outcome: InitialDeletionAuthenticationOutcomeV1
+      if let attempt = unresolved.first {
+        if attempt.authentication != nil {
+          outcome = try await service.recover(creationID: request.creationID, authRequestID: attempt.authRequestID,
+            expectedIdentityGeneration: source.identityGeneration)
+        } else {
+          outcome = try await service.authenticate(request: request, expectedSource: source,
+            authRequestID: attempt.authRequestID, challengeRequestID: attempt.challengeRequestID)
+        }
+      } else {
+        // IDs are chosen only after the actual persistent state was inspected.
+        let authID = UUID().uuidString, challengeID = UUID().uuidString
+        guard Set([request.creationID, source.currentAuthRequestID, authID, challengeID]).count == 4 else { throw AuthorityError.conflict }
+        outcome = try await service.authenticate(request: request, expectedSource: source,
+          authRequestID: authID, challengeRequestID: challengeID)
+      }
+      try requireInitialBusiness(controller, handle: handle)
+      switch outcome {
+      case .associated(let selected): association = selected
+      case .unresolved: throw InitialDeletionIssueV1.unresolved
+      case .closed: throw AuthorityError.unavailable
+      }
+    }
+    let after = try await managedCreationProof(controller, handle: handle)
+    guard try sameProof(source, after), let association,
+          let readback = try await initialContext(controller: controller, request: request, handle: handle, source: after),
+          readback.phase == .associated, readback.reservation == nil, let saved = readback.association,
+          raw(saved.creationID, request.creationID), raw(saved.authRequestID, association.authRequestID),
+          saved.requestDigest == association.requestDigest, saved.receipt.raw == association.receipt.raw,
+          saved.opaqueReauthenticationID.map({ Data($0.utf8) }) == association.opaqueReauthenticationID.map({ Data($0.utf8) }) else { throw AuthorityError.intentMismatch }
+    try requireInitialBusiness(controller, handle: handle)
+    try await controller.observe(.initialAssociated)
+    try requireInitialBusiness(controller, handle: handle)
+    return try await reservedInitialDeletion(controller: controller, request: request, handle: handle)
   }
   func prepareManagedDeletionCreation(controller: M4DeletionResumeController, requestID: String, confirmedAt: Int64) async throws -> (M4DeletionCreationMetadata, M4ManagedDeletionBorrow) {
     try requireManagedDeletionController(controller)
-    guard let handle = managedPhoneResources, let first = managedFirstAuthentication else { throw AuthorityError.unavailable }
-    let wasStopped = businessStopped
-    if !wasStopped {
-      guard context.account.canEnterRecording, admittedScope == handle.scope else { throw AuthorityError.identityChanged }
+    guard let handle = managedPhoneResources else { throw AuthorityError.unavailable }
+    let request = try initialRequest(requestID, confirmedAt: confirmedAt, scope: handle.scope)
+    let source = try await managedCreationProof(controller, handle: handle)
+    let originalBorrow = try await prepared.borrowActiveDeletionResources(handle: handle)
+    try requireManagedDeletionController(controller); try originalBorrow.verify()
+    let prior = try originalBorrow.catalog.deletionCreation()
+    if let prior {
+      guard raw(prior.requestID, requestID), prior.confirmedAt == confirmedAt else { throw AuthorityError.conflict }
+      if prior.dispatch == .started { throw LifecycleClientError.unknownOriginal }
     }
-    let creation = M4DeletionCreationMetadata(version: 1, requestID: requestID, scope: handle.scope,
-      choices: M4DeletionChoices(cloud: .keep, local: .delete, health: .keep, healthConfirmed: false),
-      firstReauthID: first.reauthID, authRequestID: first.authRequestID, authReceiptDigest: first.authReceiptDigest,
-      identityGeneration: first.identityGeneration, confirmedAt: confirmedAt, dispatch: .reserved)
-    try creation.validate()
-    try await managedCreationProof(controller, handle: handle)
-    let sagas = try await repository.deletionSagasV4()
-    try requireManagedDeletionController(controller)
-    guard sagas.isEmpty else { throw AuthorityError.conflict }
+    let context = try await initialContext(controller: controller, request: request, handle: handle, source: source)
+    if prior != nil, context?.phase != .reserved { throw AuthorityError.intentMismatch }
+    let descriptor: InitialDeletionReservationV1
+    if context?.phase == .reserved {
+      descriptor = try await reservedInitialDeletion(controller: controller, request: request, handle: handle)
+    } else {
+      try requireInitialBusiness(controller, handle: handle)
+      descriptor = try await ownBusiness {
+        try await self.authenticateInitialDeletion(controller: controller, request: request, handle: handle)
+      }
+    }
+    // ownBusiness's defer has now removed its real caller return registration.
+    try await controller.observe(.initialReserved)
+    let readback = try await checkedInitialReservation(controller: controller, request: request, handle: handle)
+    guard try descriptorBytes(descriptor) == descriptorBytes(readback) else { throw AuthorityError.identityChanged }
+    let creation = try creationMetadata(readback, scope: handle.scope)
+    if let prior { guard try M4CatalogIO.encode(prior) == M4CatalogIO.encode(creation) else { throw AuthorityError.conflict } }
     try await quiesceBusiness()
     try requireManagedDeletionController(controller)
-    try await managedCreationProof(controller, handle: handle)
+    try await controller.observe(.quiescedBeforeCatalog)
     let borrow = try await prepared.borrowActiveDeletionResources(handle: handle)
     try requireManagedDeletionController(controller); try borrow.verify()
-    guard borrow.ledger === handle.ledger else { throw AuthorityError.identityChanged }
-    if let prior = try borrow.catalog.deletionCreation() {
-      guard prior.dispatch == .reserved, try M4CatalogIO.encode(prior) == M4CatalogIO.encode(creation) else { throw AuthorityError.conflict }
-    } else if wasStopped { throw AuthorityError.identityChanged }
-    try await managedCreationProof(controller, handle: handle)
+    guard borrow.catalog === originalBorrow.catalog, borrow.ledger === originalBorrow.ledger else { throw AuthorityError.identityChanged }
+    let final = try await checkedInitialReservation(controller: controller, request: request, handle: handle)
+    guard try descriptorBytes(final) == descriptorBytes(descriptor) else { throw AuthorityError.identityChanged }
     try borrow.verify()
     return (creation, borrow)
   }
@@ -818,23 +931,28 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
           proposed.cloudChoice == .keep, proposed.localChoice == .delete, proposed.healthChoice == .keep, !proposed.healthConfirmed,
           proposed.originalScope == (try CloudScopeV1(accountID: creation.scope.accountID, cloudSpaceID: creation.scope.cloudSpaceID, zoneID: creation.scope.zoneID, activationEpoch: creation.scope.activationEpoch)),
           raw(proposed.accountID, creation.scope.accountID), proposed.activationEpoch == creation.scope.activationEpoch else { throw AuthorityError.intentMismatch }
-    try await managedCreationProof(controller, handle: handle)
-    try borrow.verify(); _ = try borrow.catalog.requireOriginalReservation(saga: proposed)
+    let request = try initialRequest(creation.requestID, confirmedAt: creation.confirmedAt, scope: creation.scope)
     let existing = try await repository.deletionSagaV4(requestID: proposed.intent.requestID)
     try requireManagedDeletionController(controller)
     guard existing == nil else { throw AuthorityError.conflict }
-    try borrow.verify()
+    let descriptor = try await checkedInitialReservation(controller: controller, request: request, handle: handle)
+    var expected = try creationMetadata(descriptor, scope: handle.scope); expected.dispatch = .started
+    guard try M4CatalogIO.encode(expected) == M4CatalogIO.encode(creation) else { throw AuthorityError.intentMismatch }
+    try borrow.verify(); _ = try borrow.catalog.requireOriginalReservation(saga: proposed)
   }
   func revalidateManagedDeletionCreation(controller: M4DeletionResumeController, creation: M4DeletionCreationMetadata, borrow: M4ManagedDeletionBorrow) async throws {
     try requireManagedDeletionBinding(controller: controller, borrow: borrow)
     guard let handle = managedPhoneResources else { throw AuthorityError.identityChanged }
-    try await managedCreationProof(controller, handle: handle)
+    let request = try initialRequest(creation.requestID, confirmedAt: creation.confirmedAt, scope: creation.scope)
+    let descriptor = try await checkedInitialReservation(controller: controller, request: request, handle: handle)
+    var expected = try creationMetadata(descriptor, scope: handle.scope); expected.dispatch = creation.dispatch
     guard let actual = try borrow.catalog.deletionCreation(), try M4CatalogIO.encode(actual) == M4CatalogIO.encode(creation),
-          let first = managedFirstAuthentication, raw(first.reauthID, creation.firstReauthID),
-          raw(first.authRequestID, creation.authRequestID), first.authReceiptDigest == creation.authReceiptDigest,
-          first.identityGeneration == creation.identityGeneration else { throw AuthorityError.identityChanged }
+          try M4CatalogIO.encode(expected) == M4CatalogIO.encode(creation) else { throw AuthorityError.identityChanged }
     try borrow.verify()
   }
+  #if DEBUG
+  var initialDeletionServiceID: ObjectIdentifier? { initialDeletionService.map(ObjectIdentifier.init) }
+  #endif
   /// Actual Store/Session and retained signed provenance, including generation+1
   /// after the original backend acceptance. This never readmits business.
   func verifyManagedDeletionParent(controller: M4DeletionResumeController, saga: DeletionSagaV4, requireFullSeal: Bool = true) async throws -> M4ManagedDeletionBorrow {
@@ -924,6 +1042,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       try await self.quiesceBusiness()
       _ = await identityChange?.result
       for owner in owners { try await owner.stopAndJoin() }
+      try await self.initialDeletionService?.stopAndJoin()
       await self.watchRelay.close()
       try await self.controlledAdapters?.finalClose()
       // close() verifies the original lease and throws before releasing that
@@ -935,7 +1054,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       try await task.value
       closed = true; lastCloseFailure = nil; finalClosing = nil
       context.account.stop(); context.lifecycle.stop(); controlOwners.removeAll()
-      managedController = nil; managedFirstAuthentication = nil
+      managedController = nil; initialDeletionService = nil
       closeBridge.owner = nil
     } catch {
       lastCloseFailure = error; finalClosing = nil

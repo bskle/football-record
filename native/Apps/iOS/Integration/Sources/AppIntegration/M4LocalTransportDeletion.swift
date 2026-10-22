@@ -194,6 +194,11 @@ struct M4UnavailableLocalCopyDrain: M4LocalCopyDrainChecking {
       try managedController.recordDispatchProposal(saga)
     }
   }
+  func parentStored() async throws {
+    guard try catalog.physicalBootstrap() != nil else { return }
+    guard let managedController else { throw AuthorityError.identityChanged }
+    try await managedController.observe(.parentStored)
+  }
   func localErase(requestID: String) async throws -> DeletionSagaV4 {
     let original = try await resume(requestID: requestID), plan = try catalog.requireOriginalParentSeal(saga: original)
     if plan.choices.health == .keep { try await localPrerequisites(plan); return original }
@@ -347,6 +352,7 @@ struct M4GuardedLifecycleCoordinator: LifecycleInboundCoordinator, ControlQueueI
   }
   func createDeletionSaga(_ saga: DeletionSagaV4) async throws {
     try await admission.creation(saga); try await original.createDeletionSaga(saga)
+    try await admission.parentStored()
     try await admission.positiveGate(requireFullSeal: false)
   }
   func updateDeletionSaga(_ saga: DeletionSagaV4, expectedRevision: Int64) async throws {
@@ -405,12 +411,15 @@ private enum M4DeletionOperationResult: Sendable {
   private var binding: Binding?
   private var dispatchParent: Data?
   private var dispatchProposal: DeletionSagaV4?
-  enum Phase: Equatable { case reserved, started, requestReturned, beforeFullSeal, sealed, beforeResume, afterResume }
+  // Per-body veto only: never persisted, never used to admit a later retry.
+  private var creating = false
+  private var creationCredential: Data?
+  enum Phase: Equatable { case initialAssociated, initialReserved, quiescedBeforeCatalog, reserved, started, parentStored, requestReturned, beforeFullSeal, sealed, beforeResume, afterResume }
   /// A veto/delay after real stages only; never supplies proof or service output.
   #if DEBUG
   var observation: (@MainActor (Phase) async throws -> Void)?
   #endif
-  private func observe(_ phase: Phase) async throws {
+  func observe(_ phase: Phase) async throws {
     #if DEBUG
     try await observation?(phase)
     #endif
@@ -523,6 +532,13 @@ private enum M4DeletionOperationResult: Sendable {
           try M4CatalogIO.encode(original.physical) == M4CatalogIO.encode(borrow.physical),
           try M4CatalogIO.encode(original.seal) == M4CatalogIO.encode(borrow.seal) else { throw AuthorityError.identityChanged }
     try original.verify(); try borrow.verify()
+  }
+  func requireCreationCredential(_ bytes: Data) throws {
+    try requireManagedOperationCaller()
+    guard creating else { throw AuthorityError.conflict }
+    if let original = creationCredential {
+      guard original == bytes else { throw AuthorityError.identityChanged }
+    } else { creationCredential = bytes }
   }
   func isDispatching(_ parent: String) -> Bool { dispatchParent == Data(parent.utf8) }
   func creationBorrow() throws -> M4ManagedDeletionBorrow {
@@ -679,6 +695,28 @@ private enum M4DeletionOperationResult: Sendable {
   }
   private func createNow(requestID: String, confirmedAt: Int64) async throws -> DeletionSagaV4 {
     try composition.requireManagedDeletionController(self)
+    guard !creating else { throw AuthorityError.conflict }
+    creating = true
+    defer { creationCredential = nil; creating = false }
+    try AuthorityWire.identifier(requestID)
+    guard (0...253_402_300_799).contains(confirmedAt) else { throw AuthorityError.invalidWire }
+    // Consumed/terminal purpose context must never be consulted before the real
+    // original parent. It remains authoritative after source generation changes.
+    let actual = try await composition.repository.deletionSagaV4(requestID: requestID)
+    try composition.requireManagedDeletionController(self)
+    let control = try await composition.repository.lifecycleControlIntentV4(requestID: requestID)
+    try composition.requireManagedDeletionController(self)
+    if let actual {
+      guard control?.canonicalRequest == actual.intent.canonicalRequest else { throw AuthorityError.intentMismatch }
+      let original = try await composition.verifyManagedDeletionParent(controller: self, saga: actual, requireFullSeal: false)
+      guard let prior = try original.catalog.deletionCreation(), prior.dispatch == .started,
+            M4CatalogIO.raw(prior.requestID, requestID), prior.confirmedAt == confirmedAt else { throw AuthorityError.conflict }
+      return try await sealCreation(actual)
+    }
+    guard control == nil else { throw AuthorityError.conflict }
+    let otherParents = try await composition.repository.deletionSagasV4()
+    try composition.requireManagedDeletionController(self)
+    guard otherParents.isEmpty else { throw AuthorityError.conflict }
     if let borrow = binding?.borrow, let prior = try borrow.catalog.deletionCreation(), prior.dispatch == .started {
       guard M4CatalogIO.raw(prior.requestID, requestID), prior.confirmedAt == confirmedAt else { throw AuthorityError.conflict }
       // A started dispatch can only reuse actual original Store bytes. Its
@@ -707,15 +745,15 @@ private enum M4DeletionOperationResult: Sendable {
     let proposed = dispatchProposal; dispatchParent = nil; dispatchProposal = nil
     // Read-only outcome inspection is deliberately unconditional, even after
     // cancellation/close. No positive seal can pass the subsequent live gate.
-    let actual = try await composition.repository.deletionSagaV4(requestID: requestID)
-    let control = try await composition.repository.lifecycleControlIntentV4(requestID: requestID)
-    guard let actual else {
+    let committed = try await composition.repository.deletionSagaV4(requestID: requestID)
+    let committedControl = try await composition.repository.lifecycleControlIntentV4(requestID: requestID)
+    guard let actual = committed else {
       if case .failure(let error) = outcome { throw error }
       throw LifecycleClientError.unknownOriginal
     }
     guard let proposed, actual.intent.canonicalRequest == proposed.intent.canonicalRequest,
           Data(actual.recoveryCapability.utf8) == Data(proposed.recoveryCapability.utf8),
-          control?.canonicalRequest == actual.intent.canonicalRequest else { throw AuthorityError.intentMismatch }
+          committedControl?.canonicalRequest == actual.intent.canonicalRequest else { throw AuthorityError.intentMismatch }
     if case .success(let result) = outcome {
       guard result.intent.canonicalRequest == actual.intent.canonicalRequest,
             Data(result.recoveryCapability.utf8) == Data(actual.recoveryCapability.utf8) else { throw AuthorityError.intentMismatch }
