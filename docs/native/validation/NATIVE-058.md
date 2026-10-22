@@ -1,58 +1,81 @@
 # NATIVE-058 验证
 
-状态：计划阶段，仅静态核准；无运行时验证结果。original base `2cab4640ee3a375da39fdabf0f5a317600b0c263`，分支 `test/m4-native-http-fixture`。本轮只有 [实施计划](../../superpowers/plans/2026-10-22-m4-http-fixture.md)、[任务卡](../tasks/NATIVE-058.md)、本卡三文档。
+状态：实现source已双非作者PASS；final仅本卡和 [任务卡](../tasks/NATIVE-058.md) 收尾，等待exact final双审。original base `2cab4640ee3a375da39fdabf0f5a317600b0c263`，批准 [计划](../../superpowers/plans/2026-10-22-m4-http-fixture.md) `038e2c3510ae8f771e075d8bf9f03ee35fe8f90c`，固定source `571bdc4d2890ed87d926747fbd7131705b97acc5`。actual final SHA仅记树外 `final-checkpoint.json`，避免自引用。
 
-## 精确输入及静态方法
+证据根：`/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-058`。计划、source、final各层独立，不覆盖旧CP、proof、原日志或输入副本。
 
-证据根：`/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-058`。
+## source双审与边界
 
-| 证据 | SHA256 | 内容 |
+| 审阅 | 结果 | SHA256 |
 |---|---|---|
-| `planning-inputs.json` | `562d7da0ffdd9b3877274ee9ef756728bb871a51025bb2831cfeb8ec2310b254` | 固定2cab的21份Git blob/mode/bytes/hash与immutable copy；4份acfd参考报告副本 |
-| `planning-initial-git.json` | `905ac1ddf52a34dc93514bad72ce1a1c69c6e4e4bbce516b7c5ecefbdfe31987` | 原生attachment、HEAD/base/分支、clean含ignored、登记/观察target和零runtime调用 |
-| `reference-acfd-backend-delta.patch` | `294801a008474ebb4faa7caf7e4a326005f7672e8e6c85a95550c73978bf1506` | 固定Git对象2cab→acfd四个backend文件差异；非当前026目录/WIP |
+| `reviews/source-review-root-571bdc4.json` | `SOURCE_PASS_SCOPED` | `e31f0f2ef0a71019fbd246060fa52a113d39c6d3e1ad07111df9c8d7d6997ef7` |
+| `reviews/source-review-http-map-571bdc4.json` | `PASS`，无阻塞/代码发现 | `ddb019798427a3ce1e2b29c553e05a48269745960673ed5df29bf08ec1acf4f7` |
 
-只读检索用rg、Git blob/show/diff/ls-tree与静态文本读取；Python仅做文件复制、SHA256和静态JSON/链接/范围检查，不导入项目或调用Node/HTTP/SQL。最初尝试读取NATIVE-057旧卡不存在，已用本base实际文件清单修正为NATIVE-038格式参考；这不表示057接口可在本base使用。后续不以移动ref或历史卡替代实际源码。
+两位非作者完整检查唯一生产纯mapper差异、新180行helper与353行test、57份Git来源副本、49实际运行输入与两轮runner前后、全部红绿和限制。source PASS不代替final/merge/原生组合或真实环境验收。
 
-21份当前输入包括AGENTS、Git治理、合同、原生/M4母计划，device-auth/apple-verifier/authority/config/database/http/codec/receipt，support/auth/device-auth-boundary/apple-revocation-support，旧原生authority-fixture、backend package以及038两卡。所有输入均带固定2cab来源；副本hash须逐项重核。未复制026当前工作目录、未读Watch四路径WIP。
+## 最终冻结运行：Node22.23.1
 
-参考层来源固定 `acfd8ae569417e20be4b0b346845f03d0317ab77`，与本次2cab执行输入分开：
+实际Node入口 `/Users/liam/.local/bin/node`，记录的真实二进制 `/Users/liam/.hermes/node/bin/node`：112928848字节，SHA256 `2e3f1286a7eb3736346ed1803e458a0ff909e2b2d5bc746144dcb76970e9b99d`，版本 `v22.23.1`；未升级或下载工具链。
 
-| 研究参考 | SHA256 |
+两轮实际cwd均为本任务仓库根 `/Users/liam/.codex/worktrees/m4-native-http-fixture/20260830_足球记录`，HEAD前后均为固定source571。完整展开argv在各 `command.json`：
+
+| 最终冻结轮 | 实际命令 | 单轮结果 |
+|---|---|---|
+| `runs/source-new-full-frozen` | `node --test backend/test/native-m4-fixture.test.mjs` | **46项/0失败**；0跳过/取消 |
+| `runs/source-backend-full-frozen` | `node --test backend/test/*.test.mjs`，展开全部15个test文件 | **207项/0失败**；0跳过/取消，已包含新46 |
+
+不把46与207相加，不把focused或旧161补入。计划Task5原写在backend目录npm test；实际旧 `http.test.mjs:92`、`operational-backup.test.mjs:24/:34`、`operational-tls.test.mjs:31/:35` 用 `backend/src/server.mjs` / `backend/ops/...` 相对仓库根启动子进程，backend cwd不适配。因此root接受在仓库根运行同一Node runner和完整文件集的命令修正；`backend/package.json`、旧测试均未修改。
+
+| 原始最终证据 | SHA256 |
 |---|---|
-| `report.json` | `56a2575919206109062fa85506bb85c409e6a6601623897d23d8f3589fa1fe08` |
-| `account-observation-addon.json` | `76b50c260e4d3510f63c82155fe77da3cb6c92b0b8b8ffae42c7a12a4097fb4e` |
-| `identity-observer-decision.json` | `a4db4963bb7f622a532cd8033ecb37acef5da6250f278e2169baf2e2aded9cca` |
-| `identity-observer-checkpoint.json` | `0cdb201385ffb88fbdfd3aabf36b9423d0273aecd36a2e59533feb164c1c1488` |
+| `runs/source-new-full-frozen/command.json` | `795b9ea6964d547b0b7e1a6596e2ba35131d02e779ef1b3563d0980fb713d361` |
+| `runs/source-new-full-frozen/output.log` | `6083787b519dce55a44dbd5a75db09467a4e041440d9235923c8fa52d4e049ce` |
+| `runs/source-backend-full-frozen/command.json` | `b46607c5f70d063e42d2609743525d12348f0d7ac0e4b86547ad938a15265e90` |
+| `runs/source-backend-full-frozen/output.log` | `1fbfca770f0168828450eaad032caf80a878dd92726eb8a4ec22e6cb295fdc7b` |
 
-研究稿的6新+8复用14份输入仍属于acfd历史研究，不称本次21份当前输入或运行证据。当前base原映射在device-auth:44；纯提取计划保留原事务位置和legacy development兼容（device-auth-boundary:41–45）。2cab→acfd身份映射无变，主要为052删除控制；以后target普通merge须重新冻结并复验。
+每轮49份实际运行输入为全部tracked backend文件（src、ops、test、worker/CLI、receipt JSON、package及附加文档）+新helper，before/after副本逐份与571 Git字节/hash一致；runtime生成的临时key/token fixture不复制进证据。runner每轮均有实际 `runner-before.py` / `runner-after.py`，各3315字节，SHA256均 `308d55eee355658866ceb479c168b174cfbcfe37c0d563b098d5016e577a6205`，与 `runtime-runners/308d55eee355658866ceb479c168b174cfbcfe37c0d563b098d5016e577a6205/runner.py` 相同。
 
-## 本轮实际静态检查与未运行项
+此前 `source-new-full` / `source-backend-full` 同source也通过46/207，但只记录runner结束hash，缺独立before副本；保留历史层，不代替上述最终冻结轮。更早focused捕获38/39份mjs输入、旧runner结束hash及匹配hash的重建/冻结副本，均不升级成49份完整输入或当时实际runner-before证据。
 
-文档提交前后执行且完整结果写树外 `planning-static-check.json`、`planning-final-git.json`、`planning-final-manifest.json`、`planning-checkpoint.json`：三文档路径范围、Markdown本地链接、无未授权实现文件、无冲突标记/空步骤/占位符、输入副本Git blob/mode/size/hash一致、whole-tree diff、`git diff --check`、实际HEAD/分支/clean（含ignored）。actual final SHA只在树外记录，不回写自引用。
+## TDD与诊断分层
 
-| 操作层 | 本轮实际次数 / 结果 |
+| 层 | 实际记录与结论 |
 |---|---|
-| Node执行、启动HTTP、SQL连接/查询 | 均0；无此层PASS |
-| 自动测试、构建、SDK、设备/模拟器探测 | 均0；无计数/性能/TTL运行结论 |
-| 产品/helper/test写入 | 0；只提交三文档 |
-| 026工作目录/Watch WIP读取 | 0 |
-| merge/push/archive/delete/rebase | 0 |
+| 缺API红 | `t1-mapper-api-red`、`t2-empty-api-red`、`t3-observer-api-red`、`t4-control-api-red`；只证明API未实现，不冒充行为红 |
+| observer行为红 | `t3-observer-behavior-red`：初始happy path接受非品牌verifier和重放；加入genuine/一次nonce等门后27项observer矩阵绿 |
+| stdio行为红 | `t4-stdio-behavior-red`：重复control requestID被接受；严格ID/字段/容量门后通过 |
+| observer提前close红 | `t4-close-tail-behavior-red`中的observer断言确实观察到提前close；同轮HTTP子项受ECONNRESET waiter诊断影响，不计有意义HTTP红 |
+| 实际HTTP尾部红绿 | 修正waiter后，`t4-http-tail-meaningful-red`只移除 `joinTasks(inflightHTTP)`，实际断言因提前关DB失败；精确恢复已保存字节后 `t4-http-tail-green`通过 |
+| 环境失败 | `t1-auth-regression` 40项因sandbox loopback listen EPERM失败，非产品红；获工具级loopback放行后 `t1-auth-regression-loopback` 40/0 |
+| 测试诊断 | `t4-lifecycle-green`的events.once把预期abort ECONNRESET当失败，改为等待close事件；原删除receipt result实际为`deleted`、deletion.backend为`backendDeleted`，纠正测试预期，生产wire不变 |
+| fixture缺陷 | `t4-control-green`捕获坏JSON误分类及ready早于SIGTERM注册race，分别在解析边界和listener-before-ready最小修复；最终冻结轮覆盖并通过 |
 
-真机与SDK对本次纯计划文档不适用。未运行Node测试不以旧161或其他task旧计数补足；原first-device auth与观察零写均是拟验证门槛，尚未实证。
+最终覆盖mapper原UTF8/LF/空白/Unicode不归一与身份/key隔离；真实genuine verifier/identity、签名/JWKS/issuer/audience/nonce/exp/iat及环境/authority/config/key/clock/generation变化拒绝；全部表逻辑值和原bytes的观察零写；空库与原first-device真实HTTP注册/第二Phone等待；DB/WAL/SHM无Apple输入、Bearer或设备私钥；原请求/原key的beforeCommit回滚与缺row fence、COMMIT/drop后原session恢复、锁/epoch/request bytes重开保持；HTTP/observer/revoker尾部、restart期间close、EOF/SIGTERM完整关闭；协议秘密只在明确apple/auth调用者内存，不写metadata/错误/trace。
 
-## 实现后必须取得的证据
+Node22.23.1的SQLite ExperimentalWarning仍在host日志中；新sidecar CLI只将本进程warning规范成有限 `runtimeWarning/startup` 诊断，不改变生产或其他测试的warning处理。
 
-- [ ] mapper原式逐bytes等价；同issuer/subject/key稳定，不同身份/key隔离，Unicode/空白不归一；原production、legacy-development、challenge/fence/recover/PoP回归全绿。
-- [ ] 空authority除schema/metadata/epoch allocator外无业务/控制row；启动不登录、不生成或输出设备credential/privateKey，默认时钟实际Unix秒且自然推进。
-- [ ] genuine verifier/identity品牌、独立nonce、audience/issuer/signature/alg/kid/kty/use、exp/iat、观察60秒/重放/容量/await时generation或authority变化均拒错；每一成功/失败观察前后所有表完整内容相等，非仅count。
-- [ ] 观察不发grant、不说明accountExists/registered、不调用auth/recover/login、不写binding；原HTTP随机第一设备仍registered/active，accountID等于独立观察，epoch由原事务分配；第二Phone保持waitingMigration。
-- [ ] requestID stdio严格、唯一响应、有限错误与无密metadata；显式apple token/code只在调用者内存，观察/诊断/DB/trace无秘密；fault不改SQL语义，restart原DB/keys/clock/namespace不变，close完整等待。
-- [ ] 固定source新suite及原backend单次完整回归（在backend目录npm test），记录实际输入hash/计数/限制；不将focused与历史计数累加。
-- [ ] root与第二位非作者whole source/final双审；026停写干净、冻结target后root no-ff合入，按实际052等已审API重跑目标backend与新suite，记录actual merge SHA/whole tree。
+## source输入、副本与proof勘误
 
-原051/M4 native chain由026使用原facade/Session/installation/key、独立Apple/cloud观察及既有current identity文件校验验收；058计划/host fixture不代替该链。真实Apple账号/授权码、CloudKit/Keychain/WC/签名设备/生产服务均未验；production仍Unavailable，无M4完成、release冻结或原生发布结论。
+| 固定source证据 | SHA256 |
+|---|---|
+| `source-inputs.json`（57份Git源码/治理副本，其中49运行输入） | `f7b576c0ce9a0bd4f0dce1db358668d25f7e6267e1519e7b6f29db4cb5d5dc62` |
+| `source-whole-tree.diff` | `6cc66c96805d916ebcdb68b3bcb1707c11247136c7e4090c01d6d68581719d93` |
+| `source-implementation.diff` | `baf037fba6fd1a91b7884fa7a528f182a1dbdabacd0907bc33600aa41240a975` |
+| `source-git-proof.json` | `eba498498b7779995fbef9bc6f0e89059d1f5c0843c33d7b85f329359a67f8b4` |
+| `source-runtime-summary.json` | `ab981918120a4ea917d9aa368dfefbcdb1fc786c0bf412946fde8075905e2286` |
+| `source-manifest.json` | `87a55c3814c57d13ba06c2099ba042f3a4da16e9a48866c2954e98f8b333f0e1` |
+| `source-checkpoint.json` | `52f51cc9aac5d75eab590ffe8d239d5e2632e6b2209b166bf163b85287cc0663` |
 
-## 停写检查点与生命周期
+**勘误：** 旧source-git-proof的字段 `unmodifiedProductionPaths` 标签语义写反，其值 `backend/src/device-auth.mjs` 实为**已修改生产路径**，不是未修改路径。完整diff和纯mapper反向重构证明该文件是唯一生产修改；新final proof使用 `modifiedProductionPaths` 并另记本勘误。旧proof、source CP和hash均保持原样，不以错标签声称生产零差异。
 
-当前checkpoint为：三文档Conventional docs提交、clean停写，等待root与第二位非作者审计划，且root明确准入精确三实现路径后才运行/写实现。现有子代理执行选择已授权，不重复问用户。所有者不推进长期分支、不push/merge/archive/delete/rebase；本树作为026活跃依赖保留。最终必需目标接收、无依赖且必要ignored证据另存后，由root先原生archive核实际成功，再安全branch -d；queued/拒绝时保留。
+计划层 `planning-inputs.json` 的21份2cab输入及4份acfd研究参考继续原样保留；研究稿6新+8复用14输入不当作本次57份source或49份运行输入。未读取026工作目录或Watch WIP，不把移动ref当执行输入。
+
+## final仅两卡的静态验证与停写点
+
+final只改本卡和任务卡。与固定source的57份清单比较，**55份当前输入逐字节相同，2份授权卡为元数据变更**；49实际运行输入全相同，计划和三实现文件全相同，不称57全不变。按root授权不重复运行Node/HTTP/SQL/测试/构建或设备探测；只做路径范围、Markdown链接、diff-check、Git/blob/输入副本hash和clean含ignored核验。
+
+actual final SHA、57份当前输入副本及55+2比较、完整base→final与source→final diff、新Git proof、证据清单和停止检查点由树外 `final-inputs.json`、`final-input-comparison.json`、`final-whole-tree.diff`、`final-metadata.diff`、`final-git-proof.json`、`final-manifest.json`、`final-checkpoint.json` 记录；不覆盖旧source/计划证据。exact final双审尚待，不提前填PASS，作者提交后clean停写。
+
+本任务只证明host受控development真实密码学/file SQLite/HTTP；真机与SDK/App构建不适用此host fixture/纯提取变更。真实Apple账号/授权码、CloudKit、Keychain、WC、Health、签名设备、生产部署和原051/026完整链仍未验；同进程reopen不代表跨进程key持久化、durability或RPO。production保持Unavailable，无M4完成、release冻结或原生发布结论。
+
+root后续须冻结停写clean026，保留052已审修改、普通no-ff合入并重跑实际target完整backend/新suite与原生组合。058保持活跃依赖；所有必需目标接收、无依赖且必要ignored证据另存后，root才原生archive核实际成功，再安全branch-d。当前作者不merge/push/archive/delete/rebase、不推进长期分支、不碰026。
