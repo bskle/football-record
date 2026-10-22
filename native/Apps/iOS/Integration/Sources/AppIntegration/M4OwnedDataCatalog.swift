@@ -62,6 +62,44 @@ struct M4DeletionChoices: Codable, Sendable {
   let cloud, local, health: ClientDeletionChoiceV4
   let healthConfirmed: Bool
 }
+/// One bounded dispatch record, atomically published with its frozen plan.
+/// This is neither fresh authorization nor proof that a Store Saga committed.
+struct M4DeletionCreationMetadata: Codable, Sendable {
+  enum Dispatch: String, Codable, Sendable { case reserved, started }
+  let version: Int
+  let requestID: String
+  let scope: CloudScope
+  let choices: M4DeletionChoices
+  let firstReauthID, authRequestID, authReceiptDigest: String
+  let identityGeneration, confirmedAt: Int64
+  var dispatch: Dispatch
+  init(version: Int, requestID: String, scope: CloudScope, choices: M4DeletionChoices, firstReauthID: String, authRequestID: String, authReceiptDigest: String, identityGeneration: Int64, confirmedAt: Int64, dispatch: Dispatch) {
+    self.version = version; self.requestID = requestID; self.scope = scope; self.choices = choices
+    self.firstReauthID = firstReauthID; self.authRequestID = authRequestID; self.authReceiptDigest = authReceiptDigest
+    self.identityGeneration = identityGeneration; self.confirmedAt = confirmedAt; self.dispatch = dispatch
+  }
+  private enum CodingKeys: String, CodingKey { case version, requestID, scope, choices, firstReauthID, authRequestID, authReceiptDigest, identityGeneration, confirmedAt, dispatch }
+  init(from decoder: any Decoder) throws {
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(version: try c.decode(Int.self, forKey: .version), requestID: try c.decode(String.self, forKey: .requestID), scope: try c.decode(CloudScope.self, forKey: .scope), choices: try c.decode(M4DeletionChoices.self, forKey: .choices), firstReauthID: try c.decode(String.self, forKey: .firstReauthID), authRequestID: try c.decode(String.self, forKey: .authRequestID), authReceiptDigest: try c.decode(String.self, forKey: .authReceiptDigest), identityGeneration: try c.decode(Int64.self, forKey: .identityGeneration), confirmedAt: try c.decode(Int64.self, forKey: .confirmedAt), dispatch: try c.decode(Dispatch.self, forKey: .dispatch))
+    try validate()
+  }
+  func validate() throws {
+    guard version == 1 else { throw M4CatalogError.unsupportedSchema }
+    guard [requestID, firstReauthID, authRequestID].allSatisfy({ M4CatalogIO.opaque($0, limit: 128) }),
+          M4CatalogIO.isDigest(authReceiptDigest), (0...9_007_199_254_740_991).contains(identityGeneration),
+          (0...253_402_300_799).contains(confirmedAt) else { throw M4CatalogError.intentMismatch }
+    _ = try CloudScope(accountID: scope.accountID, cloudSpaceID: scope.cloudSpaceID, zoneID: scope.zoneID, activationEpoch: scope.activationEpoch)
+    guard try M4CatalogIO.encode(self).count <= 4096 else { throw M4CatalogError.budgetExceeded }
+  }
+  func validateTransition(from prior: Self) throws {
+    try validate(); try prior.validate()
+    var immutable = self; immutable.dispatch = prior.dispatch
+    guard try M4CatalogIO.encode(immutable) == M4CatalogIO.encode(prior),
+          prior.dispatch == .reserved || dispatch == .started else { throw M4CatalogError.intentMismatch }
+  }
+}
+enum M4ManagedDeletionVerificationPhase { case beforeTransaction, afterTransaction }
 struct M4HealthSelectionReference: Codable, Sendable {
   let requestID: UUID
   let selectionDigest: String
@@ -411,6 +449,7 @@ struct M4CatalogState: Codable {
   var plans: [M4FrozenDeletionPlan]
   var membershipRevision: UInt64? = nil
   var physicalBootstrap: M4PhysicalBootstrapState? = nil
+  var deletionCreation: M4DeletionCreationMetadata? = nil
   var ownedRevision: UInt64 { membershipRevision ?? plans.first?.catalogRevision ?? revision }
   static let empty = Self(version: 1, revision: 0, entries: [], plans: [])
   /// Encode a private, deliberately invalid upper-bound shape only to measure
@@ -473,6 +512,27 @@ struct M4CatalogState: Codable {
             let physical = physicalBootstrap?.reservation,
             try M4CatalogIO.encode(store.capsule.root) == M4CatalogIO.encode(physical.businessDatabase),
             try M4CatalogIO.encode(ledger.capsule.root) == M4CatalogIO.encode(watch.ledger.published) else { throw M4CatalogError.intentMismatch }
+    }
+    if let creation = deletionCreation {
+      try creation.validate()
+      guard let physical = physicalBootstrap, physical.resourcesPublished, physical.businessPublished, physical.watch == nil,
+            let phone = physical.phone, phone.published, let seal = phone.seal,
+            entries.count == 2, entries.allSatisfy({ !$0.retired }), let plan = plans.first,
+            M4CatalogIO.raw(plan.requestID, creation.requestID), plan.scope == creation.scope,
+            try M4CatalogIO.encode(plan.choices) == M4CatalogIO.encode(creation.choices),
+            creation.scope == phone.attachment.scope,
+            M4CatalogIO.raw(creation.authRequestID, phone.attachment.currentAuthRequestID),
+            creation.authReceiptDigest == M4CatalogIO.hash(phone.attachment.receiptRaw),
+            creation.identityGeneration == phone.attachment.identityGeneration,
+            creation.choices.cloud == .keep, creation.choices.local == .delete, creation.choices.health == .keep, !creation.choices.healthConfirmed,
+            try M4CatalogIO.encode(plan.health) == M4CatalogIO.encode(M4HealthReservation.empty),
+            Set(entries.map { $0.capsule.kind }) == [.businessStore, .cloudLedger],
+            entries.allSatisfy({ $0.capsule.scope == creation.scope }),
+            try entries.contains(where: { try $0.capsule.kind == .businessStore && $0.capsule.digest() == seal.storeDigest }),
+            try entries.contains(where: { try $0.capsule.kind == .cloudLedger && $0.capsule.digest() == seal.ledgerDigest }) else { throw M4CatalogError.intentMismatch }
+      if creation.dispatch == .reserved {
+        guard plan.parentIntentDigest == nil, plan.children.isEmpty, plan.receipts == nil, plan.preparedHealth == nil, plan.fullSeal == nil else { throw M4CatalogError.intentMismatch }
+      }
     }
     for plan in plans {
       try plan.validate()
@@ -681,6 +741,69 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
   }
   func index() throws -> M4CatalogIndex {
     let state = try journal.read(); return M4CatalogIndex(revision: state.ownedRevision, entries: state.entries)
+  }
+  func deletionCreation() throws -> M4DeletionCreationMetadata? { try journal.read().deletionCreation }
+  /// Full lease/inode/cache checks deliberately bracket the journal lock.
+  /// Inside the nonrecursive lock only the captured immutable tuple is compared.
+  @MainActor func reserveManagedDeletion(creation: M4DeletionCreationMetadata, borrow: M4ManagedDeletionBorrow, health: M4HealthReservation,
+    verificationObserver: (@MainActor (M4ManagedDeletionVerificationPhase) -> Void)? = nil) throws -> M4FrozenDeletionPlan {
+    try creation.validate()
+    guard borrow.catalog === self, borrow.active, creation.dispatch == .reserved,
+          creation.scope == borrow.attachment.scope,
+          M4CatalogIO.raw(creation.authRequestID, borrow.attachment.currentAuthRequestID),
+          creation.authReceiptDigest == M4CatalogIO.hash(borrow.attachment.receiptRaw),
+          creation.identityGeneration == borrow.attachment.identityGeneration,
+          creation.choices.cloud == .keep, creation.choices.local == .delete, creation.choices.health == .keep, !creation.choices.healthConfirmed,
+          try M4CatalogIO.encode(health) == M4CatalogIO.encode(M4HealthReservation.empty) else { throw M4CatalogError.intentMismatch }
+    try managedTransaction(borrow: borrow, verificationObserver: verificationObserver) { state in
+      try borrow.requireCapturedState(state)
+      if let prior = state.deletionCreation {
+        try creation.validateTransition(from: prior)
+        guard try M4CatalogIO.encode(prior) == M4CatalogIO.encode(creation) else { throw M4CatalogError.intentMismatch }
+        try state.requireCompletionCapacity(); return
+      }
+      guard state.plans.isEmpty else { throw M4CatalogError.intentMismatch }
+      let index = M4CatalogIndex(revision: state.ownedRevision, entries: state.entries)
+      let plan = try M4FrozenDeletionPlan(version: 1, requestID: creation.requestID, scope: creation.scope, choices: creation.choices, health: health,
+        catalogRevision: index.revision, catalogDigest: index.digest(), entries: index.entries, parentIntentDigest: nil, children: [])
+      state.membershipRevision = state.ownedRevision; state.deletionCreation = creation; state.plans = [plan]
+      try state.validate(); try Self.requireManagedPublicationCapacity(state)
+    }
+    guard let saved = try deletionCreation(), try M4CatalogIO.encode(saved) == M4CatalogIO.encode(creation) else { throw M4CatalogError.storageBlocked }
+    let plan = try requiredPlan(creation.requestID)
+    guard plan.scope == creation.scope, try M4CatalogIO.encode(plan.choices) == M4CatalogIO.encode(creation.choices) else { throw M4CatalogError.storageBlocked }
+    try borrow.verify(); return plan
+  }
+  @MainActor func markManagedDeletionStarted(requestID: String, borrow: M4ManagedDeletionBorrow,
+    verificationObserver: (@MainActor (M4ManagedDeletionVerificationPhase) -> Void)? = nil) throws -> M4DeletionCreationMetadata {
+    guard borrow.catalog === self else { throw M4CatalogError.intentMismatch }
+    try managedTransaction(borrow: borrow, verificationObserver: verificationObserver) { state in
+      try borrow.requireCapturedState(state)
+      guard let prior = state.deletionCreation, M4CatalogIO.raw(prior.requestID, requestID) else { throw M4CatalogError.intentMismatch }
+      if prior.dispatch == .started { try state.requireCompletionCapacity(); return }
+      guard borrow.active else { throw M4CatalogError.intentMismatch }
+      var next = prior; next.dispatch = .started; try next.validateTransition(from: prior)
+      state.deletionCreation = next; try state.validate(); try Self.requireManagedPublicationCapacity(state)
+    }
+    guard let saved = try deletionCreation(), M4CatalogIO.raw(saved.requestID, requestID), saved.dispatch == .started else { throw M4CatalogError.storageBlocked }
+    try borrow.verify(); return saved
+  }
+  @MainActor private func managedTransaction(borrow: M4ManagedDeletionBorrow,
+    verificationObserver: (@MainActor (M4ManagedDeletionVerificationPhase) -> Void)?,
+    mutate: (inout M4CatalogState) throws -> Void) throws {
+    verificationObserver?(.beforeTransaction); try borrow.verify()
+    let publication = Result { try journal.transaction(mutate) }
+    verificationObserver?(.afterTransaction)
+    let postcheck = Result { try borrow.verify() }
+    // A lost response remains the original unknown outcome. Verification never
+    // compensates by clearing the published creation or replacing its request.
+    try publication.get(); try postcheck.get()
+  }
+  private static func requireManagedPublicationCapacity(_ state: M4CatalogState) throws {
+    // The journal itself adds one after this closure returns. Budget against
+    // that actual prospective revision, retaining sixteen further control writes.
+    guard state.revision < UInt64.max else { throw M4CatalogError.budgetExceeded }
+    var prospective = state; prospective.revision += 1; try prospective.requireCompletionCapacity()
   }
   func reserve(requestID: String, scope: CloudScope, choices: M4DeletionChoices, health: M4HealthReservation) throws -> M4FrozenDeletionPlan {
     try journal.transaction { state in

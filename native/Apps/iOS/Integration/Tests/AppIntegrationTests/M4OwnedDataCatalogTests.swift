@@ -6,6 +6,13 @@ import DeviceSync
 @testable import AppIntegration
 
 final class M4OwnedDataCatalogTests: XCTestCase {
+  func testManagedCreationFieldIsCanonicalAndRequiresOriginalPlan() throws {
+    let creation: [String: Any] = ["version": 1, "requestID": "managed-original", "scope": ["accountID": "account", "cloudSpaceID": "cloud", "zoneID": "matches", "activationEpoch": 1], "choices": ["cloud": "keep", "local": "delete", "health": "keep", "healthConfirmed": false], "firstReauthID": "original-reauth", "authRequestID": "original-auth", "authReceiptDigest": String(repeating: "a", count: 64), "identityGeneration": 1, "confirmedAt": 1234, "dispatch": "reserved"]
+    let bytes = try JSONSerialization.data(withJSONObject: ["version": 1, "revision": 0, "entries": [], "plans": [], "deletionCreation": creation], options: [.sortedKeys, .withoutEscapingSlashes])
+    let decoded: M4CatalogState = try M4CatalogIO.decode(bytes)
+    XCTAssertEqual(try M4CatalogIO.encode(decoded), bytes, "the new bounded creation is a canonical field, never an ignored extension")
+    XCTAssertThrowsError(try decoded.validate(), "metadata without the atomic original managed pair plan must fail closed")
+  }
   private func root() throws -> URL {
     let value = FileManager.default.temporaryDirectory.appendingPathComponent("m4-catalog-" + UUID().uuidString)
     try FileManager.default.createDirectory(at: value, withIntermediateDirectories: true); return value
@@ -20,6 +27,22 @@ final class M4OwnedDataCatalogTests: XCTestCase {
       scope: scope ?? self.scope(), root: path, retainedControls: [])
   }
   private var choices: M4DeletionChoices { M4DeletionChoices(cloud: .keep, local: .delete, health: .keep, healthConfirmed: false) }
+  func testLegacyNilCreationReservedAndSealedBytesAndFrozenNoopsStayExact() throws {
+    struct OldState: Codable { let version: Int; let revision: UInt64; let entries: [M4CatalogEntry]; let plans: [M4FrozenDeletionPlan]; let membershipRevision: UInt64?; let physicalBootstrap: M4PhysicalBootstrapState? }
+    let dir = try root(), control = dir.appendingPathComponent("retained"), catalog = try M4OwnedDataCatalog(directory: control)
+    let ledger = try capsule(dir, "legacy-retired"); try catalog.record(ledger); try catalog.retire(componentID: ledger.componentID)
+    _ = try catalog.reserve(requestID: "legacy-nil", scope: scope(), choices: choices, health: .empty)
+    for sealed in [false, true] {
+      if sealed { _ = try catalog.seal(requestID: "legacy-nil", parentIntentDigest: String(repeating: "c", count: 64)) }
+      let state: M4CatalogState = try M4CatalogIO.decode(M4CatalogIO.read(control.appendingPathComponent("catalog.json"), limit: M4CatalogJournal.maximumJournalBytes))
+      XCTAssertNil(state.deletionCreation)
+      let old = OldState(version: state.version, revision: state.revision, entries: state.entries, plans: state.plans, membershipRevision: state.membershipRevision, physicalBootstrap: state.physicalBootstrap)
+      XCTAssertEqual(try M4CatalogIO.encode(state), try M4CatalogIO.encode(old))
+      let before = try fixtureBytes(control); try catalog.record(ledger); try catalog.retire(componentID: ledger.componentID)
+      for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    }
+    try catalog.close()
+  }
   func testRetiredLedgerAndStagingRemainRequiredCatalogMembers() throws {
     let dir = try root(), control = dir.appendingPathComponent("retained")
     let catalog = try M4OwnedDataCatalog(directory: control)
@@ -545,3 +568,178 @@ private final class CatalogSyncTrace: @unchecked Sendable {
 private struct CatalogControlledDrain: DeviceSyncErasureDriving {
   func quiesceForErasure(_ request: DeviceSyncLocalEraseRequest, expected: [DeviceSyncTransferIdentity]) async throws -> DeviceSyncDrainStatus { .drained }
 }
+
+#if DEBUG && os(macOS)
+extension M4OwnedDataCatalogTests {
+  @MainActor func testManagedReservationAtomicallyPinsOriginalPairAndStartedIsIdempotent() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let catalog = borrow.catalog, creation = f.creation(), before = try catalog.index()
+    let controls = URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent()
+    let originalState: M4CatalogState = try M4CatalogIO.decode(M4CatalogIO.read(controls.appendingPathComponent("catalog.json"), limit: M4CatalogJournal.maximumJournalBytes))
+    let slots = try borrow.physical.catalogControls.map { try M4CatalogIO.anchor(URL(fileURLWithPath: $0.path)) }
+    var phases: [M4ManagedDeletionVerificationPhase] = []
+    let plan = try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty, verificationObserver: { phase in phases.append(phase); _ = try? catalog.index() })
+    XCTAssertEqual(phases, [.beforeTransaction, .afterTransaction])
+    XCTAssertEqual(plan.catalogRevision, before.revision); XCTAssertEqual(plan.catalogDigest, try before.digest())
+    XCTAssertNil(plan.parentIntentDigest); XCTAssertNil(plan.fullSeal); XCTAssertNil(plan.receipts)
+    let state: M4CatalogState = try M4CatalogIO.decode(M4CatalogIO.read(controls.appendingPathComponent("catalog.json"), limit: M4CatalogJournal.maximumJournalBytes))
+    XCTAssertEqual(state.revision, originalState.revision + 1); XCTAssertEqual(state.deletionCreation?.dispatch, .reserved)
+    XCTAssertEqual(try M4CatalogIO.encode(state.deletionCreation), try M4CatalogIO.encode(creation))
+    let reservedBytes = try fixtureBytes(controls)
+    _ = try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty)
+    for (path, bytes) in reservedBytes { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    XCTAssertThrowsError(try catalog.reserveManagedDeletion(creation: f.creation("second"), borrow: borrow, health: .empty))
+    XCTAssertThrowsError(try catalog.retire(componentID: f.handle.storeCapsule.componentID))
+    try catalog.record(f.handle.storeCapsule)
+    let started = try catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: borrow)
+    XCTAssertEqual(started.dispatch, .started)
+    let startedBytes = try fixtureBytes(controls)
+    _ = try catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: borrow)
+    for (path, bytes) in startedBytes { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    XCTAssertThrowsError(try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty), "no dispatch downgrade")
+    XCTAssertEqual(try catalog.index().digest(), try before.digest())
+    for (expected, path) in zip(slots, borrow.physical.catalogControls) { XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(URL(fileURLWithPath: path.path))), try M4CatalogIO.encode(expected)) }
+    try await f.close()
+  }
+  @MainActor func testManagedCreationCommitWindowsAndOutsidePostcheckPreservePublication() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let catalog = borrow.catalog, creation = f.creation()
+    catalog.injectNextFailure(.beforeCommit)
+    XCTAssertThrowsError(try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty))
+    XCTAssertNil(try catalog.deletionCreation()); XCTAssertNil(try catalog.plan(requestID: creation.requestID))
+    catalog.injectNextFailure(.afterCommitResponseLost)
+    XCTAssertThrowsError(try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty))
+    XCTAssertEqual(try M4CatalogIO.encode(catalog.deletionCreation()), try M4CatalogIO.encode(creation)); XCTAssertNotNil(try catalog.plan(requestID: creation.requestID))
+    let control = URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent()
+    let reopened = try M4OwnedDataCatalog(directory: control)
+    XCTAssertEqual(try M4CatalogIO.encode(reopened.deletionCreation()), try M4CatalogIO.encode(creation))
+    XCTAssertEqual(try reopened.plan(requestID: creation.requestID)?.canonicalBytes(), try catalog.plan(requestID: creation.requestID)?.canonicalBytes())
+    XCTAssertThrowsError(try reopened.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty), "an equal catalog DTO never replaces the original object")
+    try reopened.close()
+    catalog.injectNextFailure(.beforeCommit)
+    XCTAssertThrowsError(try catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: borrow))
+    XCTAssertEqual(try catalog.deletionCreation()?.dispatch, .reserved)
+    let unknown = URL(fileURLWithPath: borrow.physical.directory.path).appendingPathComponent("postcheck-unknown")
+    XCTAssertThrowsError(try catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: borrow, verificationObserver: { if $0 == .afterTransaction { _ = FileManager.default.createFile(atPath: unknown.path, contents: Data([9])) } }))
+    XCTAssertEqual(try catalog.deletionCreation()?.dispatch, .started, "published unknown is retained after outside verifier refusal")
+    try FileManager.default.removeItem(at: unknown); try borrow.verify()
+    _ = try catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: borrow)
+    try await f.close()
+  }
+  @MainActor func testManagedCreationRejectsOtherChoicesHealthAndRawUnicodeRequestReplacement() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let creation = f.creation("cafe\u{301}"), catalog = borrow.catalog
+    let control = URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent()
+    let before = try fixtureBytes(control)
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: M4CatalogIO.encode(creation)) as? [String: Any])
+    for field in ["cloud", "local", "health"] {
+      var changed = object, choices = try XCTUnwrap(object["choices"] as? [String: Any]); choices[field] = field == "local" ? "keep" : "delete"; changed["choices"] = choices
+      let unsupported: M4DeletionCreationMetadata = try M4CatalogIO.decode(JSONSerialization.data(withJSONObject: changed, options: [.sortedKeys, .withoutEscapingSlashes]))
+      XCTAssertThrowsError(try catalog.reserveManagedDeletion(creation: unsupported, borrow: borrow, health: .empty))
+    }
+    XCTAssertThrowsError(try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: M4HealthReservation(selections: [], issue: .missingMapping)))
+    for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    _ = try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty)
+    object["requestID"] = "caf\u{e9}"
+    let other: M4DeletionCreationMetadata = try M4CatalogIO.decode(JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]))
+    XCTAssertEqual(other.requestID, creation.requestID); XCTAssertNotEqual(Data(other.requestID.utf8), Data(creation.requestID.utf8))
+    XCTAssertThrowsError(try catalog.reserveManagedDeletion(creation: other, borrow: borrow, health: .empty))
+    XCTAssertThrowsError(try catalog.markManagedDeletionStarted(requestID: other.requestID, borrow: borrow))
+    XCTAssertThrowsError(try catalog.seal(requestID: creation.requestID, parentIntentDigest: String(repeating: "c", count: 64)), "reserved cannot acquire a parent before started")
+    try await f.close()
+  }
+  @MainActor func testManagedCreationRejectsExtraAndRetiredProducerBeforePublication() async throws {
+    for kind in [M4OwnedLeafKind.cloudStaging, .businessStore, .deviceSync] {
+      let f = try await M4ManagedFoundationFixture.make(test: self), borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+      let extra = try capsule(f.root, "extra", kind: kind, scope: f.handle.scope)
+      try borrow.catalog.record(extra)
+      if kind == .deviceSync { try borrow.catalog.retire(componentID: extra.componentID) }
+      let control = URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent(), before = try fixtureBytes(URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent())
+      XCTAssertThrowsError(try borrow.catalog.reserveManagedDeletion(creation: f.creation(), borrow: borrow, health: .empty))
+      XCTAssertNil(try borrow.catalog.deletionCreation())
+      for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+      XCTAssertTrue(try fixtureBytes(control).keys.contains(control.appendingPathComponent("catalog.owner").path))
+      try await f.close()
+    }
+  }
+  @MainActor func testManagedProspectiveRevisionCapacityFailureKeepsOriginalSlotsAndOwner() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let control = URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent()
+    let url = control.appendingPathComponent("catalog.json")
+    var state: M4CatalogState = try M4CatalogIO.decode(M4CatalogIO.read(url, limit: M4CatalogJournal.maximumJournalBytes))
+    state.revision = UInt64.max - 18
+    // Same inode-preserving counter fixture seam as the legacy counter suite.
+    let file = try FileHandle(forWritingTo: url); try file.truncate(atOffset: 0); try file.write(contentsOf: M4CatalogIO.encode(state)); try file.synchronize(); try file.close()
+    let before = try fixtureBytes(control), membership = try borrow.catalog.index()
+    XCTAssertThrowsError(try borrow.catalog.reserveManagedDeletion(creation: f.creation(), borrow: borrow, health: .empty)) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertNil(try borrow.catalog.deletionCreation()); XCTAssertNil(try borrow.catalog.plan(requestID: "foundation-delete"))
+    for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    XCTAssertEqual(try borrow.catalog.index().digest(), try membership.digest())
+    try await f.close()
+  }
+  @MainActor func testManagedStartedLostResponseRetainsSameRecordAndPlanOnJournalReopen() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let catalog = borrow.catalog, creation = f.creation()
+    let plan = try catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty)
+    catalog.injectNextFailure(.afterCommitResponseLost)
+    XCTAssertThrowsError(try catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: borrow))
+    let control = URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent()
+    let reopened = try M4OwnedDataCatalog(directory: control)
+    let actual = try XCTUnwrap(reopened.deletionCreation())
+    XCTAssertEqual(actual.dispatch, .started); try actual.validateTransition(from: creation)
+    XCTAssertEqual(try reopened.plan(requestID: creation.requestID)?.canonicalBytes(), try plan.canonicalBytes())
+    try reopened.close(); try await f.close()
+  }
+  @MainActor func testManagedCapacityMeasurementIncludesActualCreationAtWholeJournalBoundary() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), creation = f.creation(), original = f.handle.storeCapsule
+    // Calculation-only upper-bound DTOs, never validated as current provenance
+    // or published. The real owner/slots failure boundary is tested separately.
+    func measured(_ padding: Int, creation: M4DeletionCreationMetadata?) throws -> M4CatalogState {
+      let controls = (0..<256).map { M4CatalogPath(path: "/private/tmp/capacity/" + String($0) + String(repeating: "x", count: padding), device: original.root.device, inode: UInt64($0 + 1), directory: false) }
+      let capsule = M4OwnershipCapsule(version: original.version, namespaceID: original.namespaceID, componentID: original.componentID, revision: original.revision, kind: original.kind, scope: original.scope, root: original.root, retainedControls: controls, ancestors: original.ancestors)
+      let entries = [M4CatalogEntry(capsule: capsule, retired: false)], index = M4CatalogIndex(revision: 1, entries: [M4CatalogEntry(capsule: capsule, retired: false)])
+      let plan = try M4FrozenDeletionPlan(version: 1, requestID: "foundation-delete", scope: original.scope, choices: self.choices, health: .empty, catalogRevision: 1, catalogDigest: index.digest(), entries: entries, parentIntentDigest: nil, children: [])
+      return M4CatalogState(version: 1, revision: 1, entries: entries, plans: [plan], deletionCreation: creation)
+    }
+    var low = 0, high = 3000
+    while low < high {
+      let mid = (low + high + 1) / 2
+      do { try measured(mid, creation: nil).requireCompletionCapacity(); low = mid }
+      catch { high = mid - 1 }
+    }
+    XCTAssertGreaterThan(low, 0); try measured(low, creation: nil).requireCompletionCapacity()
+    XCTAssertThrowsError(try measured(low, creation: creation).requireCompletionCapacity()) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    try await f.close()
+  }
+  @MainActor func testManagedCreationCanonicalBoundsCoherenceAndLegacyBytes() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let control = URL(fileURLWithPath: borrow.physical.catalogControls[0].path).deletingLastPathComponent()
+    let before = try fixtureBytes(control), creation = f.creation()
+    var legacy: M4CatalogState = try M4CatalogIO.decode(M4CatalogIO.read(control.appendingPathComponent("catalog.json"), limit: M4CatalogJournal.maximumJournalBytes))
+    struct OldState: Codable { let version: Int; let revision: UInt64; let entries: [M4CatalogEntry]; let plans: [M4FrozenDeletionPlan]; let membershipRevision: UInt64?; let physicalBootstrap: M4PhysicalBootstrapState? }
+    func oldBytes(_ state: M4CatalogState) throws -> Data { try M4CatalogIO.encode(OldState(version: state.version, revision: state.revision, entries: state.entries, plans: state.plans, membershipRevision: state.membershipRevision, physicalBootstrap: state.physicalBootstrap)) }
+    XCTAssertEqual(try M4CatalogIO.encode(M4CatalogState.empty), Data("{\"entries\":[],\"plans\":[],\"revision\":0,\"version\":1}".utf8))
+    XCTAssertEqual(try M4CatalogIO.encode(legacy), try oldBytes(legacy))
+    var object = try XCTUnwrap(JSONSerialization.jsonObject(with: M4CatalogIO.encode(creation)) as? [String: Any])
+    for (field, value) in [("version", 2 as Any), ("dispatch", "unknown" as Any), ("requestID", String(repeating: "x", count: 129) as Any), ("confirmedAt", -1 as Any), ("identityGeneration", 9_007_199_254_740_992 as Any), ("authReceiptDigest", "bad" as Any), ("extra", true as Any), ("firstReauthID", NSNull() as Any), ("firstReauthID", String(repeating: "z", count: 4097) as Any)] {
+      var changed = object; changed[field] = value
+      XCTAssertThrowsError(try M4CatalogIO.decode(JSONSerialization.data(withJSONObject: changed, options: [.sortedKeys, .withoutEscapingSlashes])) as M4DeletionCreationMetadata)
+    }
+    var nullState = try XCTUnwrap(JSONSerialization.jsonObject(with: M4CatalogIO.encode(legacy)) as? [String: Any]); nullState["deletionCreation"] = NSNull()
+    XCTAssertThrowsError(try M4CatalogIO.decode(JSONSerialization.data(withJSONObject: nullState, options: [.sortedKeys, .withoutEscapingSlashes])) as M4CatalogState)
+    legacy.deletionCreation = creation; XCTAssertThrowsError(try legacy.validate())
+    for (path, bytes) in before { XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: path)), bytes) }
+    _ = try borrow.catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty)
+    var state: M4CatalogState = try M4CatalogIO.decode(M4CatalogIO.read(control.appendingPathComponent("catalog.json"), limit: M4CatalogJournal.maximumJournalBytes))
+    state.deletionCreation = nil
+    XCTAssertEqual(try M4CatalogIO.encode(state), try oldBytes(state), "representative physical reserved legacy shape remains exact")
+    state.plans[0].parentIntentDigest = String(repeating: "b", count: 64); state.plans[0].children = try state.plans[0].expectedChildren(String(repeating: "b", count: 64))
+    XCTAssertEqual(try M4CatalogIO.encode(state), try oldBytes(state), "legacy sealed bytes remain exact")
+    object["requestID"] = "changed"; let changed: M4DeletionCreationMetadata = try M4CatalogIO.decode(JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]))
+    XCTAssertThrowsError(try changed.validateTransition(from: creation))
+    var started = creation; started.dispatch = .started; try started.validateTransition(from: creation)
+    XCTAssertThrowsError(try creation.validateTransition(from: started))
+    try await f.close()
+  }
+}
+#endif

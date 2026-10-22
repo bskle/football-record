@@ -25,6 +25,36 @@ struct M4IdentityMaterial: Sendable {
 }
 enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename, afterBusinessRename, afterLedgerReservation, afterLedgerRename, afterLedgerInitialization, afterPairSeal }
 
+/// Unserializable provenance borrow from one live original physical owner.
+/// It grants reservation validation only, never business or deletion authority.
+@MainActor final class M4ManagedDeletionBorrow {
+  let catalog: M4OwnedDataCatalog
+  let physical: M4PhysicalResourceReservation
+  let attachment: M4PhoneScopeAttachment
+  let seal: M4PhonePairSeal
+  let storeCapsule, ledgerCapsule: M4OwnershipCapsule
+  let ledger: SQLiteCloudLedger
+  let active: Bool
+  private let physicalBytes, phoneBytes, entriesBytes: Data
+  private let verifyOriginal: @MainActor () throws -> Void
+  fileprivate init(catalog: M4OwnedDataCatalog, physical: M4PhysicalResourceReservation, phone: M4PhoneResourceState,
+    handle: M4ManagedPhoneResources, entries: [M4CatalogEntry], active: Bool, verifyOriginal: @escaping @MainActor () throws -> Void) throws {
+    self.catalog = catalog; self.physical = physical; attachment = handle.attachment; seal = handle.seal
+    storeCapsule = handle.storeCapsule; ledgerCapsule = handle.ledgerCapsule; ledger = handle.ledger; self.active = active
+    physicalBytes = try M4CatalogIO.encode(physical); phoneBytes = try M4CatalogIO.encode(phone); entriesBytes = try M4CatalogIO.encode(entries)
+    self.verifyOriginal = verifyOriginal
+  }
+  func verify() throws { try verifyOriginal() }
+  /// Pure comparison against the transaction's supplied state. Never call the
+  /// verifier, catalog, SQLite, a clock or an observer from this method.
+  func requireCapturedState(_ state: M4CatalogState) throws {
+    guard let physical = state.physicalBootstrap, physical.resourcesPublished, physical.businessPublished, physical.watch == nil,
+          let phone = physical.phone, phone.published, phone.seal != nil,
+          try M4CatalogIO.encode(physical.reservation) == physicalBytes, try M4CatalogIO.encode(phone) == phoneBytes,
+          try M4CatalogIO.encode(state.entries) == entriesBytes else { throw M4CatalogError.identityChanged }
+  }
+}
+
 @MainActor final class M4PreparedIdentity {
   let seed: M4IdentitySeed
   let material: M4IdentityMaterial
@@ -88,6 +118,90 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
     try lease.verifyIdentity(); try resources.verify()
     guard try M4CatalogIO.encode(resources.catalog.requirePhoneSeal()) == M4CatalogIO.encode(handle.seal),
           let original = try resources.catalog.phoneResources(), try original.attachment.digest() == handle.attachment.digest() else { throw AuthorityError.identityChanged }
+  }
+  func borrowActiveDeletionResources(handle: M4ManagedPhoneResources) async throws -> M4ManagedDeletionBorrow {
+    guard !closed, !closing, let repository, let resources, let trust = authorityTrust else { throw AuthorityError.unavailable }
+    try lease.verifyIdentity(); try resources.requireCachedPhone(handle, trust: trust)
+    let generation = handle.attachment.identityGeneration
+    guard let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: generation),
+          try handle.attachment.matches(proof), M4CatalogIO.raw(proof.attempt.publicKey, material.signer.publicKey),
+          M4CatalogIO.raw(proof.binding.deviceID, seed.installationID) else { throw AuthorityError.identityChanged }
+    guard !closed, !closing else { throw AuthorityError.identityChanged }
+    try lease.verifyIdentity(); try resources.requireCachedPhone(handle, trust: trust)
+    await resourceReplyGate?()
+    guard let after = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: generation),
+          try handle.attachment.matches(after), !closed, !closing else { throw AuthorityError.identityChanged }
+    let borrow = try mintDeletionBorrow(handle: handle, active: true, resources: resources, trust: trust)
+    try borrow.verify(); return borrow
+  }
+  func borrowRetainedDeletionResources(saga: DeletionSagaV4) async throws -> M4ManagedDeletionBorrow {
+    guard !closed, !closing, let resources, let trust = authorityTrust else { throw AuthorityError.unavailable }
+    try lease.verifyIdentity()
+    // Same-live-cache only: this read never opens a database or makes a ledger.
+    let handle = try resources.cachedDeletionPhone(trust: trust)
+    try await requireRetainedDeletion(saga: saga, handle: handle, trust: trust)
+    guard !closed, !closing else { throw AuthorityError.identityChanged }
+    try lease.verifyIdentity(); try resources.requireCachedPhone(handle, trust: trust)
+    try await requireRetainedDeletion(saga: saga, handle: handle, trust: trust)
+    let borrow = try mintDeletionBorrow(handle: handle, active: false, resources: resources, trust: trust)
+    try borrow.verify(); return borrow
+  }
+  private func mintDeletionBorrow(handle: M4ManagedPhoneResources, active: Bool, resources: M4PhysicalResourceOwner, trust: AuthorityTrustConfiguration) throws -> M4ManagedDeletionBorrow {
+    guard !closed, !closing, let phone = try resources.catalog.phoneResources() else { throw AuthorityError.identityChanged }
+    try resources.requireCachedPhone(handle, trust: trust)
+    return try M4ManagedDeletionBorrow(catalog: resources.catalog, physical: resources.reservation, phone: phone, handle: handle,
+      entries: resources.catalog.index().entries, active: active) { [self] in
+      guard !closed, !closing, self.resources === resources else { throw AuthorityError.identityChanged }
+      try lease.verifyIdentity(); try resources.requireCachedPhone(handle, trust: trust)
+    }
+  }
+  private func requireRetainedDeletion(saga: DeletionSagaV4, handle: M4ManagedPhoneResources, trust: AuthorityTrustConfiguration) async throws {
+    guard let repository, let resources,
+          let creation = try resources.catalog.deletionCreation(), creation.dispatch == .started,
+          let plan = try resources.catalog.plan(requestID: saga.intent.requestID),
+          M4CatalogIO.raw(creation.requestID, saga.intent.requestID), creation.scope == handle.scope, plan.scope == handle.scope,
+          M4CatalogIO.raw(saga.intent.fields.reauthenticationID ?? "", creation.firstReauthID),
+          creation.identityGeneration == handle.attachment.identityGeneration,
+          M4CatalogIO.raw(creation.authRequestID, handle.attachment.currentAuthRequestID),
+          creation.authReceiptDigest == M4CatalogIO.hash(handle.attachment.receiptRaw),
+          try M4CatalogIO.encode(plan.choices) == M4CatalogIO.encode(creation.choices),
+          plan.parentIntentDigest == nil || plan.parentIntentDigest == saga.intent.digest else { throw AuthorityError.identityChanged }
+    let attachment = handle.attachment
+    let generation = try await repository.identityGenerationV4()
+    guard let stored = try await repository.deletionSagaV4(requestID: saga.intent.requestID),
+          try M4CatalogIO.encode(stored) == M4CatalogIO.encode(saga),
+          let control = try await repository.lifecycleControlIntentV4(requestID: saga.intent.requestID),
+          control.canonicalRequest == saga.intent.canonicalRequest,
+          let binding = try await repository.accountBindingV4(), let authID = try await repository.currentAuthRequestIDV4(),
+          M4CatalogIO.raw(authID, attachment.currentAuthRequestID),
+          let attempt = try await repository.authAttemptV4(requestID: authID),
+          try M4CatalogIO.encode(attempt) == M4CatalogIO.encode(attachment.attempt),
+          let original = saga.originalScope,
+          M4CatalogIO.raw(original.accountID, attachment.scope.accountID), M4CatalogIO.raw(original.cloudSpaceID, attachment.scope.cloudSpaceID),
+          M4CatalogIO.raw(original.zoneID, attachment.scope.zoneID), original.activationEpoch == attachment.scope.activationEpoch,
+          M4CatalogIO.raw(saga.accountID, attachment.binding.accountID), saga.activationEpoch == attachment.scope.activationEpoch,
+          M4CatalogIO.raw(binding.accountID, attachment.binding.accountID), M4CatalogIO.raw(binding.cloudSpaceID, attachment.binding.cloudSpaceID),
+          M4CatalogIO.raw(binding.deviceID, seed.installationID), binding.role == .phone, binding.environment == attachment.binding.environment,
+          binding.activationEpoch == attachment.binding.activationEpoch, M4CatalogIO.raw(attempt.publicKey, material.signer.publicKey),
+          saga.cloudChoice == .keep, saga.localChoice == .delete, saga.healthChoice == .keep, !saga.healthConfirmed else { throw AuthorityError.identityChanged }
+    _ = try DeletionSagaV4(intent: saga.intent, accountID: saga.accountID, activationEpoch: saga.activationEpoch, recoveryCapability: saga.recoveryCapability,
+      cloudChoice: saga.cloudChoice, localChoice: saga.localChoice, healthChoice: saga.healthChoice, healthConfirmed: saga.healthConfirmed, originalScope: original)
+    if saga.backendDeleted {
+      guard binding.suspended, attachment.identityGeneration < 9_007_199_254_740_991, generation == attachment.identityGeneration + 1,
+            let raw = saga.backendReceipt else { throw AuthorityError.identityChanged }
+      // Historical signed provenance only: verification uses the original trust
+      // and expected intent, never fresh auth admission or a fabricated clock.
+      let receipt = try VerifiedAuthorityReceiptV1.verify(raw, expected: AuthorityExpectedIntent(saga.intent, accountID: saga.accountID, epoch: saga.activationEpoch), trust: trust)
+      guard receipt.body.result == .deleted, receipt.body.deletion?.backend == "backendDeleted", receipt.body.deletion?.apple == "revoked" else { throw AuthorityError.identityChanged }
+    } else {
+      guard !binding.suspended, generation == attachment.identityGeneration, saga.backendReceipt == nil else { throw AuthorityError.identityChanged }
+    }
+    guard generation == (try await repository.identityGenerationV4()),
+          let finalSaga = try await repository.deletionSagaV4(requestID: saga.intent.requestID),
+          try M4CatalogIO.encode(finalSaga) == M4CatalogIO.encode(saga),
+          try M4CatalogIO.encode(resources.catalog.deletionCreation()) == M4CatalogIO.encode(creation),
+          try resources.catalog.plan(requestID: saga.intent.requestID)?.canonicalBytes() == plan.canonicalBytes(),
+          !closed, !closing else { throw AuthorityError.identityChanged }
   }
   func activeWatchAttachment() throws -> M4WatchScopeAttachment? {
     guard !closed, !closing, let resources else { throw AuthorityError.unavailable }
@@ -432,6 +546,36 @@ struct M4ManagedWatchResources: Sendable {
     let seal = try catalog.sealWatchResources(store: store, ledger: ledgerCapsule)
     try crashHook?(.afterPairSeal)
     return M4ManagedWatchResources(attachment: watch.attachment, ledger: ledger, storeCapsule: store, ledgerCapsule: ledgerCapsule, seal: seal)
+  }
+  func requireCachedPhone(_ handle: M4ManagedPhoneResources, trust: AuthorityTrustConfiguration) throws {
+    try verify()
+    guard let ledger, ledger === handle.ledger,
+          let phone = try catalog.phoneResources(), try catalog.watchResources() == nil, phone.published,
+          try M4CatalogIO.encode(phone.attachment) == M4CatalogIO.encode(handle.attachment),
+          try M4CatalogIO.encode(catalog.requirePhoneSeal()) == M4CatalogIO.encode(handle.seal) else { throw AuthorityError.identityChanged }
+    let entries = try catalog.index().entries
+    guard entries.count == 2, entries.allSatisfy({ !$0.retired }),
+          let store = entries.first(where: { $0.capsule.kind == .businessStore }),
+          let cloud = entries.first(where: { $0.capsule.kind == .cloudLedger }),
+          try M4CatalogIO.encode(store.capsule) == M4CatalogIO.encode(handle.storeCapsule),
+          try M4CatalogIO.encode(cloud.capsule) == M4CatalogIO.encode(handle.ledgerCapsule),
+          M4CatalogIO.raw(handle.attachment.physicalReservationID, reservation.reservationID),
+          handle.storeCapsule.scope == handle.scope, handle.ledgerCapsule.scope == handle.scope,
+          M4CatalogIO.raw(handle.attachment.attempt.keyID, reservation.keyID) else { throw AuthorityError.identityChanged }
+    try handle.attachment.validate(reservation); try handle.storeCapsule.verifyCurrent(); try handle.ledgerCapsule.verifyCurrent()
+    let verified = try VerifiedAuthorityReceiptV1.verify(handle.attachment.receiptRaw,
+      expected: AuthorityExpectedIntent(requestID: handle.attachment.currentAuthRequestID, digest: handle.attachment.attempt.requestDigest, operation: .authApple, accountID: handle.scope.accountID, epoch: handle.scope.activationEpoch), trust: trust)
+    guard verified.body.result == .registered, trust.environment == handle.attachment.binding.environment,
+          handle.seal.attachmentDigest == (try handle.attachment.digest()), handle.seal.storeDigest == (try handle.storeCapsule.digest()),
+          handle.seal.ledgerDigest == (try handle.ledgerCapsule.digest()) else { throw AuthorityError.identityChanged }
+    try verify()
+  }
+  func cachedDeletionPhone(trust: AuthorityTrustConfiguration) throws -> M4ManagedPhoneResources {
+    guard let ledger, let phone = try catalog.phoneResources(), let seal = phone.seal else { throw AuthorityError.unavailable }
+    let entries = try catalog.index().entries
+    guard let store = entries.first(where: { $0.capsule.kind == .businessStore }), let cloud = entries.first(where: { $0.capsule.kind == .cloudLedger }) else { throw AuthorityError.identityChanged }
+    let handle = M4ManagedPhoneResources(attachment: phone.attachment, ledger: ledger, storeCapsule: store.capsule, ledgerCapsule: cloud.capsule, seal: seal)
+    try requireCachedPhone(handle, trust: trust); return handle
   }
   func close() async throws {
     guard !closed else { return }

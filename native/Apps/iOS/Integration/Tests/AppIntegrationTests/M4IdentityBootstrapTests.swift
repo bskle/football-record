@@ -4,6 +4,8 @@ import XCTest
 import AccountKit
 import MatchSession
 import MatchStore
+import CloudSync
+import CryptoKit
 @testable import AppIntegration
 
 @MainActor final class M4IdentityBootstrapTests: XCTestCase {
@@ -418,3 +420,148 @@ extension M4IdentityBootstrapTests {
     #endif
   }
 }
+
+#if DEBUG && os(macOS)
+@MainActor private final class M4FoundationChangeGate {
+  var repository: SQLiteSessionRepository?
+  func run() async { if let repository { try? await repository.suspendAccountV4() } }
+}
+private struct M4FoundationUnavailableRelay: AuthorityHTTPRelay {
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse { throw AuthorityError.unavailable }
+}
+/// Local signed-grant fixture for provenance tests; never backend authorization.
+@MainActor struct M4ManagedFoundationFixture {
+  let root: URL
+  let prepared: M4PreparedIdentity
+  let repository: SQLiteSessionRepository
+  let handle: M4ManagedPhoneResources
+  let trust: AuthorityTrustConfiguration
+  let key: Curve25519.Signing.PrivateKey
+  let session: MatchSession
+  let client: AuthorityClient
+  static func make(test: XCTestCase? = nil, resourceReplyGate: (@MainActor () async -> Void)? = nil) async throws -> Self {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("m4-foundation-" + UUID().uuidString)
+    let key = Curve25519.Signing.PrivateKey()
+    let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["foundation-service": AuthorityWire.base64URL(key.publicKey.rawRepresentation)])
+    let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: "m4-foundation", controlDirectory: root.appendingPathComponent("retained/identity")) { _ in
+      M4IdentityMaterial(signer: try DevelopmentDeviceSigner(namespace: "m4-foundation", rawRepresentation: Data(repeating: 29, count: 32)), vault: MemoryDeviceCredentialVault())
+    }
+    try prepared.prepareManagedResources(resourceReplyGate: resourceReplyGate)
+    let repository = try prepared.openRepository(authorityTrust: trust)
+    let attempt = try AuthAttemptV4(requestID: "foundation-auth", deviceID: prepared.seed.installationID, publicKey: prepared.material.signer.publicKey, cloudSpaceID: "foundation-cloud", challengeID: "foundation-challenge", requestDigest: String(repeating: "a", count: 64), environment: .development)
+    let binding = try AccountBindingV4(accountID: "foundation-account", cloudSpaceID: "foundation-cloud", deviceID: prepared.seed.installationID, activationEpoch: 1, role: .phone, environment: .development)
+    let receipt = try signed(key: key, trust: trust, requestID: attempt.requestID, digest: attempt.requestDigest, operation: .authApple, result: "registered")
+    try await repository.saveAuthAttemptV4(attempt, expectedIdentityGeneration: 0)
+    try await repository.acceptAuthenticationV4(attempt: attempt, binding: binding, receipt: receipt, expectedIdentityGeneration: 0)
+    let generation = try await repository.identityGenerationV4()
+    let observed = M4CurrentAccountIdentity(accountID: binding.accountID, cloudSpaceID: binding.cloudSpaceID, zoneID: "foundation-zone", environment: .development)
+    let handle = try await prepared.prepareCurrentPhoneResources(expectedIdentityGeneration: generation, observed: observed)
+    let client = AuthorityClient(relay: M4FoundationUnavailableRelay(), vault: prepared.material.vault, signer: prepared.material.signer, trust: trust)
+    let device = PersistentDeviceIdentityProvider(url: prepared.seed.namespaceDirectory.appendingPathComponent("device.identity"), repository: repository)
+    let session = MatchSession(store: repository, deviceIdentity: device, clock: SystemSessionClock(), ids: UUIDSessionIDFactory(), permits: AuthorityStartPermitProvider(client: client, repository: repository), workout: UnavailableWorkoutGateway(), environment: .development(databaseNamespace: prepared.seed.namespace))
+    let fixture = Self(root: root, prepared: prepared, repository: repository, handle: handle, trust: trust, key: key, session: session, client: client)
+    test?.addTeardownBlock { try await fixture.close() }
+    return fixture
+  }
+  static func signed(key: Curve25519.Signing.PrivateKey, trust: AuthorityTrustConfiguration, requestID: String, digest: String, operation: AuthorityOperation, result: String) throws -> VerifiedAuthorityReceiptV1 {
+    var body: [String: Any] = ["version": 1, "environment": "development", "keyID": "foundation-service", "receiptID": UUID().uuidString, "requestID": requestID, "requestDigest": digest, "operation": operation.rawValue, "accountID": "foundation-account", "activationEpoch": 1, "matchID": "", "lockID": "", "recordingDeviceID": "", "result": result, "issuedAt": Int64(Date().timeIntervalSince1970)]
+    if operation == .deleteAccount { body["deletion"] = ["backend": "backendDeleted", "apple": "revoked", "cloud": "clientManaged", "local": "clientManaged", "health": "separateConfirmation"] }
+    let raw = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+    let bytes = try JSONSerialization.data(withJSONObject: ["body": body, "signature": AuthorityWire.base64URL(try key.signature(for: AuthorityWire.signedInput("football-record.authority.receipt.v1", body: raw)))], options: [.sortedKeys, .withoutEscapingSlashes])
+    return try VerifiedAuthorityReceiptV1.verify(bytes, expected: AuthorityExpectedIntent(requestID: requestID, digest: digest, operation: operation, accountID: "foundation-account", epoch: 1), trust: trust)
+  }
+  func creation(_ requestID: String = "foundation-delete") -> M4DeletionCreationMetadata {
+    M4DeletionCreationMetadata(version: 1, requestID: requestID, scope: handle.scope, choices: M4DeletionChoices(cloud: .keep, local: .delete, health: .keep, healthConfirmed: false), firstReauthID: "foundation-reauth", authRequestID: handle.attachment.currentAuthRequestID, authReceiptDigest: AuthorityWire.hash(handle.attachment.receiptRaw), identityGeneration: handle.attachment.identityGeneration, confirmedAt: Int64(Date().timeIntervalSince1970), dispatch: .reserved)
+  }
+  func saga(_ requestID: String = "foundation-delete") async throws -> DeletionSagaV4 {
+    let service = LifecycleService(client: client, repository: repository, coordinator: session, scope: handle.scope, ledger: handle.ledger)
+    return try await service.requestDeletion(requestID: requestID, reauthenticationID: "foundation-reauth", cloud: .keep, local: .delete, health: .keep, healthConfirmed: false)
+  }
+  func close() async throws {
+    try await prepared.close()
+    if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+    XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+  }
+}
+extension M4IdentityBootstrapTests {
+  func testManagedDeletionBorrowUsesOriginalCatalogAndCachedActor() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self)
+    let first = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let second = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    XCTAssertTrue(first.catalog === second.catalog); XCTAssertTrue(first.ledger === f.handle.ledger)
+    XCTAssertTrue(second.ledger === first.ledger)
+    try first.verify(); try second.verify()
+    let before = try first.catalog.index()
+    XCTAssertEqual(try first.catalog.physicalBootstrap()?.reservation.catalogOwnerDigest, first.physical.catalogOwnerDigest)
+    XCTAssertEqual(try first.catalog.index().digest(), try before.digest())
+    try await f.close()
+    XCTAssertThrowsError(try first.verify())
+  }
+  func testManagedDeletionBorrowRejectsForeignActorUnknownInventoryAndReplacedInode() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), foreign = try await M4ManagedFoundationFixture.make(test: self)
+    do { _ = try await f.prepared.borrowActiveDeletionResources(handle: foreign.handle); XCTFail("foreign cached actor/physical pair") } catch {}
+    let original = try await f.prepared.borrowActiveDeletionResources(handle: f.handle)
+    let unknown = URL(fileURLWithPath: original.physical.directory.path).appendingPathComponent("unknown-producer")
+    try Data([9]).write(to: unknown)
+    XCTAssertThrowsError(try original.verify()); try FileManager.default.removeItem(at: unknown)
+    let url = URL(fileURLWithPath: original.ledgerCapsule.root.path), moved = url.appendingPathExtension("original")
+    try FileManager.default.moveItem(at: url, to: moved); try Data().write(to: url)
+    XCTAssertThrowsError(try original.verify())
+    try FileManager.default.removeItem(at: url); try FileManager.default.moveItem(at: moved, to: url)
+    try original.verify(); try await foreign.close(); try await f.close()
+  }
+  func testRetainedBorrowRequiresSameOriginalStartedCreation() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self)
+    let saga = try await f.saga()
+    do { _ = try await f.prepared.borrowRetainedDeletionResources(saga: saga); XCTFail("original Saga alone cannot invent the managed creation/plan association") } catch {}
+    try await f.close()
+  }
+  func testActiveBorrowRechecksOriginalStoreAfterAwaitAndRetainedRejectsUnrelatedSuspension() async throws {
+    let gate = M4FoundationChangeGate()
+    let f = try await M4ManagedFoundationFixture.make(test: self, resourceReplyGate: { await gate.run() })
+    let borrow = try await f.prepared.borrowActiveDeletionResources(handle: f.handle), creation = f.creation()
+    _ = try borrow.catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty)
+    _ = try borrow.catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: borrow)
+    let saga = try await f.saga()
+    gate.repository = f.repository
+    do { _ = try await f.prepared.borrowActiveDeletionResources(handle: f.handle); XCTFail("current original proof changed during await") } catch {}
+    do { _ = try await f.prepared.borrowRetainedDeletionResources(saga: saga); XCTFail("only actual backend acceptance permits suspended generation") } catch {}
+    try await f.close()
+  }
+  func testRetainedBorrowRefusesMissingOriginalSagaAndMissingLedgerWithoutCreation() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self), foreign = try await M4ManagedFoundationFixture.make(test: self)
+    let otherSaga = try await foreign.saga()
+    do { _ = try await f.prepared.borrowRetainedDeletionResources(saga: otherSaga); XCTFail("no original Saga/control") } catch {}
+    let saga = try await f.saga()
+    let url = URL(fileURLWithPath: f.handle.ledgerCapsule.root.path), moved = url.appendingPathExtension("original")
+    try FileManager.default.moveItem(at: url, to: moved)
+    do { _ = try await f.prepared.borrowRetainedDeletionResources(saga: saga); XCTFail("missing original ledger") } catch {}
+    XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "retained factory never recreates a missing database")
+    try FileManager.default.moveItem(at: moved, to: url)
+    try await foreign.close(); try await f.close()
+  }
+  func testRetainedBorrowUsesOriginalSagaControlAndSameLiveCacheAfterBackendAcceptance() async throws {
+    let f = try await M4ManagedFoundationFixture.make(test: self)
+    let active = try await f.prepared.borrowActiveDeletionResources(handle: f.handle), creation = f.creation()
+    _ = try active.catalog.reserveManagedDeletion(creation: creation, borrow: active, health: .empty)
+    _ = try active.catalog.markManagedDeletionStarted(requestID: creation.requestID, borrow: active)
+    let saga = try await f.saga()
+    let retainedBefore = try await f.prepared.borrowRetainedDeletionResources(saga: saga)
+    XCTAssertTrue(retainedBefore.ledger === active.ledger)
+    let receipt = try M4ManagedFoundationFixture.signed(key: f.key, trust: f.trust, requestID: saga.intent.requestID, digest: saga.intent.digest, operation: .deleteAccount, result: "deleted")
+    let accepted = try await f.repository.acceptDeletionV4(requestID: saga.intent.requestID, receipt: receipt, expectedRevision: saga.revision)
+    do { _ = try await f.prepared.borrowActiveDeletionResources(handle: f.handle); XCTFail("suspended original active proof") } catch {}
+    let retained = try await f.prepared.borrowRetainedDeletionResources(saga: accepted)
+    XCTAssertTrue(retained.catalog === active.catalog); XCTAssertTrue(retained.ledger === active.ledger); try retained.verify()
+    var changed = accepted; changed.revision += 1
+    do { _ = try await f.prepared.borrowRetainedDeletionResources(saga: changed); XCTFail("caller DTO is not original Store") } catch {}
+    try await f.prepared.close()
+    let reopened = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }
+    XCTAssertThrowsError(try reopened.prepareManagedResources(), "existing frozen plan blocks cold physical publication; no fresh admission")
+    let ledgerURL = URL(fileURLWithPath: active.ledgerCapsule.root.path), anchor = try M4CatalogIO.anchor(ledgerURL)
+    do { _ = try await reopened.borrowRetainedDeletionResources(saga: accepted); XCTFail("cold cache cannot open a replacement actor") } catch {}
+    XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(ledgerURL)), try M4CatalogIO.encode(anchor))
+    try await reopened.close(); try FileManager.default.removeItem(at: f.root)
+  }
+}
+#endif
