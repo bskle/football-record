@@ -165,6 +165,17 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
     try original(expected, at: url); try privateFile(url)
     var st = stat(); guard lstat(url.path, &st) == 0, st.st_size == 0, st.st_nlink == 1 else { throw M4CatalogError.identityChanged }
   }
+  private func rejectSidecarsForUninitializedBusiness(_ url: URL) throws {
+    var main = stat()
+    guard lstat(url.path, &main) == 0 else { throw M4CatalogError.identityChanged }
+    // Our reserved zero-byte main has never owned SQLite recovery files. Leave
+    // unknown evidence intact; initialized databases retain normal WAL recovery.
+    guard main.st_size == 0 else { return }
+    for suffix in ["-wal", "-shm", "-journal"] {
+      var sidecar = stat()
+      guard lstat(url.path + suffix, &sidecar) == -1, errno == ENOENT else { throw M4CatalogError.unknownControl }
+    }
+  }
   private func publishResourceDirectory(crashHook: ((M4ResourceCrashPoint) throws -> Void)?) throws {
     let current = try state(), actual = try resourceLocation(), target = URL(fileURLWithPath: reservation.directory.path)
     if M4CatalogIO.raw(actual.path, reservation.candidate.path) {
@@ -196,6 +207,7 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
     }
     try original(reservation.businessDatabase, at: target)
     if !current.businessPublished { try requireEmpty(target, original: reservation.businessDatabase) }
+    try rejectSidecarsForUninitializedBusiness(target)
     try M4CatalogIO.syncDirectory(directory); try M4CatalogIO.syncDirectory(target.deletingLastPathComponent())
     try catalog.recordPhysicalPublication(reservation, business: true)
   }
@@ -207,6 +219,7 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
     try requireEmpty(directory.appendingPathComponent("ledger.slot"), original: reservation.ledgerSlot)
     let business = URL(fileURLWithPath: reservation.businessDatabase.path)
     try original(reservation.businessDatabase, at: business); try privateFile(business)
+    try rejectSidecarsForUninitializedBusiness(business)
   }
   func close() throws {
     guard !closed else { return }

@@ -3,6 +3,7 @@ import Darwin
 import XCTest
 import AccountKit
 import MatchSession
+import MatchStore
 @testable import AppIntegration
 
 @MainActor final class M4IdentityBootstrapTests: XCTestCase {
@@ -315,5 +316,105 @@ extension M4IdentityBootstrapTests {
     XCTAssertThrowsError(try prepared.openRepository(), "a failed managed resource path cannot silently use the legacy fixture opening")
     XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
     try await prepared.close()
+  }
+}
+
+
+extension M4IdentityBootstrapTests {
+  private func unrelatedSQLiteSidecars() async throws -> (Data, Data) {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("m4-foreign-wal-" + UUID().uuidString)
+    let foreign = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "foreign-wal")
+    try await foreign.setAnalyticsEnabledV4(false)
+    let path = await foreign.databaseURL
+    let wal = try Data(contentsOf: URL(fileURLWithPath: path.path + "-wal")), shm = try Data(contentsOf: URL(fileURLWithPath: path.path + "-shm"))
+    XCTAssertFalse(wal.isEmpty); XCTAssertFalse(shm.isEmpty)
+    try await foreign.close()
+    return (wal, shm)
+  }
+  private func assertPreservedSidecar(_ url: URL, inode: UInt64, bytes: Data, file: StaticString = #filePath, line: UInt = #line) throws {
+    var info = stat()
+    guard lstat(url.path, &info) == 0 else { XCTFail("unowned sidecar was removed by SQLite", file: file, line: line); return }
+    XCTAssertEqual(info.st_ino, inode, file: file, line: line)
+    XCTAssertEqual(try Data(contentsOf: url), bytes, file: file, line: line)
+  }
+  func testManagedUninitializedMainRejectsUnownedSidecarsBeforeSQLiteRecovery() async throws {
+    let (wal, shm) = try await unrelatedSQLiteSidecars()
+    // The WAL/SHM bytes come from a different real SQLite. The journal case is
+    // explicitly unrelated bytes under that recognized sidecar name.
+    for suffixes in [["-wal"], ["-shm"], ["-wal", "-shm"], ["-journal"]] {
+      let (root, control) = location(), namespace = "managed-foreign-sidecars"
+      let first = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+      XCTAssertThrowsError(try first.prepareManagedResources { if $0 == .afterBusinessRename { throw M4BootstrapError.storageUnavailable } })
+      let main = first.seed.businessDatabaseURL
+      try await first.close(); XCTAssertEqual(try Data(contentsOf: main), Data())
+      var originalMain = stat(); XCTAssertEqual(lstat(main.path, &originalMain), 0)
+      var originals: [(URL, UInt64, Data)] = []
+      for suffix in suffixes {
+        let file = URL(fileURLWithPath: main.path + suffix), bytes = suffix == "-shm" ? shm : wal
+        try bytes.write(to: file, options: .withoutOverwriting)
+        var info = stat(); XCTAssertEqual(lstat(file.path, &info), 0); originals.append((file, info.st_ino, bytes))
+      }
+      let next = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+      var reachedSQLiteConstruction = false
+      do {
+        try next.prepareManagedResources(); reachedSQLiteConstruction = true
+        _ = try next.openRepository()
+      } catch {}
+      XCTAssertFalse(reachedSQLiteConstruction, "the uninitialized main must reject foreign sidecars before sqlite3_open")
+      try? await next.close()
+      XCTAssertEqual(try Data(contentsOf: main), Data(), "foreign WAL must not initialize the original zero-byte main")
+      var finalMain = stat(); XCTAssertEqual(lstat(main.path, &finalMain), 0); XCTAssertEqual(finalMain.st_ino, originalMain.st_ino)
+      for (file, inode, bytes) in originals { try assertPreservedSidecar(file, inode: inode, bytes: bytes) }
+    }
+  }
+  func testManagedPublishedZeroByteMainRechecksSidecarsImmediatelyBeforeFirstOpen() async throws {
+    let (wal, _) = try await unrelatedSQLiteSidecars(), (root, control) = location()
+    let prepared = try await M4IdentityBootstrap.prepare(root: root, namespace: "managed-late-sidecar", controlDirectory: control) { try self.material($0) }
+    try prepared.prepareManagedResources()
+    let main = prepared.seed.businessDatabaseURL, sidecar = URL(fileURLWithPath: main.path + "-wal")
+    try wal.write(to: sidecar, options: .withoutOverwriting)
+    var original = stat(); XCTAssertEqual(lstat(sidecar.path, &original), 0)
+    var originalMain = stat(); XCTAssertEqual(lstat(main.path, &originalMain), 0)
+    XCTAssertThrowsError(try prepared.openRepository(), "a late unowned WAL cannot bypass the pre-SQL check")
+    try? await prepared.close()
+    XCTAssertEqual(try Data(contentsOf: main), Data()); try assertPreservedSidecar(sidecar, inode: original.st_ino, bytes: wal)
+    var finalMain = stat(); XCTAssertEqual(lstat(main.path, &finalMain), 0); XCTAssertEqual(finalMain.st_ino, originalMain.st_ino)
+  }
+  func testManagedInitializedDatabaseReopensItsOwnUncheckpointedWAL() async throws {
+    #if os(macOS)
+    let variable = "NATIVE026_MANAGED_WAL_CHILD_ROOT"
+    if let path = ProcessInfo.processInfo.environment[variable] {
+      let root = URL(fileURLWithPath: path)
+      let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: "managed-original-wal", controlDirectory: root.appendingPathComponent("retained")) { try self.material($0) }
+      try prepared.prepareManagedResources()
+      let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["fixture": prepared.material.signer.publicKey])
+      let db = try prepared.openRepository(authorityTrust: trust)
+      // Direct public Store binding is only a fixture for WAL recovery; it is
+      // not authentication/signed account authority evidence.
+      try await db.bindAccountV4(AccountBindingV4(accountID: "wal-original-account", cloudSpaceID: "wal-original-cloud", deviceID: prepared.seed.installationID, activationEpoch: 1, role: .phone, environment: .development))
+      guard FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path + "-wal") else { XCTFail("actual WAL required"); return }
+      _exit(86) // No SQLite close/checkpoint; the OS releases the original lease.
+    }
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("m4-original-wal-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let child = Process(); child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    child.arguments = ["xctest", "-XCTest", "AppIntegrationTests.M4IdentityBootstrapTests/testManagedInitializedDatabaseReopensItsOwnUncheckpointedWAL", Bundle(for: Self.self).bundleURL.path]
+    var environment = ProcessInfo.processInfo.environment; environment[variable] = root.path; child.environment = environment
+    let log = root.appendingPathComponent("child.log"); XCTAssertTrue(FileManager.default.createFile(atPath: log.path, contents: nil))
+    let output = try FileHandle(forWritingTo: log); child.standardOutput = output; child.standardError = output
+    try child.run(); child.waitUntilExit(); try output.close()
+    XCTAssertEqual(child.terminationReason, .exit); XCTAssertEqual(child.terminationStatus, 86)
+    let main = root.appendingPathComponent("business/managed-original-wal/matches.sqlite"), wal = URL(fileURLWithPath: main.path + "-wal")
+    var before = stat(); XCTAssertEqual(lstat(main.path, &before), 0); XCTAssertGreaterThan(before.st_size, 0)
+    XCTAssertGreaterThan(try Data(contentsOf: wal).count, 0)
+    let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: "managed-original-wal", controlDirectory: root.appendingPathComponent("retained")) { try self.material($0) }
+    try prepared.prepareManagedResources()
+    let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["fixture": prepared.material.signer.publicKey])
+    let db = try prepared.openRepository(authorityTrust: trust), binding = try await db.accountBindingV4()
+    XCTAssertEqual(binding?.accountID, "wal-original-account")
+    var after = stat(); XCTAssertEqual(lstat(main.path, &after), 0); XCTAssertEqual(after.st_ino, before.st_ino)
+    print("managed-original-wal-child exit=86 root=\(root.path)")
+    try await prepared.close()
+    #endif
   }
 }
