@@ -29,7 +29,7 @@ export function createHTTPServer({authority,appleVerifier,deviceAuth,logger=()=>
     requestID=safeID(body?.requestID);[operation]=route;validatePayload(operation,body);
    }
    let result,method=route?.[1];
-   if(['challenge','authApple','authRecover'].includes(operation))result=await deviceAuth[method](body);
+   if(['challenge','authApple','authRecover','deleteControlChallenge','deleteControlAuthentication','deleteControlRecover'].includes(operation))result=await deviceAuth[method](body);
    else if(operation==='deleteStatus')result=authority.deleteStatus(body);
    else{
     let proof;

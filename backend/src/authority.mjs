@@ -1,3 +1,4 @@
+import {assertDeletionControlPurpose} from './deletion-reauth.mjs';
 import {isVerifiedApple} from './apple-verifier.mjs';
 import {validatePayload} from './codec.mjs';
 import {installLifecycle} from './lifecycle.mjs';
@@ -24,7 +25,7 @@ export function createAuthority(options) {
     if(prior){if(prior.operation!==operation||prior.request_digest!==sha256(canonicalJSON(r)))fail('idempotencyConflict');return JSON.parse(Buffer.from(prior.result));}
   }
   function persist(ctx,r,op,result){const bytes=Buffer.from(canonicalJSON(result));db.prepare('INSERT INTO requests VALUES(?,?,?,?,?)').run(ctx.accountID,r.requestID,op,sha256(canonicalJSON(r)),bytes);return JSON.parse(bytes);}
-  function write(ctx,r,op,body,{active=true}={}){validatePayload(op,r);return transaction(db,config,()=>{const auth=validate(ctx,{active}); const old=stored(ctx,r,op);if(old)return old;return persist(ctx,r,op,body(auth));});}
+  function write(ctx,r,op,body,{active=true}={}){validatePayload(op,r);return transaction(db,config,()=>{const auth=validate(ctx,{active});assertDeletionControlPurpose(state,ctx,op,r); const old=stored(ctx,r,op);if(old)return old;return persist(ctx,r,op,body(auth));});}
   function acquire(ctx,r){return write(ctx,r,'acquire',({a})=>{
     if(a.migration_id||db.prepare('SELECT 1 FROM deletions WHERE account_id=?').get(ctx.accountID))fail('migrationBlocked');
     if(r.activationEpoch!==ctx.activationEpoch)fail('activationMismatch',403);
@@ -49,7 +50,7 @@ export function createAuthority(options) {
     return makeReceipt(config,ctx,r,'terminate',result,lock);
   });}
   function liveStatus(ctx,r){validatePayload('liveStatus',r);return transaction(db,config,()=>{
-    const {a}=validate(ctx);if(ctx.deviceID!==r.recordingDeviceID&&ctx.deviceID!==a.active_phone_id)fail('activationMismatch',403);
+    const {a}=validate(ctx);assertDeletionControlPurpose(state,ctx,'liveStatus',r);if(ctx.deviceID!==r.recordingDeviceID&&ctx.deviceID!==a.active_phone_id)fail('activationMismatch',403);
     const raw=db.prepare('SELECT result,operation FROM requests WHERE account_id=? AND request_id=?').get(ctx.accountID,r.acquireRequestID);
     if(!raw||raw.operation!=='acquire')fail('lockMismatch');
     const receipt=JSON.parse(Buffer.from(raw.result)).body;
@@ -59,7 +60,7 @@ export function createAuthority(options) {
     const held=matches&&lock?.lock_id===r.lockID&&lock.match_id===r.matchID&&lock.recorder_id===r.recordingDeviceID&&lock.activation_epoch===r.activationEpoch;
     return signedBody(config.receiptPrivateKey,{...r,accountID:ctx.accountID,receiptID:receipt.receiptID,environment:config.environment,keyID:config.receiptKeyID,requestDigest:sha256(canonicalJSON(r)),status:held?'held':matches&&terminal?'terminal':'mismatch',observedAt:config.clock.now(),expiresAt:config.clock.now()+60},'football-record.authority.live-lock.v1');
   });}
-  function requestBytes(ctx,id){return transaction(db,config,()=>{validate(ctx,{active:false});const row=db.prepare('SELECT result FROM requests WHERE account_id=? AND request_id=?').get(ctx.accountID,id);if(!row){if(db.prepare('SELECT 1 FROM deletions WHERE account_id=? AND delete_request_id=?').get(ctx.accountID,id))fail('unavailable',503,true);fail('notFound',404);}return Buffer.from(row.result);});}
+  function requestBytes(ctx,id){return transaction(db,config,()=>{validate(ctx,{active:false});assertDeletionControlPurpose(state,ctx,'requestQuery',{requestID:id});const row=db.prepare('SELECT result FROM requests WHERE account_id=? AND request_id=?').get(ctx.accountID,id);if(!row){if(db.prepare('SELECT 1 FROM deletions WHERE account_id=? AND delete_request_id=?').get(ctx.accountID,id))fail('unavailable',503,true);fail('notFound',404);}return Buffer.from(row.result);});}
   const transientReauthCodes=new Map();
   const disposeReauthMaterial=material=>{
     if(material&&typeof material==='object'){material.authorizationCode='';material.expectedApple=undefined;material.binding=undefined;material.expiresAt=0;}

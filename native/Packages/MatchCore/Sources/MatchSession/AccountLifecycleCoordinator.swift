@@ -18,12 +18,14 @@ extension MatchSession:AccountLifecycleCoordinator {
         await acquire("_authority-account");defer {release("_authority-account")};try await repository.resolveAuthAttemptV4(requestID:requestID,resolution:resolution)
     }
     public func saveAuthAttempt(_ attempt:AuthAttemptV4,expectedIdentityGeneration:Int64) async throws {
-        try await validateEnvironment(allowSuspendedRead:true);guard let repository=store as? any AccountLifecycleRepository else {throw AuthorityError.unavailable}
-        await acquire("_authority-account");defer {release("_authority-account")};try await repository.saveAuthAttemptV4(attempt,expectedIdentityGeneration:expectedIdentityGeneration)
+        try beginBusiness();defer {endBusiness()}
+        try await validateEnvironment(allowSuspendedRead:true);try requireBusinessActive();guard let repository=store as? any AccountLifecycleRepository else {throw AuthorityError.unavailable}
+        await acquire("_authority-account");defer {release("_authority-account")};try requireBusinessActive();try await repository.saveAuthAttemptV4(attempt,expectedIdentityGeneration:expectedIdentityGeneration)
     }
     public func acceptAuthentication(attempt:AuthAttemptV4,binding:AccountBindingV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64) async throws {
-        try await validateEnvironment(allowSuspendedRead:true);guard let repository=store as? any AccountLifecycleRepository else {throw AuthorityError.unavailable}
-        await acquire("_authority-account");defer {release("_authority-account")};try await repository.acceptAuthenticationV4(attempt:attempt,binding:binding,receipt:receipt,expectedIdentityGeneration:expectedIdentityGeneration)
+        try beginBusiness();defer {endBusiness()}
+        try await validateEnvironment(allowSuspendedRead:true);try requireBusinessActive();guard let repository=store as? any AccountLifecycleRepository else {throw AuthorityError.unavailable}
+        await acquire("_authority-account");defer {release("_authority-account")};try requireBusinessActive();try await repository.acceptAuthenticationV4(attempt:attempt,binding:binding,receipt:receipt,expectedIdentityGeneration:expectedIdentityGeneration)
     }
 }
 extension SQLiteSessionRepository:AccountLifecycleRepository {

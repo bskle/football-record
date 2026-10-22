@@ -1,7 +1,209 @@
 import Foundation
 import MatchCore
 
+/// Point-in-time capture projection, not a persisted deletion authorization.
+public struct CaptureInventoryMatchV4: Sendable {
+    public let binding: CaptureBinding
+    public let captureRevisions: [CaptureRevision]
+    public let captureOperations: [CaptureOperationRecord]
+}
+
 extension MatchStore {
+    /// All original capture facts in one SQL snapshot. Caller must first drain every owned writer.
+    /// No diagnostic, receipt or canonical row is written when validation fails.
+    public func captureInventoryV4() throws -> [CaptureInventoryMatchV4] {
+        do { return try db.transaction { try captureInventoryLockedV4() } }
+        catch let failure as Quarantined { throw failure.error }
+    }
+    private struct InventoryIdentity {
+        let kind: String
+        let match: Data
+        let raw: Data
+    }
+    private struct InventoryHistoryKey: Hashable { let operation: Data; let ordinal: Int64 }
+    private struct InventoryHistory { let command: Data; let raw: Data }
+    private func inventoryTextV4(_ text: SQLValue, raw: SQLValue, table: String) throws -> String {
+        guard let value = text.string, let bytes = raw.data, bytes == Data(value.utf8),
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw StoreError.corruptPayload(table: table, key: "inventory-text")
+        }
+        return value
+    }
+    private func inventoryBindingV4(_ value: CaptureBinding, _ parent: CaptureBinding) throws {
+        guard Data(value.matchID.utf8) == Data(parent.matchID.utf8),
+              Data(value.recordingDeviceID.utf8) == Data(parent.recordingDeviceID.utf8) else {
+            throw StoreError.corruptPayload(table: "capture_identities", key: value.matchID)
+        }
+    }
+    private func inventoryDescriptorV4(_ value: MatchDescriptor, parent: MatchDescriptor) throws {
+        let permit = try Canonical.data(value.startPermit), currentPermit = try Canonical.data(parent.startPermit)
+        guard try Canonical.data(value.startIntent) == Canonical.data(parent.startIntent), value.starter == parent.starter,
+              value.startPermit == nil || permit == currentPermit else {
+            throw StoreError.corruptPayload(table: "matches", key: value.matchID)
+        }
+    }
+    private func captureInventoryLockedV4() throws -> [CaptureInventoryMatchV4] {
+        try db.validateLocalErasureLayoutV4()
+        try validateDeletionControlRowsLockedV4()
+        try validateCurrentWatchRegistrationRowsLockedV4()
+        // A rejected positive observation may live only in a diagnostic under an unknown parent.
+        for row in try db.rows("SELECT match_id,code,key,raw,severity,CAST(match_id AS BLOB),CAST(code AS BLOB),CAST(key AS BLOB),CAST(severity AS BLOB) FROM diagnostics") {
+            for (index, raw) in [(0,5),(1,6),(2,7),(4,8)] { _ = try inventoryTextV4(row[index], raw: row[raw], table: "diagnostics") }
+            guard row[3].data != nil, let severity = StoreDiagnosticSeverity(rawValue: row[4].string!) else {
+                throw StoreError.corruptPayload(table: "diagnostics", key: "inventory")
+            }
+            guard severity != .blocking else { throw StoreError.unresolvedDiagnostics }
+        }
+        var descriptors: [Data: MatchDescriptor] = [:]
+        var matches = Set<Data>(), revisions: [Data: (match: Data, raw: Data)] = [:]
+        var operations: [Data: SavedOperation] = [:], identities: [Data: InventoryIdentity] = [:]
+        var histories: [InventoryHistoryKey: InventoryHistory] = [:], result: [CaptureInventoryMatchV4] = []
+        func identity(_ id: String, kind: String, match: Data, raw: Data) throws {
+            let key = Data(id.utf8), item = InventoryIdentity(kind: kind, match: match, raw: raw)
+            if let prior = identities[key] {
+                guard prior.kind == kind, prior.match == match, prior.raw == raw else {
+                    throw StoreError.corruptPayload(table: "capture_identities", key: id)
+                }
+            } else { identities[key] = item }
+        }
+        for row in try db.rows("SELECT match_id,CAST(match_id AS BLOB),descriptor,intent_id,CAST(intent_id AS BLOB) FROM matches") {
+            let id = try inventoryTextV4(row[0], raw: row[1], table: "matches"), key = Data(id.utf8)
+            let intentID = try inventoryTextV4(row[3], raw: row[4], table: "matches")
+            let snapshot = try loadSnapshot(matchID: id), descriptor = snapshot.descriptor
+            guard matches.insert(key).inserted, Data(descriptor.matchID.utf8) == key,
+                  Data(descriptor.startIntent.id.utf8) == Data(intentID.utf8),
+                  row[2].data == (try Canonical.data(descriptor)),
+                  !descriptor.recordingDeviceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !snapshot.diagnostics.contains(where: { $0.severity == .blocking }) else {
+                throw StoreError.corruptPayload(table: "matches", key: id)
+            }
+            descriptors[key] = descriptor
+            let binding = try CaptureBinding(matchID: id, recordingDeviceID: descriptor.recordingDeviceID)
+            let chain = try loadCaptureRevisions(descriptor: descriptor)
+            var previous: Data?
+            for revision in chain {
+                try inventoryBindingV4(revision.binding, binding); try inventoryBindingV4(revision.metadata.binding, binding)
+                let raw = try Canonical.data(revision), revisionKey = Data(revision.id.utf8)
+                guard revision.parentID.map({ Data($0.utf8) }) == previous,
+                      revisions.updateValue((key, raw), forKey: revisionKey) == nil else {
+                    throw StoreError.corruptPayload(table: "capture_revisions", key: revision.id)
+                }
+                previous = revisionKey; try identity(revision.id, kind: "revision", match: key, raw: raw)
+                for segment in revision.metadata.segments {
+                    try inventoryBindingV4(segment.binding, binding)
+                    try identity(segment.id, kind: "segment", match: key, raw: Canonical.data(segment))
+                }
+                for gap in revision.metadata.gaps {
+                    try inventoryBindingV4(gap.binding, binding)
+                    try identity(gap.id, kind: "gap", match: key, raw: Canonical.data(gap))
+                }
+            }
+            let saved = try loadSavedOperations(matchID: id, descriptor: descriptor)
+            try validateAbsentCancellations(saved, descriptor: descriptor)
+            for item in saved {
+                let operation = item.record.operation, opKey = Data(operation.id.utf8), raw = try Canonical.data(operation)
+                try inventoryBindingV4(operation.binding, binding)
+                guard operations.updateValue(item, forKey: opKey) == nil,
+                      item.history.first.map({ Data($0.commandID.utf8) }) == Data(operation.associatedCommandID.utf8),
+                      operation.action != .start || Data(operation.externalToken.utf8) == opKey else {
+                    throw StoreError.corruptPayload(table: "capture_operations", key: operation.id)
+                }
+                try identity(operation.id, kind: "operation", match: key, raw: raw)
+                for (ordinal, history) in item.history.enumerated() {
+                    guard try Canonical.data(history.record.operation) == raw else {
+                        throw StoreError.corruptPayload(table: "capture_operation_history", key: operation.id)
+                    }
+                    if let observed = history.record.observation {
+                        try inventoryBindingV4(observed.binding, binding)
+                        guard Data(observed.operationID.utf8) == opKey,
+                              Data(observed.externalToken.utf8) == Data(operation.externalToken.utf8) else {
+                            throw StoreError.corruptPayload(table: "capture_operation_history", key: operation.id)
+                        }
+                    }
+                    histories[InventoryHistoryKey(operation: opKey, ordinal: Int64(ordinal))] =
+                        InventoryHistory(command: Data(history.commandID.utf8), raw: try Canonical.data(history.record))
+                }
+            }
+            result.append(CaptureInventoryMatchV4(binding: binding, captureRevisions: chain,
+                captureOperations: saved.map(\.record).sorted { Data($0.operation.id.utf8).lexicographicallyPrecedes(Data($1.operation.id.utf8)) }))
+        }
+        // Reverse closure: rows whose parent was never discovered cannot disappear from inventory.
+        for table in ["capture_revisions", "capture_operations"] {
+            var seen = Set<Data>()
+            for row in try db.rows("SELECT id,match_id,CAST(id AS BLOB),CAST(match_id AS BLOB) FROM "+table) {
+                let id = try inventoryTextV4(row[0], raw: row[2], table: table)
+                let match = try inventoryTextV4(row[1], raw: row[3], table: table), key = Data(id.utf8), parent = Data(match.utf8)
+                let expected = table == "capture_revisions" ? revisions[key]?.match : operations[key].map { Data($0.record.operation.binding.matchID.utf8) }
+                guard matches.contains(parent), expected == parent, seen.insert(key).inserted else { throw StoreError.corruptPayload(table: table, key: id) }
+            }
+            let expected = table == "capture_revisions" ? Set(revisions.keys) : Set(operations.keys)
+            guard seen == expected else { throw StoreError.corruptPayload(table: table, key: "inventory-set") }
+        }
+        var seenHistory = Set<InventoryHistoryKey>()
+        for row in try db.rows("SELECT operation_id,ordinal,command_id,record,checksum,CAST(operation_id AS BLOB),CAST(command_id AS BLOB) FROM capture_operation_history") {
+            let op = try inventoryTextV4(row[0], raw: row[5], table: "capture_operation_history")
+            let command = try inventoryTextV4(row[2], raw: row[6], table: "capture_operation_history")
+            guard let ordinal = row[1].number else { throw StoreError.corruptPayload(table: "capture_operation_history", key: op) }
+            let key = InventoryHistoryKey(operation: Data(op.utf8), ordinal: ordinal)
+            guard let expected = histories[key], row[3].data == expected.raw, row[4].string == Canonical.hash(expected.raw),
+                  Data(command.utf8) == expected.command, seenHistory.insert(key).inserted else {
+                throw StoreError.corruptPayload(table: "capture_operation_history", key: op)
+            }
+        }
+        guard seenHistory == Set(histories.keys) else { throw StoreError.corruptPayload(table: "capture_operation_history", key: "inventory-set") }
+        for row in try db.rows("SELECT id,match_id,CAST(id AS BLOB),CAST(match_id AS BLOB) FROM business_outbox") {
+            let id = try inventoryTextV4(row[0], raw: row[2], table: "business_outbox")
+            let match = try inventoryTextV4(row[1], raw: row[3], table: "business_outbox"), parent = Data(match.utf8)
+            let item = try loadBusinessOutbox(id: id)
+            guard matches.contains(parent), Data(item.id.utf8) == Data(id.utf8), Data(item.matchID.utf8) == parent,
+                  Data(item.payload.descriptor.matchID.utf8) == parent else { throw StoreError.corruptPayload(table: "business_outbox", key: id) }
+            try inventoryDescriptorV4(item.payload.descriptor, parent: descriptors[parent]!)
+            _ = try verifyPersistedFacts(descriptor: item.payload.descriptor, events: item.payload.events)
+            for revision in item.payload.captureRevisions {
+                guard revisions[Data(revision.id.utf8)]?.raw == (try Canonical.data(revision)) else { throw StoreError.corruptPayload(table: "capture_revisions", key: revision.id) }
+            }
+            try identity(id, kind: "outbox", match: parent, raw: Canonical.data(item))
+        }
+        var seenRegistry = Set<Data>()
+        for row in try db.rows("SELECT id,kind,match_id,payload,checksum,CAST(id AS BLOB),CAST(kind AS BLOB),CAST(match_id AS BLOB) FROM capture_identities") {
+            let id = try inventoryTextV4(row[0], raw: row[5], table: "capture_identities")
+            let kind = try inventoryTextV4(row[1], raw: row[6], table: "capture_identities")
+            let match = try inventoryTextV4(row[2], raw: row[7], table: "capture_identities"), key = Data(id.utf8)
+            guard let expected = identities[key], expected.kind == kind, expected.match == Data(match.utf8),
+                  row[3].data == expected.raw, row[4].string == Canonical.hash(expected.raw), seenRegistry.insert(key).inserted else {
+                throw StoreError.corruptPayload(table: "capture_identities", key: id)
+            }
+        }
+        guard seenRegistry == Set(identities.keys) else { throw StoreError.corruptPayload(table: "capture_identities", key: "inventory-set") }
+        // Original immutable requests must still find their acknowledged capture facts, even if
+        // a damaged file lost both a canonical row and its registry entry.
+        for row in try db.rows("SELECT command_id,request,request_hash,receipt,match_id,CAST(command_id AS BLOB),CAST(match_id AS BLOB) FROM commands_v2") {
+            let id = try inventoryTextV4(row[0], raw: row[5], table: "commands_v2")
+            let match = try inventoryTextV4(row[4], raw: row[6], table: "commands_v2"), parent = Data(match.utf8)
+            let original = try verifiedCommandV2(commandID: id, row: Array(row[1...4])).request
+            guard matches.contains(parent), Data(original.commandID.utf8) == Data(id.utf8), Data(original.descriptor.matchID.utf8) == parent else {
+                throw StoreError.corruptPayload(table: "commands_v2", key: id)
+            }
+            try inventoryDescriptorV4(original.descriptor, parent: descriptors[parent]!)
+            for revision in original.captureRevisions {
+                guard revisions[Data(revision.id.utf8)]?.raw == (try Canonical.data(revision)) else { throw StoreError.corruptPayload(table: "capture_revisions", key: revision.id) }
+            }
+            for operation in original.newCaptureOperations {
+                guard let saved = operations[Data(operation.id.utf8)], let first = saved.history.first,
+                      try Canonical.data(saved.record.operation) == Canonical.data(operation), Data(first.commandID.utf8) == Data(id.utf8) else { throw StoreError.corruptPayload(table: "capture_operations", key: operation.id) }
+            }
+            for update in original.captureOperationUpdates {
+                guard let saved = operations[Data(update.operationID.utf8)],
+                      let index = saved.history.firstIndex(where: { Data($0.commandID.utf8) == Data(id.utf8) }), index > 0,
+                      saved.history[index-1].record.state == update.expectedState, saved.history[index].record.state == update.state,
+                      try Canonical.data(saved.history[index].record.observation) == Canonical.data(update.observation) else {
+                    throw StoreError.corruptPayload(table: "capture_operation_history", key: update.operationID)
+                }
+            }
+        }
+        return result.sorted { Data($0.binding.matchID.utf8).lexicographicallyPrecedes(Data($1.binding.matchID.utf8)) }
+    }
+
     /// Lookup is read-only: a saved request is returned only after its complete receipt is verified.
     public func committedCommandV2(commandID: String) throws -> CommittedCommandV2? {
         var diagnosticMatchID = commandID

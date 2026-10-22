@@ -72,11 +72,14 @@ extension MatchStore {
             guard try identityGenerationV4()==expectedIdentityGeneration,try watchRegistrationAttemptV4(requestID:attempt.requestID)==attempt else {throw AuthorityError.identityChanged}
             try validateWatchParticipantV4(attempt,allowSuspended:true);let verified=try verifyWatchRegistrationV4(attempt,raw:receipt.raw)
             guard verified.body.result == .registered else {throw AuthorityError.intentMismatch}
-            if let first=try watchRegistrationReceiptV4(requestID:attempt.requestID) {guard first==receipt.raw else {throw AuthorityError.conflict}}
+            let first=try watchRegistrationReceiptV4(requestID:attempt.requestID)
+            if let first {guard first==receipt.raw else {throw AuthorityError.conflict}}
+            try validateCurrentWatchRegistrationRowsLockedV4()
             if let b=watchBinding {
                 guard b.role == .watch,!b.suspended,b.accountID==attempt.context.accountID,b.cloudSpaceID==attempt.context.cloudSpaceID,b.deviceID==attempt.payload.watchID,b.activationEpoch==attempt.context.activationEpoch,b.environment==attempt.context.environment else {throw AuthorityError.identityChanged}
                 if let current=try currentBindingV4() {guard current.role == .watch,current.deviceID==b.deviceID else {throw AuthorityError.identityChanged}}
                 try writeV4(b,table:"account_binding_v4",id:"current")
+                if first == nil {try persistCurrentWatchRegistrationV4(attempt:attempt,receipt:verified,binding:b,generation:expectedIdentityGeneration)}
             } else if let b=try currentBindingV4(),b.role == .phone {guard b.deviceID==attempt.context.phoneID,!b.suspended else {throw AuthorityError.identityChanged}}
             try writeV4(receipt.raw,table:"lifecycle_steps_v4",id:"watch-receipt:"+attempt.requestID);try fail(.afterReceipt);try fail(.beforeCommit)
         };if fault == .afterCommit {throw StoreError.responseLost}

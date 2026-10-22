@@ -9,20 +9,23 @@ public protocol WatchRegistrationCoordinator:Sendable {
 }
 extension MatchSession:WatchRegistrationCoordinator {
     public func admitWatchRegistrationContext(_ context:WatchRegistrationContextV4,deviceID:String,publicKey:String) async throws->Int64 {
-        try await validateEnvironment(allowSuspendedRead:true);guard let repository=store as? any WatchRegistrationRepository else {throw AuthorityError.unavailable}
-        await acquire("_authority-account");defer {release("_authority-account")};return try await repository.admitWatchRegistrationContextV4(context,deviceID:deviceID,publicKey:publicKey)
+        try beginBusiness();defer {endBusiness()}
+        try await validateEnvironment(allowSuspendedRead:true);try requireBusinessActive();guard let repository=store as? any WatchRegistrationRepository else {throw AuthorityError.unavailable}
+        await acquire("_authority-account");defer {release("_authority-account")};try requireBusinessActive();return try await repository.admitWatchRegistrationContextV4(context,deviceID:deviceID,publicKey:publicKey)
     }
     public func saveWatchRegistrationAttempt(_ attempt:WatchRegistrationAttemptV4,expectedIdentityGeneration:Int64) async throws {
-        try await validateEnvironment(allowSuspendedRead:true);guard let repository=store as? any WatchRegistrationRepository else {throw AuthorityError.unavailable}
-        await acquire("_authority-account");defer {release("_authority-account")};try await repository.saveWatchRegistrationAttemptV4(attempt,expectedIdentityGeneration:expectedIdentityGeneration)
+        try beginBusiness();defer {endBusiness()}
+        try await validateEnvironment(allowSuspendedRead:true);try requireBusinessActive();guard let repository=store as? any WatchRegistrationRepository else {throw AuthorityError.unavailable}
+        await acquire("_authority-account");defer {release("_authority-account")};try requireBusinessActive();try await repository.saveWatchRegistrationAttemptV4(attempt,expectedIdentityGeneration:expectedIdentityGeneration)
     }
     public func closeWatchRegistration(_ attempt:WatchRegistrationAttemptV4,receipt:VerifiedAuthorityReceiptV1,expectedIdentityGeneration:Int64) async throws {
         try await validateEnvironment(allowSuspendedRead:true);guard let repository=store as? any WatchRegistrationRepository else {throw AuthorityError.unavailable}
         await acquire("_authority-account");defer {release("_authority-account")};try await repository.closeWatchRegistrationV4(attempt,receipt:receipt,expectedIdentityGeneration:expectedIdentityGeneration)
     }
     public func acceptWatchRegistration(_ attempt:WatchRegistrationAttemptV4,receipt:VerifiedAuthorityReceiptV1,watchBinding:AccountBindingV4?,expectedIdentityGeneration:Int64) async throws {
-        try await validateEnvironment(allowSuspendedRead:true);guard let repository=store as? any WatchRegistrationRepository else {throw AuthorityError.unavailable}
-        await acquire("_authority-account");defer {release("_authority-account")};try await repository.acceptWatchRegistrationV4(attempt,receipt:receipt,watchBinding:watchBinding,expectedIdentityGeneration:expectedIdentityGeneration)
+        try beginBusiness();defer {endBusiness()}
+        try await validateEnvironment(allowSuspendedRead:true);try requireBusinessActive();guard let repository=store as? any WatchRegistrationRepository else {throw AuthorityError.unavailable}
+        await acquire("_authority-account");defer {release("_authority-account")};try requireBusinessActive();try await repository.acceptWatchRegistrationV4(attempt,receipt:receipt,watchBinding:watchBinding,expectedIdentityGeneration:expectedIdentityGeneration)
     }
 }
 extension SQLiteSessionRepository:WatchRegistrationRepository {

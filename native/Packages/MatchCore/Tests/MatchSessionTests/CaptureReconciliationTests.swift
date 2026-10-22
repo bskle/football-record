@@ -293,7 +293,7 @@ final class CaptureReconciliationTests: XCTestCase, @unchecked Sendable {
     XCTAssertEqual(calls.map(\.action), [.start, .pause])
   }
 
-  func testEndCommittedDuringFailedDriverProjectionStillWakesReconciliation() async throws {
+  func testEndCommittedDuringFailedDriverProjectionFlushesOriginalAndFinishes() async throws {
     let h = try Harness()
     await h.gateway.configure(suspend: true)
     await h.repo.failNextObservation("before")
@@ -307,14 +307,17 @@ final class CaptureReconciliationTests: XCTestCase, @unchecked Sendable {
     let ended = try await h.session.execute(h.session.prepare(.end, matchID: r.matchID))
     XCTAssertEqual(ended.snapshot.replay.state, .endedPendingSync)
     await h.repo.releaseTail()
-    try await eventually("end committed during failed driver's projection must wake reconciliation")
-    { await h.gateway.reconciled.count >= 1 }
-    try await eventually("original token must finish after reconciliation") {
+    try await eventually("end committed during failed driver's projection must flush original and finish") {
       await h.gateway.performed.count >= 2
     }
     let calls = await h.gateway.performed
     XCTAssertEqual(calls.map(\.action), [.start, .finish])
     XCTAssertEqual(Set(calls.map(\.externalToken)).count, 1)
+    try await h.waitCaptureSettled(r.matchID)
+    let saved = try await h.repo.snapshotV2(matchID: r.matchID)
+    XCTAssertEqual(saved.captureOperations.first?.observation?.outcome, .running)
+    let reconciles = await h.gateway.reconciled.count
+    XCTAssertEqual(reconciles, 0, "An already returned A must be saved through SQL, not replaced by another SDK result")
   }
 
   func testLinkedRecoveryFailureAtomicallyKeepsRealWorkoutGapAndReplacementToken() async throws {

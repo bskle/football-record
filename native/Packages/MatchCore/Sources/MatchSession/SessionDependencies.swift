@@ -87,6 +87,7 @@ public actor SQLiteSessionRepository: SessionRepository {
   }
   public func databaseNamespace() async -> String { namespace }
   public func matchIDs() async throws -> [String] { try await store.matchIDs() }
+  public func captureInventoryV4() async throws -> [CaptureInventoryMatchV4] { try await store.captureInventoryV4() }
   public func snapshotV2(matchID: String) async throws -> StoreSnapshotV2 {
     try await store.snapshotV2(matchID: matchID)
   }
@@ -168,4 +169,10 @@ extension SQLiteSessionRepository: AuthorityRepository {
   public func recordLiveLockV4(_ proof: VerifiedLiveLockV1, now: Date) async throws { try await store.recordLiveLockV4(proof,now:now) }
   public func authorityStateV4(matchID: String, now: Date) async throws -> AuthorityStateV4 { try await store.authorityStateV4(matchID:matchID,now:now) }
   public func validateAuthorityStartV4(_ intent: StartIntent, now: Date) async throws { try await store.validateAuthorityStartV4(intent,now:now) }
+}
+
+extension SQLiteSessionRepository {
+  public func validateLocalBusinessErasedV4(requestID: String, requestDigest: String, scope: CloudScopeV1) async throws -> LocalBusinessErasureWitnessV4 {
+    try await store.validateLocalBusinessErasedV4(requestID: requestID, requestDigest: requestDigest, scope: scope)
+  }
 }
