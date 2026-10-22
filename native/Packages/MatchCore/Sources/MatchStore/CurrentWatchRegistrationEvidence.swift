@@ -62,3 +62,77 @@ extension MatchStore {
         try writeV4(marker, table: "lifecycle_steps_v4", id: "watch-current-v1")
     }
 }
+
+public protocol CurrentWatchRegistrationEvidenceReadingV4: Sendable {
+    func currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: Int64) async throws -> VerifiedLocalWatchRegistrationEvidenceV4?
+}
+
+/// Local accepted-registration provenance only; never live credentials or recording admission.
+public struct VerifiedLocalWatchRegistrationEvidenceV4: Sendable {
+    public let binding: AccountBindingV4
+    public let identityGeneration: Int64
+    public let currentWatchRequestID: String
+    public let acceptedGeneration: Int64
+    public let attempt: WatchRegistrationAttemptV4
+    public let admittedContext: WatchRegistrationContextV4
+    public let watchDeviceKeyID: String
+    public let receipt: VerifiedAuthorityReceiptV1
+    public let latestMigration: AuthorityMigrationV1?
+    fileprivate init(binding: AccountBindingV4, identityGeneration: Int64, currentWatchRequestID: String, acceptedGeneration: Int64, attempt: WatchRegistrationAttemptV4, admittedContext: WatchRegistrationContextV4, watchDeviceKeyID: String, receipt: VerifiedAuthorityReceiptV1, latestMigration: AuthorityMigrationV1?) {
+        self.binding = binding; self.identityGeneration = identityGeneration
+        self.currentWatchRequestID = currentWatchRequestID; self.acceptedGeneration = acceptedGeneration
+        self.attempt = attempt; self.admittedContext = admittedContext; self.watchDeviceKeyID = watchDeviceKeyID
+        self.receipt = receipt; self.latestMigration = latestMigration
+    }
+}
+
+extension MatchStore: CurrentWatchRegistrationEvidenceReadingV4 {
+    public func currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: Int64) throws -> VerifiedLocalWatchRegistrationEvidenceV4? {
+        try checkedCurrentWatchRegistrationEvidenceV4(expectedIdentityGeneration: expectedIdentityGeneration)
+    }
+
+    // No await crosses this snapshot. The internal hook enables real second-connection tests.
+    func checkedCurrentWatchRegistrationEvidenceV4(expectedIdentityGeneration: Int64, afterSnapshot: (@Sendable () throws -> Void)? = nil) throws -> VerifiedLocalWatchRegistrationEvidenceV4? {
+        guard expectedIdentityGeneration >= 0, expectedIdentityGeneration <= 9_007_199_254_740_991 else { throw AuthorityError.invalidWire }
+        try db.execute("BEGIN DEFERRED")
+        do {
+            try watchEvidenceBudgetV4(id: "identity-generation")
+            let generation = try identityGenerationV4()
+            try afterSnapshot?()
+            guard generation == expectedIdentityGeneration else { throw AuthorityError.identityChanged }
+            let result = try currentWatchRegistrationEvidenceLockedV4(generation: generation)
+            try db.execute("COMMIT")
+            return result
+        } catch {
+            let original = error
+            try db.execute("ROLLBACK")
+            throw original
+        }
+    }
+
+    private func currentWatchRegistrationEvidenceLockedV4(generation: Int64) throws -> VerifiedLocalWatchRegistrationEvidenceV4? {
+        try watchEvidenceBudgetV4(table: "account_binding_v4", id: "current")
+        let binding = try currentBindingV4()
+        guard let facts = try currentWatchRegistrationFactsLockedV4() else {
+            let history = try db.rows("SELECT 1 FROM lifecycle_steps_v4 WHERE id GLOB 'watch-attempt:*' OR id GLOB 'watch-receipt:*' OR id GLOB 'watch-admission:*' LIMIT 1").first != nil
+            guard binding?.role != .watch, !history else { throw AuthorityError.unavailable }
+            return nil
+        }
+        let marker = facts.marker
+        guard let binding, !binding.suspended, binding.role == .watch,
+              generation == marker.acceptedGeneration,
+              try Canonical.data(binding) == Canonical.data(marker.acceptedBinding),
+              let admission = try watchEvidenceValueV4(StoredWatchAdmission.self, id: "watch-admission:" + facts.attempt.payload.watchID),
+              try Canonical.data(admission.context) == Canonical.data(marker.admittedContext),
+              admission.publicKey.utf8.elementsEqual(marker.watchPublicKey.utf8) else { throw AuthorityError.identityChanged }
+        guard let trust = authorityTrust, trust.environment == binding.environment,
+              facts.attempt.context.environment == binding.environment else { throw AuthorityError.unavailable }
+        try watchEvidenceBudgetV4(id: "migration-latest")
+        let migration = try latestMigrationV4()
+        guard migration == nil || migration?.state == "activated", try !deletionBlocksBusinessV4() else { throw AuthorityError.identityChanged }
+        return VerifiedLocalWatchRegistrationEvidenceV4(binding: binding, identityGeneration: generation,
+            currentWatchRequestID: marker.requestID, acceptedGeneration: marker.acceptedGeneration,
+            attempt: facts.attempt, admittedContext: marker.admittedContext, watchDeviceKeyID: marker.watchDeviceKeyID,
+            receipt: facts.receipt, latestMigration: migration)
+    }
+}
