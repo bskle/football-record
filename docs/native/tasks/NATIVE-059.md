@@ -1,35 +1,28 @@
 # NATIVE-059：Watch setup 的原只读快照证据
 
-状态：**仅计划修订阶段**。旧计划`de7b9c357e789825be04429c28dc3dbdb830365f`因R59-P1未准实现；本次仅修订三文档，移除mandatory Phonecontext输入并改为本地preflight先行。产品/测试尚未写入；等待root与第二位非作者对新的exact planning commit重审。用户已选子代理开发，不另问执行模式；双审与root放行之前不开始实现。
+状态：source `42fb3b1a688a7efa7ec0854b4f0fe4090a5ef21b` 已获 root 与 `/root/m4_simulator_diagnosis` 两位非作者 whole-source PASS，无未解决 finding。root 已放行仅任务/验证两卡元数据收尾；作者提交后停写，exact final 双审及 held026 接入仍由 root 安排，尚未完成消费修复或合并。
 
 - 唯一作者 `/root/m4_watch_setup_evidence`；original verified dev base `2cab4640ee3a375da39fdabf0f5a317600b0c263`。
-- root 已普通 no-ff 接收 accepted055 final `b355b5c6e93fd811cba959d5257836de1d47bca5`；effective actual base `1a72c21b5b44b6f436006a4d50273c0e27dc22fb`，全树等055 final，初始branch/HEAD/clean含ignored已核。
-- 分支 `fix/m4-watch-setup-evidence`；原生工作树 `/Users/liam/.codex/worktrees/m4-watch-setup-evidence/20260830_足球记录`；attachment `01a16211-394f-7a81-9e14-6e2e24f3a1f6`。
-- 唯一接收目标 held026 `test/m4-e2e-integration`，登记测试checkpoint `2bb9842867b10d6bb3013f537dcb2a1df4c592b4`；root接入前重核clean/stopped目标。作者不推进长期分支，不擅自merge依赖。
+- root 普通 no-ff 接收 accepted055 final `b355b5c6e93fd811cba959d5257836de1d47bca5`，effective base `1a72c21b5b44b6f436006a4d50273c0e27dc22fb` 全树同055 final。
+- 分支 `fix/m4-watch-setup-evidence`；原生工作树 `/Users/liam/.codex/worktrees/m4-watch-setup-evidence/20260830_足球记录`；attachment `01a16211-394f-7a81-9e14-6e2e24f3a1f6`，初始与冻结source均clean含ignored。
+- 旧计划 `de7b9c357e789825be04429c28dc3dbdb830365f` 因R59-P1未准实现，修订计划 `519ff83ad145ef54e543375f8b43a9916fcbe663` 已双审PASS并获root实施放行。两计划及其证据分层保留，计划现bytes保持519不改。
+- Store实现/测试提交 `0474aeeb4c150861dedde55e1d12d4e035b5c7d0`，原facade转发/测试source `42fb3b1a688a7efa7ec0854b4f0fe4090a5ef21b`。本次仅两卡收尾；final完整SHA由提交后树外新checkpoint绑定，不在文档自指。
+- 唯一接收目标held026 `test/m4-e2e-integration`；登记原R26-W1测试checkpoint `2bb9842867b10d6bb3013f537dcb2a1df4c592b4`仅为固定参考，root实际接入前重核clean/stopped combined目标。059不入dev/release/main，作者不擅自merge依赖或推进长期分支。
 
-[实施计划](../../superpowers/plans/2026-10-22-m4-watch-setup-evidence.md)定义独立 optional `WatchRegistrationSetupEvidenceReadingV4` 与 factory-only、非Codable `CheckedLocalWatchRegistrationSetupEvidenceV4`。reader仅收expected generation/deviceID/publicKey，不要求Phonecontext或relay；同原Store单BEGIN DEFERRED内核原固定trust、原device/publickey/keyID和实际storedcontext，严格区分empty（admittedContext=nil）与唯一exact admission（admittedContext=原受检完整context）；全lifecycle有界allowlist和38张非lifecycle原表presence检查拒绝全部attempt/receipt/current（包括closed/legacy/partial）、binding、Phone/auth/control/deletion/migration或未知事实。它只准原协议setup，不是055 current proof、credential、permit或ready。
+[实施计划](../../superpowers/plans/2026-10-22-m4-watch-setup-evidence.md)的四个实现/测试路径已交付：新Store `WatchRegistrationSetupEvidence.swift`、原facade `WatchEvidenceReader.swift`、新Store测试 `WatchRegistrationSetupEvidenceTests.swift`、原facade测试 `WatchEvidenceReaderTests.swift`。source相对批准计划仅四路径548+/1-；不改055 current factory、原repository协议/服务/持久化顺序/schema、AccountKit、026/058、Package/lock或共享工程配置。本次元数据只写本卡和[验证卡](../validation/NATIVE-059.md)，四实现路径和计划原bytes保持source。
 
-R26-W1背景：原admission COMMIT先于首次challenge/sign和saveAttempt；firstHTTP503后没有持久注册requestID，055按既有语义正确拒绝纯admission，使026下次入口无法继续。原作者固定真实RED为1项/5断言失败/0unexpected，仅证明旧026缺陷，不是本叶子运行。本任务不改055 factory、原服务/协议/持久化时序或026/058源，不catch055当fresh，不清admission/造marker或placeholder attempt/猜ID/切Phone/回填旧证明。一旦有attempt/unknown仍只能原ID recover。仅显式registerWatch且无绑定/无Watchpending能用此setup能力；不替换全动作055 pre-gate，signIn/无attempt recover不能因此变fresh，Phone pending auth recover和已有Watch pending原IDrecover保留原路径。
+optional `WatchRegistrationSetupEvidenceReadingV4` 仅收expected generation/deviceID/publicKey，由原facade转发原Store。factory-only、非Codable projection区分empty（admittedContext=nil）与唯一原admission（完整受检storedcontext）。同一个同步actor的BEGIN DEFERRED内核原fixedtrust/环境、generation、原device/key、bounded exact lifecycle allowlist及全部38张非lifecycle原表presence零；成功和拒绝均无SQL修复、网络、signer或vault操作。真实原facade、独立identity文件、原MatchSession coordinator、关闭重开和两个真实SQLite连接均有本机测试。
 
-admission实际仅存context/publicKey，deviceID在row key，没有历史generation/challenge/requestID。本projection只能证明当前受检快照，storedcontext不是freshPhone当前观察，不宣称首次准入generation、旧epoch仍有效或历史从未commit。026先本地拒legacy历史，再取freshrelaycontext并与原admission（如有）及fresh独立identity全等；samegen/lifetime复读setup比较原state/optional完整context/key，全部通过才原Service。freshPhonecontext mismatch属于026消费测试，不是Store缺失的expectedcontext保证。本叶子不开放closed/abandoned后的新登记，也不宣称已有受验证的后续fresh流程；只解决未形成attempt的纯setup重试，其余保持原scope、后续另案。原Session/Store无application默认SQL行；PersistentDeviceIdentityProvider写独立identity文件，本reader不读改该文件。原facade+provider+coordinator真实正例纳入后续TDD；未声称026实际make的全部表已在本轮运行核验。
+它只证明当前本地snapshot，不是055 current proof、credential、permit、fresh Phone观察或ready。admission没有历史generation/challenge/requestID；不推断首次generation、旧epoch仍有效或历史从未commit/antirollback，不开放closed/abandoned后的新登记。055对纯admission继续unavailable，原receipt/history getter保留原义。
 
-本轮唯三owned路径：
+[验证卡](../validation/NATIVE-059.md)记实际单次fresh完整Core **381/0/0**（44 Core +249 Store +71 Session +17 Sync），focused **43/0/0** 已含其中，不再相加；最低iOS17/watchOS10 MatchSession（含Store）sim/device四SDK均exit0。实际Xcode27.1 / Swift6.4，iPhoneSDK27.1 / WatchSDK27.0；SDK只证明编译。早期Store scaffold RED2/2/0、typed-error scaffold RED3/4/0、facade RED3/2/0与Role编译诊断分别保留，不声称38个guard各自独立RED。初版runner错误取末个0-test product的原result保留，单独raw审计更正2/2/0。
 
-- `docs/superpowers/plans/2026-10-22-m4-watch-setup-evidence.md`
-- `docs/native/tasks/NATIVE-059.md`
-- `docs/native/validation/NATIVE-059.md`
+source冻结407份实际输入/Git/mode/blob/hash、11个执行层及4984份证据。每层407份实际执行前副本包含完整Core/Fixtures/backend fixture的保守输入superset，执行后逐hash比对零漂移；没有独立after输入副本。runner有before副本及after hash比对记录，tools有before/after。完整source双审仅只读审原日志/证据，没有冒称审阅者重跑。元数据收尾不重复运行矩阵；final与source407项对照为405项原bytes加两卡元数据delta，全部产品/运行源未变，独立final checkpoint记录。
 
-后续仅准四源/测试路径（当前仍禁止写）：
+root与第二位source报告位于E059/reviews/source-review-root-42fb3b1.json、source-review-diagnosis-42fb3b1.json，SHA256分别 `7e73718f9dbee0eb6843eefa30596c8bc2a3bb6511a5d42e20f70db0b9289695`、`ddb58cb0cb544332933a0eae5eb54fb143ad6a584eb18c644dc94d54ff575457`。旧source checkpoint/manifest/log不覆盖。
 
-- `native/Packages/MatchCore/Sources/MatchStore/WatchRegistrationSetupEvidence.swift`（新）
-- `native/Packages/MatchCore/Sources/MatchSession/WatchEvidenceReader.swift`（追加原facade forwarding）
-- `native/Packages/MatchCore/Tests/MatchStoreTests/WatchRegistrationSetupEvidenceTests.swift`（新）
-- `native/Packages/MatchCore/Tests/MatchSessionTests/WatchEvidenceReaderTests.swift`（追加）
+026仍须仅对显式registerWatch且无binding/Watchpending先用本地preflight拒legacy，再fresh独立identity/Phone RPC、原admission全context比对、samegen/lifetime全projection复读，最后原WatchService。Phone pending auth和已有Watch pending的原IDrecover不替换。059尚未消费修复026；其injected503是原AuthorityClient/WatchService处理relay-backed `AuthorityHTTPResponse(status:503)`，不是本叶子Node/socket/真实HTTP端点。后续同owner/051重开GREEN、fresh full Integration和root相关SDK由026另验。
 
-Package/lock、project/scheme/target/capability/entitlements及共享配置不动；不覆盖其他作者改动。055已接收接口为唯一前置；未审依赖不能消费。
+本叶子本机Store/reader与纯文档收尾不需用户接设备；真机不适用该叶子的本地行为验证。未做真实Apple/Keychain/iCloud/CloudKit/Health/WC、账号、签名配对安装、App/UI、部署或协议E2E，不等于整包026/M4；production保持Unavailable，无原生冻结/发布，main/release/tag不动。
 
-[验证说明](../validation/NATIVE-059.md)保留原de7层402份own-base实际输入副本/Git/hash、固定四份026证据、checkpoint不覆盖；本修订在E/NATIVE-059/planning-v2直接冻结编辑前de7全405份输入及R59-P1报告，另存修订完整/增量diff、链接/类型一致性与新checkpoint。原402非本任务输入不变。已执行仅静态检查；**未运行Swift、Node、HTTP、SQL、测试、构建、设备或模拟器探针**。本轮真机不适用（文档规划）；后续预期真实Store/facade runtime RED/GREEN、fresh full Core、四最低iOS17/watch10 MatchSession SDK，全部尚未执行，不预填测试数量。
-
-计划双审后由root放行唯一作者。后续完整source与final分别双非作者审查；通过后root no-ff接入clean/stopped026，原026作者消费并取得真实R26-W1同owner/重开GREEN、fresh full Integration及SDK。059不实现composition、不等于整包M4或真实Apple/设备/协议E2E验收；production保持Unavailable，无原生冻结/发布，main/release/tag不动。
-
-本planning commit完成后作者停止所有写入等待计划审。活跃依赖期间保留工作树；目标接收且依赖结束、所有成果安全保存后，由root原生archive并确认实际完成，再safe branch-d；queued归档不盲重试。作者不自行merge/push/archive/delete/rebase。
+作者提交两卡后clean停写，等待exact final双非作者审。root才可no-ff接入clean/stopped held026并复验；活跃消费/验收依赖期间保留树和分支。目标全部接收且依赖结束、所有成果安全保存后，由root原生archive，确认实际完成再safe branch-d；queued请求不盲重试。作者不merge/push/archive/delete/rebase。
