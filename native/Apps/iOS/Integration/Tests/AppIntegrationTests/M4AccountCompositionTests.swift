@@ -733,9 +733,11 @@ private actor CompositionFreshAuthenticationRelay: AuthorityHTTPRelay {
   let key: Curve25519.Signing.PrivateKey
   let deviceID, publicKey: String
   private(set) var calls = 0
+  private var firstChallengeHTTPFailure = false
   private(set) var originalAuthBody: Data?
   let replyArchive: URL?
   init(key: Curve25519.Signing.PrivateKey, deviceID: String, publicKey: String, replyArchive: URL? = nil) { self.key = key; self.deviceID = deviceID; self.publicKey = publicKey; self.replyArchive = replyArchive }
+  func failNextChallengeHTTP() { firstChallengeHTTPFailure = true }
   func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
     calls += 1
     guard let object = try JSONSerialization.jsonObject(with: request.body) as? [String: Any], let id = object["requestID"] as? String,
@@ -753,6 +755,7 @@ private actor CompositionFreshAuthenticationRelay: AuthorityHTTPRelay {
       return AuthorityHTTPResponse(status: 200, body: archived)
     }
     if request.path == "/v1/auth/challenges" {
+      if firstChallengeHTTPFailure { firstChallengeHTTPFailure = false; return AuthorityHTTPResponse(status: 503, body: Data("unavailable".utf8)) }
       let value: [String: Any] = ["version": 1, "requestID": id, "challengeID": "fresh-original-challenge", "challenge": "original-service-challenge", "expiresAt": Int64(Date().timeIntervalSince1970) + 120]
       return AuthorityHTTPResponse(status: 200, body: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]))
     }
@@ -2189,6 +2192,55 @@ extension M4AccountCompositionTests {
     XCTAssertTrue(entry.retired); XCTAssertEqual(try entry.capsule.digest(), try ledger.digest())
     XCTAssertNil(try catalog.watchResources()?.seal); XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
     try catalog.close(); try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+}
+#endif
+
+
+#if DEBUG && os(macOS)
+extension M4AccountCompositionTests {
+  func testWatchScopePureAdmissionAfterFirstChallengeHTTPFailureCanRetryOriginalSetup() async throws {
+    let (f, broker) = try await watchScopeFixture(), c = f.composition
+    await f.relay.failNextChallengeHTTP()
+    await c.context.account.perform(.registerWatch)
+    let main = f.prepared.seed.businessDatabaseURL, generation = try await c.repository.identityGenerationV4()
+    let rows = try watchScopeSQL(main, "SELECT id,hex(payload),checksum FROM lifecycle_steps_v4 WHERE id GLOB 'watch-*' ORDER BY id;").split(separator: "|").map(String.init)
+    XCTAssertEqual(rows.count, 3, "the real failed first challenge leaves exactly the original watch-admission row")
+    guard rows.count == 3 else { try await c.close(); await broker.stop(); return }
+    XCTAssertEqual(rows[0], "watch-admission:" + f.prepared.seed.installationID)
+    let hex = rows[1]; var admissionBytes = Data(); var offset = hex.startIndex
+    while offset < hex.endIndex { let end = hex.index(offset, offsetBy: 2); admissionBytes.append(try XCTUnwrap(UInt8(hex[offset..<end], radix: 16))); offset = end }
+    struct Admission: Decodable { let context: WatchRegistrationContextV4; let publicKey: String }
+    let admission = try JSONDecoder().decode(Admission.self, from: admissionBytes)
+    XCTAssertEqual(rows[2], AuthorityWire.hash(admissionBytes))
+    XCTAssertEqual(try AuthorityWire.encode(admission.context), try AuthorityWire.encode(broker.context))
+    XCTAssertEqual(admission.publicKey, f.prepared.material.signer.publicKey)
+    let binding = try await c.repository.accountBindingV4(), pending = try await c.repository.pendingWatchRegistrationAttemptsV4()
+    XCTAssertNil(binding); XCTAssertTrue(pending.isEmpty)
+    XCTAssertEqual(try watchScopeSQL(main, "SELECT count(*) FROM lifecycle_steps_v4 WHERE id GLOB 'watch-attempt:*' OR id GLOB 'watch-receipt:*' OR id='watch-current-v1';"), "0")
+    let firstChallenges = await f.relay.calls, firstWrites = await f.vault.replacements
+    XCTAssertEqual(firstChallenges, 1); XCTAssertEqual(firstWrites, 0)
+    XCTAssertTrue(broker.authorizationIDs.isEmpty); XCTAssertEqual(broker.contexts, 1); XCTAssertEqual(broker.appleCalls, 0)
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    XCTAssertNil(try f.prepared.activeWatchAttachment()); XCTAssertNil(try f.prepared.activePhoneAttachment())
+    do { _ = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: generation); XCTFail("pure protocol setup is not055 accepted-registration proof") }
+    catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+    print("R26-W1 actual admission-only after challenge HTTP503: generation=\(generation) watchRows=1 attempts=0 receipts=0 marker=0 binding=nil vaultWrites=0")
+
+    // The failed challenge never created a recoverable registration attempt.
+    // Retrying the original setup must use the same owner/context/key and then
+    // complete the original signed service, full pair seal and common gate.
+    await c.context.account.perform(.registerWatch)
+    let challenges = await f.relay.calls, writes = await f.vault.replacements
+    XCTAssertEqual(challenges, 2, "a retry of pure admitted setup must reach the next actual challenge")
+    XCTAssertEqual(broker.authorizationIDs.count, 1, "the first saved attempt starts only after a successful challenge")
+    XCTAssertEqual(writes, 1)
+    XCTAssertTrue(c.context.account.canEnterRecording, "pure admission without any registration history must remain retryable")
+    XCTAssertNotNil(c.admittedScope)
+    XCTAssertEqual(try watchScopeSQL(main, "SELECT hex(payload),checksum FROM lifecycle_steps_v4 WHERE id='" + rows[0] + "';"), rows[1] + "|" + rows[2], "retry preserves the original admitted context/key bytes")
+    let afterGeneration = try await c.repository.identityGenerationV4(); XCTAssertEqual(afterGeneration, generation)
+    XCTAssertEqual(broker.appleCalls, 0)
+    try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
   }
 }
 #endif
