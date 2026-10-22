@@ -95,7 +95,7 @@ final class CloudSQL: @unchecked Sendable {
     }
 }
 
-private struct CloudErasureFileIdentity: Equatable {
+private struct CloudErasureFileIdentity: Equatable, Sendable {
     let device: dev_t
     let inode: ino_t
 }
@@ -222,10 +222,58 @@ private func openExistingCloudErasure(_ existingLocalErasureURL: URL,
     return existing
 }
 
+// This context correlates one original transport file and leaf request. It does
+// not prove the caller's parent Saga, catalog ownership or namespace lease.
+private struct RetainedControlContext: Sendable {
+    let url: URL
+    let identity: CloudErasureFileIdentity
+    let request: CloudLocalTransportEraseRequest
+}
+private enum CloudLedgerAccess: Sendable {
+    case active, localErasureOnly
+    case retainedControl(RetainedControlContext)
+}
+private enum RetainedFenceState: Sendable {
+    case scopeFence(attempts: Int)
+    case erased
+}
+// Every allowed call takes a fresh deferred read snapshot. This never uses the
+// write transaction entrance, creates a missing fence, or repairs lost proof.
+private func readRetainedFenceState(_ sql: CloudSQL, context: RetainedControlContext) throws -> RetainedFenceState {
+    guard try existingCloudErasureIdentity(context.url) == context.identity else { throw CloudError(.identityConflict) }
+    try sql.execute("BEGIN")
+    let state: RetainedFenceState
+    do {
+        guard try sql.rows("PRAGMA quick_check(1)").first?.first?.string == "ok" else { throw CloudError(.storageUnavailable) }
+        try validateLocalErasureLayout(sql)
+        let scopes = try validateErasureCanonicalRows(sql, version: 4)
+        let fences = try validatedLocalEraseFences(sql)
+        guard try sql.rows("PRAGMA journal_mode").first?.first?.string?.lowercased() == "wal" else { throw CloudError(.unsupportedSchema) }
+        let request = context.request, stable = request.scope.stableZoneKey
+        if fences.contains(stable) {
+            guard let row = try sql.rows("SELECT request_id,request_digest,stable_zone FROM cloud_local_erase_receipts WHERE request_id=?", [.text(request.requestID)]).first else { throw CloudError(.storageUnavailable) }
+            guard let id = row[0].string, let digest = row[1].string, let zone = row[2].string else { throw CloudError(.invalidPayload) }
+            _ = try CloudLocalTransportEraseReceipt(requestID: id, requestDigest: digest, stableZoneKey: zone)
+            guard id.utf8.elementsEqual(request.requestID.utf8), digest == (try request.digest), zone == stable else { throw CloudError(.identityConflict) }
+            guard !scopes.contains(where: { $0.stableZoneKey == stable }) else { throw CloudError(.invalidPayload) }
+            state = .erased
+        } else {
+            guard let row = try sql.rows("SELECT issue,attempts,retry_ms,attempted_ms FROM cloud_scope_state WHERE scope=?", [.text(try request.scope.key)]).first else { throw CloudError(.storageUnavailable) }
+            guard let attempts = row[1].number, attempts >= 1, row[3].number != nil else { throw CloudError(.invalidPayload) }
+            guard try row[0].optionalIssue() == .accountChanged, case .null = row[2] else { throw CloudError(.storageUnavailable) }
+            state = .scopeFence(attempts: Int(attempts))
+        }
+        try sql.execute("COMMIT")
+    } catch { try? sql.execute("ROLLBACK"); throw error }
+    guard try existingCloudErasureIdentity(context.url) == context.identity else { throw CloudError(.identityConflict) }
+    return state
+}
+
 public actor SQLiteCloudLedger: CloudLedger {
     let sql: CloudSQL
     private let fault: CloudLedgerFault?
-    private let erasureOnly: Bool
+    private let access: CloudLedgerAccess
+    private var closed = false
     public init(url: URL, fault: CloudLedgerFault? = nil, migrationFault: CloudLedgerMigrationFault? = nil) throws {
         let sql = try CloudSQL(url: url)
         do {
@@ -272,20 +320,48 @@ public actor SQLiteCloudLedger: CloudLedger {
             guard try sql.rows("PRAGMA journal_mode=WAL").first?.first?.string?.lowercased() == "wal" else { throw CloudError(.storageUnavailable) }
             try sql.execute("PRAGMA synchronous=FULL")
         } catch { try? sql.close(); throw error }
-        self.sql = sql; self.fault = fault; erasureOnly = false
+        self.sql = sql; self.fault = fault; access = .active
     }
     /// Existing-file local erasure only: never CREATE, migrate or reconstruct lost proof.
     /// The caller still proves catalog ownership; known SQLite WAL coordination is allowed.
     public init(existingLocalErasureURL: URL, fault: CloudLedgerFault? = nil) throws {
-        sql = try openExistingCloudErasure(existingLocalErasureURL); self.fault = fault; erasureOnly = true
+        sql = try openExistingCloudErasure(existingLocalErasureURL); self.fault = fault; access = .localErasureOnly
     }
     // Internal, synchronous fault seam: no production caller or global fault/VFS state.
     init(existingLocalErasureURL: URL, readOnlyCheckpoint: @escaping @Sendable (CloudErasureReadOnlyStage) throws -> Void) throws {
-        sql = try openExistingCloudErasure(existingLocalErasureURL, checkpoint: readOnlyCheckpoint); fault = nil; erasureOnly = true
+        sql = try openExistingCloudErasure(existingLocalErasureURL, checkpoint: readOnlyCheckpoint); fault = nil; access = .localErasureOnly
     }
-    public func close() throws { try sql.close() }
+    /// Strict existing-file control only. Original caller ownership and parent
+    /// authorization remain mandatory; this cannot perform an erase or replay.
+    public init(existingRetainedControlURL: URL, originalEraseRequest: CloudLocalTransportEraseRequest) throws {
+        let identity = try existingCloudErasureIdentity(existingRetainedControlURL)
+        let opened = try openExistingCloudErasure(existingRetainedControlURL)
+        let context = RetainedControlContext(url: existingRetainedControlURL, identity: identity, request: originalEraseRequest)
+        do { _ = try readRetainedFenceState(opened, context: context) }
+        catch { try? opened.close(); throw error }
+        sql = opened; fault = nil; access = .retainedControl(context)
+    }
+    // Same synchronous strict-opening fault seam as the accepted erasure mode;
+    // this changes neither the public API nor either mode's opening policy.
+    init(existingRetainedControlURL: URL, originalEraseRequest: CloudLocalTransportEraseRequest,
+         readOnlyCheckpoint: @escaping @Sendable (CloudErasureReadOnlyStage) throws -> Void) throws {
+        let identity = try existingCloudErasureIdentity(existingRetainedControlURL)
+        let opened = try openExistingCloudErasure(existingRetainedControlURL, checkpoint: readOnlyCheckpoint)
+        let context = RetainedControlContext(url: existingRetainedControlURL, identity: identity, request: originalEraseRequest)
+        do { _ = try readRetainedFenceState(opened, context: context) }
+        catch { try? opened.close(); throw error }
+        sql = opened; fault = nil; access = .retainedControl(context)
+    }
+    public func close() throws { try sql.close(); closed = true }
+    private func requireOrdinaryRead() throws {
+        if case .retainedControl = access { throw CloudError(closed ? .closed : .storageUnavailable) }
+    }
     func transaction<T>(forLocalErasure: Bool = false, _ body: () throws -> T) throws -> T {
-        guard !erasureOnly || forLocalErasure else { throw CloudError(.storageUnavailable) }
+        switch access {
+        case .active: break
+        case .localErasureOnly: guard forLocalErasure else { throw CloudError(.storageUnavailable) }
+        case .retainedControl: throw CloudError(closed ? .closed : .storageUnavailable)
+        }
         let result = try sql.transaction {
             let result = try body(); if fault == .beforeCommit { throw CloudError(.storageUnavailable) }; return result
         }
@@ -303,7 +379,8 @@ public actor SQLiteCloudLedger: CloudLedger {
         }
     }
     public func uploads(scope: CloudScope) throws -> [CloudUploadEntry] {
-        try sql.rows("SELECT original,state,attempts,issue,retry_ms,digest FROM cloud_uploads WHERE scope=? ORDER BY id", [.text(try scope.key)]).map { row in
+        try requireOrdinaryRead()
+        return try sql.rows("SELECT original,state,attempts,issue,retry_ms,digest FROM cloud_uploads WHERE scope=? ORDER BY id", [.text(try scope.key)]).map { row in
             guard let raw = row[0].data, let state = row[1].string.flatMap(CloudDeliveryState.init(rawValue:)), let count = row[2].number, count >= 0, row[5].string == CloudCodec.hash(raw) else { throw CloudError(.invalidPayload) }
             let upload = try CloudCodec.decode(CloudUpload.self, raw)
             guard upload.scope == scope else { throw CloudError(.accountChanged) }
@@ -331,7 +408,8 @@ public actor SQLiteCloudLedger: CloudLedger {
         }
     }
     public func batches(scope: CloudScope) throws -> [CloudBatchEntry] {
-        try sql.rows("SELECT original,state,attempts,issue,retry_ms,digest FROM cloud_batches WHERE scope=? ORDER BY rowid", [.text(try scope.key)]).map { row in
+        try requireOrdinaryRead()
+        return try sql.rows("SELECT original,state,attempts,issue,retry_ms,digest FROM cloud_batches WHERE scope=? ORDER BY rowid", [.text(try scope.key)]).map { row in
             guard let raw = row[0].data, let state = row[1].string.flatMap(CloudDeliveryState.init(rawValue:)), let count = row[2].number, count >= 0 else { throw CloudError(.invalidPayload) }
             let batch = try CloudCodec.decode(CloudFetchBatch.self, raw)
             guard batch.scope == scope, try batch.digest == row[5].string else { throw CloudError(.invalidPayload) }
@@ -361,12 +439,30 @@ public actor SQLiteCloudLedger: CloudLedger {
     }
 
     public func scopeState(scope: CloudScope) throws -> CloudScopeState {
+        if case .retainedControl(let context) = access {
+            guard !closed else { throw CloudError(.closed) }
+            guard scope == context.request.scope else { throw CloudError(.identityConflict) }
+            switch try readRetainedFenceState(sql, context: context) {
+            case .scopeFence(let attempts): return CloudScopeState(issue: .accountChanged, attemptCount: attempts, nextAttemptAt: nil)
+            case .erased: return CloudScopeState(issue: .accountChanged, attemptCount: 0, nextAttemptAt: nil)
+            }
+        }
         if try locallyErased(scope) { return CloudScopeState(issue: .accountChanged, attemptCount: 0, nextAttemptAt: nil) }
         guard let row = try sql.rows("SELECT issue,attempts,retry_ms FROM cloud_scope_state WHERE scope=?", [.text(try scope.key)]).first else { return CloudScopeState(issue: nil, attemptCount: 0, nextAttemptAt: nil) }
         guard let count = row[1].number, count >= 0 else { throw CloudError(.invalidPayload) }
         return CloudScopeState(issue: try row[0].optionalIssue(), attemptCount: Int(count), nextAttemptAt: row[2].number.map { Date(timeIntervalSince1970: Double($0) / 1000) })
     }
     public func recordScopeIssue(scope: CloudScope, issue: CloudIssue, at: Date, nextAttemptAt: Date?) throws {
+        if case .retainedControl(let context) = access {
+            guard !closed else { throw CloudError(.closed) }
+            guard scope == context.request.scope else { throw CloudError(.identityConflict) }
+            guard issue == .accountChanged, nextAttemptAt == nil else { throw CloudError(.storageUnavailable) }
+            _ = try CloudCodec.milliseconds(at)
+            switch try readRetainedFenceState(sql, context: context) {
+            case .scopeFence: return
+            case .erased: throw CloudError(.accountChanged)
+            }
+        }
         let now = try CloudCodec.milliseconds(at), retry = try nextAttemptAt.map(CloudCodec.milliseconds)
         try transaction {
             try requireNotLocallyErased(scope)
@@ -393,7 +489,8 @@ public actor SQLiteCloudLedger: CloudLedger {
         }
     }
     public func conflicts(scope: CloudScope) throws -> [CloudConflict] {
-        try sql.rows("SELECT original FROM cloud_conflicts WHERE scope=? ORDER BY rowid", [.text(try scope.key)]).map { row in
+        try requireOrdinaryRead()
+        return try sql.rows("SELECT original FROM cloud_conflicts WHERE scope=? ORDER BY rowid", [.text(try scope.key)]).map { row in
             guard let raw = row[0].data else { throw CloudError(.invalidPayload) }
             let conflict = try CloudCodec.decode(CloudConflict.self, raw)
             guard conflict.scope == scope, CloudCodec.hash(conflict.localBytes) == conflict.localDigest, CloudCodec.hash(conflict.remoteBytes) == conflict.remoteDigest else { throw CloudError(.invalidPayload) }
@@ -418,7 +515,8 @@ public actor SQLiteCloudLedger: CloudLedger {
         }
     }
     public func saveEvidence(scope: CloudScope) throws -> [DevelopmentCloudSaveEvidence] {
-        try sql.rows("SELECT original,digest FROM cloud_save_evidence WHERE scope=? ORDER BY rowid", [.text(try scope.key)]).map { row in
+        try requireOrdinaryRead()
+        return try sql.rows("SELECT original,digest FROM cloud_save_evidence WHERE scope=? ORDER BY rowid", [.text(try scope.key)]).map { row in
             guard let raw = row[0].data, row[1].string == CloudCodec.hash(raw) else { throw CloudError(.invalidPayload) }
             let evidence = try CloudCodec.decode(DevelopmentCloudSaveEvidence.self, raw)
             guard evidence.scope == scope, evidence.boundary == "controlledDevelopmentTransport" else { throw CloudError(.invalidPayload) }
