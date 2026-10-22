@@ -3,6 +3,9 @@ import Foundation
 import Darwin
 import CryptoKit
 import AccountKit
+import MatchCore
+import MatchSession
+import CloudSync
 import MatchStore
 import MatchPresentation
 @testable import AppIntegration
@@ -71,7 +74,7 @@ enum M4HTTPFixtureError: Error, Equatable { case configuration, shape, correlati
     _ = try AuthorityTrustConfiguration(environment: .development, publicKeys: [id: key])
     return Metadata(baseURL: baseURL, publicKey: key, keyID: id, namespace: namespace)
   }
-  func command(_ operation: String, fields: [String: String] = [:], requestID: String = UUID().uuidString) async throws -> Data {
+  func command(_ operation: String, fields: [String: Any] = [:], requestID: String = UUID().uuidString) async throws -> Data {
     guard !stopped, !busy else { throw M4HTTPFixtureError.closed }
     guard used.insert(requestID).inserted else { throw M4HTTPFixtureError.duplicate }
     busy = true; defer { busy = false }
@@ -126,9 +129,16 @@ enum M4HTTPFixtureError: Error, Equatable { case configuration, shape, correlati
   private var anchors: [URL: Anchor] = [:]
   private(set) var observations = 0, replies = 0, rejected = 0, suppressed = 0, held = false
   var holdReplies = false
+  var holdCloudReplies = false
+  var corruptReadback: String?
+  private(set) var cloudHeld = false, cloudSaveCalls = 0, cloudFetchCalls = 0
+  private(set) var cloudUploads: [String: CloudUpload] = [:]
   private(set) var authenticationSubjectDiffersFromHint = false
   private var identityFiles: [URL: Anchor] = [:]
   private var logins: [UUID: Task<Observation, any Error>] = [:]
+  private var actions: [UUID: Task<Void, Never>] = [:]
+  private var strictPrepared: M4PreparedIdentity?
+  private(set) var authorityGate: M4HTTPAuthorityGate?
   private let rootAnchor: Anchor
   private init(root: URL, cli: M4HTTPFixtureCLI, metadata: M4HTTPFixtureCLI.Metadata) throws {
     rootAnchor = try Self.anchor(root, directory: true)
@@ -194,18 +204,68 @@ enum M4HTTPFixtureError: Error, Equatable { case configuration, shape, correlati
     for (name, object) in pair { let url = directory.appendingPathComponent(name); try write(JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), to: url, original: identityFiles[url]); identityFiles[url] = try Self.anchor(url) }
     guard Double(value.expiresAt) > Date().timeIntervalSince1970 else { throw M4HTTPFixtureError.timeout }; return value
   }
-  func bootstrap(observationIdentity: String = "primary") async throws -> M4ApplicationContext {
+  func bootstrap(observationIdentity: String = "primary", workout: (any WorkoutGateway)? = nil) async throws -> M4ApplicationContext {
     _ = try await refreshIdentity(observationIdentity)
-    let value = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: nativeRoot); owner = value
+    let value = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: nativeRoot, workout: workout); owner = value
     let mailbox = nativeRoot.appendingPathComponent("development/mailbox")
     for url in [root, nativeRoot, nativeRoot.appendingPathComponent("development"), mailbox, mailbox.appendingPathComponent("outgoing"), mailbox.appendingPathComponent("responses")] { anchors[url] = try Self.anchor(url, directory: true) }
     worker = Task { @MainActor in await self.work() }
     try await value.activateControlled(); return value
   }
+  func reopen(workout: any WorkoutGateway) async throws -> M4ApplicationContext {
+    guard let owner else { throw M4HTTPFixtureError.closed }
+    try await owner.shutdown()
+    worker?.cancel(); await worker?.value; worker = nil
+    return try await bootstrap(workout: workout)
+  }
+  func bootstrapStrict(workout: any WorkoutGateway, holdTerminate: Bool = false) async throws -> M4AccountComposition {
+    _ = try await refreshIdentity()
+    let identity = try M4ControlledCurrentIdentity(directory: nativeRoot.appendingPathComponent("development/current-identity"), namespace: configuration.namespace)
+    let prepared = try await M4IdentityBootstrap.prepare(root: nativeRoot, namespace: configuration.namespace,
+      controlDirectory: nativeRoot.appendingPathComponent("development/m4-controls/" + configuration.namespace + "/identity")) { seed in
+      let material = try DevelopmentAuthorityScenario.deviceMaterial(configuration: self.configuration, namespaceDirectory: seed.namespaceDirectory, installationID: seed.installationID)
+      return M4IdentityMaterial(signer: material.signer, vault: material.vault)
+    }
+    try prepared.prepareManagedResources()
+    let adapters = try M4ControlledAdapters.make(configuration: configuration, rootDirectory: nativeRoot)
+    let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
+    strictPrepared = prepared
+    let gate = holdTerminate ? M4HTTPAuthorityGate(original: adapters) : nil; authorityGate = gate
+    let original = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: cloudSpaceID, identity: identity, authorityRelay: gate, workout: workout, controlledAdapters: adapters)
+    let value = M4ApplicationContext(original: original, developmentSimulation: true); owner = value
+    let mailbox = nativeRoot.appendingPathComponent("development/mailbox")
+    for url in [root, nativeRoot, nativeRoot.appendingPathComponent("development"), mailbox, mailbox.appendingPathComponent("outgoing"), mailbox.appendingPathComponent("responses")] { anchors[url] = try Self.anchor(url, directory: true) }
+    worker = Task { @MainActor in await self.work() }
+    try await value.activateControlled(); return original
+  }
   func signIn(observationIdentity: String = "primary") async throws -> Observation {
     guard let owner else { throw M4HTTPFixtureError.closed }
     let observed = try await refreshIdentity(observationIdentity)
     await owner.context.account.perform(.signIn); return observed
+  }
+  func originalResources(_ composition: M4AccountComposition) async throws -> M4ManagedPhoneResources {
+    guard let strictPrepared else { throw M4HTTPFixtureError.configuration }
+    let value = try await refreshIdentity()
+    let observed = M4CurrentAccountIdentity(accountID: value.accountID, cloudSpaceID: cloudSpaceID, zoneID: zoneID, environment: .development)
+    return try await strictPrepared.prepareCurrentPhoneResources(expectedIdentityGeneration: composition.repository.identityGenerationV4(), observed: observed)
+  }
+  func beginLifecycle(_ action: LifecycleUserAction, matchID: String) throws -> Task<Void, Never> {
+    guard let owner else { throw M4HTTPFixtureError.closed }
+    let id = UUID(), task = Task { await owner.context.lifecycle.perform(action, matchID: matchID) }
+    actions[id] = task; return task
+  }
+  func changeIndependentField(_ field: String) async throws {
+    if field == "account" { _ = try await refreshIdentity("alternate"); return }
+    let observed = try await refreshIdentity()
+    let directory = nativeRoot.appendingPathComponent("development/current-identity")
+    let cloud = directory.appendingPathComponent("cloud-space.json")
+    let environment = field == "environment" ? "production" : "development"
+    let object: [String: Any] = ["version": 1, "environment": environment, "namespace": configuration.namespace, "observationID": observed.id, "cloudSpaceID": field == "cloud" ? "different-cloud" : cloudSpaceID, "zoneID": field == "zone" ? "different-zone" : zoneID]
+    try write(JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), to: cloud, original: identityFiles[cloud])
+    if field == "environment" {
+      let apple = directory.appendingPathComponent("apple-account.json")
+      try write(JSONSerialization.data(withJSONObject: ["version": 1, "environment": environment, "namespace": configuration.namespace, "observationID": observed.id, "accountID": observed.accountID], options: [.sortedKeys]), to: apple, original: identityFiles[apple])
+    }
   }
   func beginSignIn() -> Task<Observation, any Error> {
     let id = UUID(), task = Task { try await self.signIn() }; logins[id] = task; return task
@@ -219,19 +279,36 @@ enum M4HTTPFixtureError: Error, Equatable { case configuration, shape, correlati
           let (raw, anchor) = try Self.read(file); seen.insert(file.lastPathComponent)
           let request = try M4HTTPFixtureCLI.object(raw, keys: ["id", "operation", "dataset", "payload"])
           guard let id = request["id"] as? String, UUID(uuidString: id)?.uuidString == id, file.lastPathComponent == id + ".json", request["dataset"] as? String == configuration.dataset,
-                request["operation"] as? String == "apple", let encoded = request["payload"] as? String, let payload = Data(base64Encoded: encoded) else { throw M4HTTPFixtureError.shape }
+                let operation = request["operation"] as? String, ["apple", "cloud-save", "cloud-fetch"].contains(operation),
+                let encoded = request["payload"] as? String, let payload = Data(base64Encoded: encoded) else { throw M4HTTPFixtureError.shape }
+          let token: Data
+          if operation == "apple" {
           let body = try M4HTTPFixtureCLI.object(payload, keys: ["nonce"])
           guard let nonce = body["nonce"] as? String, nonce.count == 64, nonce.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { throw M4HTTPFixtureError.shape }
-          let token = try await cli.command("apple", fields: ["purpose": "authentication", "nonce": nonce, "identity": "primary"])
+          token = try await cli.command("apple", fields: ["purpose": "authentication", "nonce": nonce, "identity": "primary"])
           let apple = try M4HTTPFixtureCLI.object(token, keys: ["identityToken", "authorizationCode"])
           guard let jwt = apple["identityToken"] as? String else { throw M4HTTPFixtureError.shape }
           let pieces = jwt.split(separator: "."); guard pieces.count == 3 else { throw M4HTTPFixtureError.shape }
           var segment = String(pieces[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/"); segment += String(repeating: "=", count: (4 - segment.count % 4) % 4)
           guard let claims = Data(base64Encoded: segment), let subject = (try? JSONSerialization.jsonObject(with: claims) as? [String: Any])?["sub"] as? String, subject != configuration.subject else { throw M4HTTPFixtureError.configuration }
           authenticationSubjectDiffersFromHint = true
-          held = true; let deadline = ContinuousClock.now.advanced(by: .seconds(8))
-          while holdReplies, !closing, ContinuousClock.now < deadline { try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(5)) }
-          held = false; try Task.checkCancellation(); guard ContinuousClock.now < deadline else { throw M4HTTPFixtureError.timeout }
+          } else if operation == "cloud-save" {
+            let upload = try JSONDecoder().decode(CloudUpload.self, from: payload)
+            guard upload.scope.cloudSpaceID == cloudSpaceID, upload.scope.zoneID == zoneID,
+                  cloudUploads[upload.id] == nil || cloudUploads[upload.id] == upload else { throw M4HTTPFixtureError.correlation }
+            cloudSaveCalls += 1; cloudUploads[upload.id] = upload
+            if corruptReadback == "truncated" { token = Data("{}".utf8) }
+            else if corruptReadback == "changed" { token = try JSONEncoder().encode(CloudUpload(id: "changed-" + upload.id, scope: upload.scope, record: upload.record)) }
+            else { token = payload }
+          } else {
+            let scope = try JSONDecoder().decode(CloudScope.self, from: payload)
+            cloudFetchCalls += 1
+            token = try JSONEncoder().encode(cloudUploads.values.filter { $0.scope == scope }.map(\.record).sorted { $0.recordID < $1.recordID })
+          }
+          held = operation == "apple"; cloudHeld = operation != "apple"
+          let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+          while (operation == "apple" ? holdReplies : holdCloudReplies), !closing, ContinuousClock.now < deadline { try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(5)) }
+          held = false; cloudHeld = false; try Task.checkCancellation(); guard ContinuousClock.now < deadline else { throw M4HTTPFixtureError.timeout }
           guard !closing, anchors.allSatisfy({ (try? Self.anchor($0.key, directory: true)) == $0.value }),
                 let current = try? Self.read(file), current.0 == raw, current.1 == anchor else { suppressed += 1; continue }
           // Same original id/dataset/raw bytes and directory/request inodes were
@@ -261,10 +338,51 @@ enum M4HTTPFixtureError: Error, Equatable { case configuration, shape, correlati
     if let owner { do { try await owner.shutdown() } catch { ownerClosed = false } }
     let requests = Array(logins.values); requests.forEach { $0.cancel() }
     for request in requests { _ = await request.result }; logins.removeAll()
+    let pendingActions = Array(actions.values); pendingActions.forEach { $0.cancel() }
+    for action in pendingActions { await action.value }; actions.removeAll()
     closing = true; holdReplies = false; worker?.cancel(); await worker?.value; worker = nil
     let report = await cli.close()
     if ownerClosed, report.exited, report.readersJoined, (try? Self.anchor(root, directory: true)) == rootAnchor { try? FileManager.default.removeItem(at: root) }
-    return Report(ownerClosed: ownerClosed, workerJoined: worker == nil, requestsJoined: logins.isEmpty, process: report)
+    return Report(ownerClosed: ownerClosed, workerJoined: worker == nil, requestsJoined: logins.isEmpty && actions.isEmpty, process: report)
   }
 }
+actor M4HTTPAuthorityGate: AuthorityHTTPRelay {
+  private let original: any AuthorityHTTPRelay
+  private var hold = true
+  private(set) var entered = false
+  init(original: any AuthorityHTTPRelay) { self.original = original }
+  func release() { hold = false }
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    let response = try await original.send(request)
+    if request.path == "/v1/locks/terminate" {
+      entered = true
+      let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+      while hold, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)); await Task.yield() }
+    }
+    return response
+  }
+}
+
+actor M4HTTPWorkoutGateway: WorkoutGateway {
+  private var starts: [String: Date] = [:]
+  var holdFinish = false
+  private(set) var finishEntered = false
+  private(set) var operations: [CaptureOperation] = []
+  func setHoldFinish(_ value: Bool) { holdFinish = value }
+  func perform(_ operation: CaptureOperation) async -> WorkoutObservation {
+    operations.append(operation)
+    if operation.action == .start { starts[operation.externalToken] = operation.requestedAt }
+    if operation.action == .finish {
+      finishEntered = true
+      let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+      while holdFinish, ContinuousClock.now < deadline { try? await Task.sleep(for: .milliseconds(5)); await Task.yield() }
+    }
+    let outcome: WorkoutOutcome
+    switch operation.action { case .finish: outcome = .linked(workoutID: "controlled-" + operation.externalToken); case .pause: outcome = .paused; default: outcome = .running }
+    return try! WorkoutObservation(operationID: operation.id, binding: operation.binding, externalToken: operation.externalToken, observedAt: Date(), outcome: outcome,
+      window: CaptureWindow(start: starts[operation.externalToken] ?? operation.requestedAt, end: operation.action == .finish ? Date() : nil))
+  }
+  func reconcile(_ operation: CaptureOperation) async -> WorkoutObservation { await perform(operation) }
+}
+
 #endif

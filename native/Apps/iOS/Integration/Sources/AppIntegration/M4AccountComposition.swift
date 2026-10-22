@@ -1,4 +1,5 @@
 import Foundation
+import MatchCore
 import AccountKit
 import MatchStore
 import MatchSession
@@ -72,6 +73,9 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private var scopeBusy = false
   private var managedPhoneResources: M4ManagedPhoneResources?
   private var managedWatchResources: M4ManagedWatchResources?
+  private var normalCloud: CloudSyncService?
+  private var normalControl: AuthorityControlService?
+  private var normalOperation: UUID?
   private init(prepared: M4PreparedIdentity, repository: SQLiteSessionRepository, session: MatchSession, context: AccountAppContext, client: AuthorityClient, accountService: AccountService, phoneRegistration: PhoneWatchRegistrationService, watchRegistration: WatchRegistrationService, cloudBridge: CloudSessionBridge, sync: MatchSyncService, identity: any M4CurrentIdentityObserving, cloudSpaceID: String, watchRelay: M4WatchRegistrationRelay, closeBridge: M4CompositionCloseBridge, controlledAdapters: M4ControlledAdapters?) {
     self.prepared = prepared; self.repository = repository; self.session = session; self.context = context; self.client = client
     self.accountService = accountService; self.phoneRegistration = phoneRegistration; self.watchRegistration = watchRegistration; self.cloudBridge = cloudBridge; self.sync = sync; self.identity = identity; self.cloudSpaceID = cloudSpaceID; self.watchRelay = watchRelay; self.closeBridge = closeBridge; self.controlledAdapters = controlledAdapters
@@ -113,7 +117,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       let bridge = CloudSessionBridge(repository: repository, client: client, policy: policy); try await bridge.attach(session)
       let closeBridge = M4CompositionCloseBridge()
       let account = AccountStatusModel(repository: repository, development: development, action: { try await closeBridge.performAccount($0) })
-      let lifecycle = LifecycleStatusModel(repository: repository, development: development, action: { _ in throw AuthorityError.unavailable })
+      let lifecycle = LifecycleStatusModel(repository: repository, development: development, action: { try await closeBridge.performLifecycle($0) })
       let context = try await AppBootstrap.accountContext(repository: repository, session: session, recording: recording, account: account, lifecycle: lifecycle, shutdownOwner: { await closeBridge.closeFromContext() }, close: { await closeBridge.closeFromContext() })
       let value = M4AccountComposition(prepared: prepared, repository: repository, session: session, context: context, client: client, accountService: accountService, phoneRegistration: phone, watchRegistration: watch, cloudBridge: bridge, sync: sync, identity: identity, cloudSpaceID: cloudSpaceID, watchRelay: watchRelay, closeBridge: closeBridge, controlledAdapters: controlledAdapters)
       // The public context retains its resource owner until successful final close.
@@ -143,6 +147,104 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       guard !self.scopeBusy else { throw AuthorityError.conflict }
       self.scopeBusy = true; defer { self.scopeBusy = false }
       try await self.accountAction(action)
+    }
+  }
+  /// Only the original controlled Phone owner can save/release business data.
+  /// Every call owns one service unit; failed/missing evidence never loops into
+  /// a replacement upload or a new termination request.
+  func performLifecycle(_ action: LifecycleUserAction) async throws {
+    switch action { case .saveCloudOnly, .synchronize, .retryControls: break; default: throw AuthorityError.unavailable }
+    try await ownBusiness {
+      guard !self.scopeBusy, self.normalOperation == nil else { throw AuthorityError.conflict }
+      self.scopeBusy = true; self.normalOperation = UUID()
+      defer { self.normalOperation = nil; self.scopeBusy = false }
+      let handle = try await self.normalCheckpoint()
+      if self.normalCloud == nil {
+        let coordinator = M4NormalCoordinator(owner: self)
+        try await self.cloudBridge.attach(coordinator)
+        _ = try await self.normalCheckpoint()
+        guard let driver = self.controlledAdapters else { throw AuthorityError.unavailable }
+        self.normalCloud = CloudSyncService(scope: handle.scope, ledger: handle.ledger, driver: driver, sink: self.cloudBridge)
+        self.normalControl = AuthorityControlService(client: self.client, repository: self.repository, coordinator: coordinator)
+      }
+      guard let cloud = self.normalCloud, let control = self.normalControl else { throw AuthorityError.unavailable }
+      switch action {
+      case .saveCloudOnly(let id), .synchronize(let id):
+        let snapshot = try await self.session.snapshot(matchID: id)
+        _ = try await self.normalCheckpoint()
+        if snapshot.replay.state != .completed {
+          guard snapshot.replay.state == .endedPendingSync,
+                snapshot.store.captureOperations.allSatisfy({ [.settled, .failed, .cancelled].contains($0.state) }) else { throw AuthorityError.unavailable }
+          let upload = try await self.cloudBridge.prepareUpload(matchID: id, scope: handle.scope)
+          _ = try await self.normalCheckpoint()
+          try await handle.ledger.enqueue(upload)
+          _ = try await self.normalCheckpoint()
+          _ = try await cloud.synchronize() // exactly one service unit per action
+          _ = try await self.normalCheckpoint()
+          let entries = try await handle.ledger.uploads(scope: handle.scope)
+          _ = try await self.normalCheckpoint()
+          let receipts = try await handle.ledger.saveEvidence(scope: handle.scope)
+          _ = try await self.normalCheckpoint()
+          guard entries.contains(where: { $0.upload == upload && $0.state == .confirmed && $0.originalBytes == (try? upload.canonicalBytes()) }),
+                let evidence = receipts.first(where: { $0.matches(upload) }) else { throw CloudImportError.proofUnavailable }
+          _ = try await self.cloudBridge.acceptDevelopmentSave(upload: upload, evidence: evidence, ledger: handle.ledger)
+          _ = try await self.normalCheckpoint()
+          if case .synchronize = action {
+            let queue = try await self.repository.controlQueueV4()
+            _ = try await self.normalCheckpoint()
+            let originals = queue.filter { $0.intent.operation == .terminate && $0.intent.matchID == id && $0.intent.fields.mode == "normal" && $0.state != .confirmed }
+            guard originals.count <= 1 else { throw AuthorityError.conflict }
+            if let original = originals.first { _ = try await control.reconcile(original.intent) }
+            else {
+              let request = "normal-" + AuthorityWire.hash(try AuthorityWire.encode(["football-record.normal.v1", self.namespace, id]))
+              _ = try await control.normal(matchID: id, requestID: request)
+            }
+          }
+        }
+      case .retryControls:
+        let queue = try await self.repository.controlQueueV4()
+        _ = try await self.normalCheckpoint()
+        for entry in queue where entry.intent.operation == .terminate && entry.intent.fields.mode == "normal" && [.ready, .inFlight, .retryScheduled].contains(entry.state) && (entry.nextAttemptAt.map { $0 <= Date() } ?? true) {
+          _ = try await self.normalCheckpoint()
+          _ = try await control.reconcile(entry.intent)
+        }
+      default: throw AuthorityError.unavailable
+      }
+      _ = try await self.normalCheckpoint()
+      await self.context.recording.refreshAuthority()
+      _ = try await self.normalCheckpoint()
+    }
+  }
+  /// Last independent observation checkpoint before a borrowed service forwards
+  /// to the original Session. Its SQL generation/retirement checks still apply;
+  /// this is not an external-source/SQL atomic lease or a future identity promise.
+  fileprivate func normalCheckpoint() async throws -> M4ManagedPhoneResources {
+    let token = lifetime, business = businessLifetime
+    do {
+      try requireBusiness(business); try requireIdentityLifetime(token)
+      guard normalOperation != nil, scopeBusy, controlledAdapters != nil, client.trust.environment == .development,
+            let handle = managedPhoneResources, admittedScope == handle.scope,
+            context.account.canEnterRecording else { throw AuthorityError.unavailable }
+      try prepared.requirePhoneResources(handle)
+      let generation = try await repository.identityGenerationV4()
+      guard let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: generation),
+            proof.binding.role == .phone, try handle.attachment.matches(proof) else { throw AuthorityError.identityChanged }
+      try requireIdentityLifetime(token)
+      let credential = try await prepared.material.vault.credential()
+      try requireIdentityLifetime(token); try requireCredential(credential, binding: proof.binding)
+      guard try await handle.ledger.scopeState(scope: handle.scope).issue != .accountChanged else { throw AuthorityError.identityChanged }
+      try await checkedProof(proof, token: token)
+      let observed = try await freshBusinessIdentity()
+      try requireObservation(observed, scope: handle.scope, environment: proof.binding.environment)
+      try await checkedProof(proof, token: token)
+      try requireBusiness(business); try requireIdentityLifetime(token)
+      try prepared.requirePhoneResources(handle); try requireCredential(credential, binding: proof.binding)
+      return handle
+    } catch {
+      if error as? AuthorityError == .identityChanged || error as? AuthorityError == .staleAttestation {
+        admittedScope = nil; context.account.pauseIdentity()
+      }
+      throw error
     }
   }
   /// This control owner is deliberately outside businessOperations: it joins the
@@ -726,6 +828,9 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
 @MainActor private final class M4CompositionCloseBridge {
   var owner: M4AccountComposition?
   func closeFromContext() async { await owner?.closeFromContext() }
+  func performLifecycle(_ value: LifecycleUserAction) async throws {
+    guard let owner else { throw AuthorityError.identityChanged }; try await owner.performLifecycle(value)
+  }
   func performAccount(_ value: AccountUserAction) async throws {
     guard let owner else { throw AuthorityError.identityChanged }; try await owner.performAccount(value)
   }
@@ -747,4 +852,33 @@ private struct M4OriginalPhoneAuthorizer: WatchRegistrationAuthorizing {
     guard let owner else { throw AuthorityError.identityChanged }
     return try await owner.authorizePhoneRegistration(attempt, action: action)
   }
+}
+
+/// A narrow service borrower. It never owns/closes a facade, substitutes a
+/// receipt, or bypasses the original Session's durable checks/publication.
+@MainActor private final class M4NormalCoordinator: AuthorityControlCoordinator, ControlQueueInboundCoordinator, CloudInboundCoordinator {
+  weak var owner: M4AccountComposition?
+  private let original: MatchSession
+  init(owner: M4AccountComposition) { self.owner = owner; original = owner.session }
+  private func checked() async throws -> M4AccountComposition {
+    guard let owner else { throw AuthorityError.identityChanged }
+    _ = try await owner.normalCheckpoint(); return owner
+  }
+  func syncRepositoryIdentity() async -> SyncRepositoryIdentity { await original.syncRepositoryIdentity() }
+  func prepareAuthorityControl(_ intent: ControlIntentV1) async throws -> ControlIntentReceiptV4 { try await checked().session.prepareAuthorityControl(intent) }
+  func acceptAuthorityResult(_ receipt: VerifiedAuthorityReceiptV1) async throws -> AuthorityReceiptV4 { try await checked().session.acceptAuthorityResult(receipt) }
+  func acceptLiveLock(_ proof: VerifiedLiveLockV1) async throws { try await checked().session.acceptLiveLock(proof) }
+  func prepareNormalTermination(matchID: String, requestID: String) async throws -> ControlIntentV1 { try await checked().session.prepareNormalTermination(matchID: matchID, requestID: requestID) }
+  func prepareAbnormalTermination(_ intent: ControlIntentV1) async throws -> ControlIntentReceiptV4 { throw AuthorityError.unavailable }
+  func beginControlAttempt(_ intent: ControlIntentV1, at: Date) async throws { try await checked().session.beginControlAttempt(intent, at: at) }
+  func failControlAttempt(_ intent: ControlIntentV1, issue: LifecycleIssueV4, retryable: Bool, at: Date) async throws {
+    // Error bookkeeping retains the original pending intent while business close
+    // joins this same borrowed service; it cannot create a positive business fact.
+    guard let owner else { throw AuthorityError.identityChanged }
+    try await owner.session.failControlAttempt(intent, issue: issue, retryable: retryable, at: at)
+  }
+  func importCloudBatch(_ batch: ValidatedCloudBatchV1) async throws -> CloudImportReceiptV4 { try await checked().session.importCloudBatch(batch) }
+  func acceptCloudSave(_ proof: VerifiedCloudSaveV1) async throws -> CloudCheckpointReceiptV4 { try await checked().session.acceptCloudSave(proof) }
+  func resetCloudCursor(scope: CloudScopeV1, expectedGeneration: Int64) async throws -> CloudCursorV4 { try await checked().session.resetCloudCursor(scope: scope, expectedGeneration: expectedGeneration) }
+  func authorizeCloudHistory(_ grant: VerifiedCloudHistoryGrantV1) async throws { try await checked().session.authorizeCloudHistory(grant) }
 }

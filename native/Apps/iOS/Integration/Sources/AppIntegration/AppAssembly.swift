@@ -171,6 +171,7 @@ import Foundation
 import MatchPresentation
 import AccountKit
 import MatchStore
+import MatchSession
 
 public enum M4ApplicationBootstrapError: Error, Sendable, Equatable { case unavailable }
 @MainActor public final class M4ApplicationContext {
@@ -202,7 +203,7 @@ public enum M4ApplicationBootstrapError: Error, Sendable, Equatable { case unava
   }
   /// Explicit development assembly: independent borrowed inputs and original051
   /// material are checked before this one original business facade is opened.
-  public static func controlled(configuration: DevelopmentAuthorityConfiguration, rootDirectory: URL) async throws -> M4ApplicationContext {
+  public static func controlled(configuration: DevelopmentAuthorityConfiguration, rootDirectory: URL, workout: (any WorkoutGateway)? = nil) async throws -> M4ApplicationContext {
     let identity = try M4ControlledCurrentIdentity(directory: rootDirectory.appendingPathComponent("development/current-identity"), namespace: configuration.namespace)
     _ = try await identity.currentIdentity()
     let prepared = try await M4IdentityBootstrap.prepare(root: rootDirectory, namespace: configuration.namespace,
@@ -214,7 +215,7 @@ public enum M4ApplicationBootstrapError: Error, Sendable, Equatable { case unava
     try prepared.prepareManagedResources()
     let adapters = try M4ControlledAdapters.make(configuration: configuration, rootDirectory: rootDirectory)
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
-    let original = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: configuration.cloudSpaceID, identity: identity, controlledAdapters: adapters)
+    let original = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: configuration.cloudSpaceID, identity: identity, workout: workout, controlledAdapters: adapters)
     return M4ApplicationContext(original: original, developmentSimulation: true, servesPhoneInbox: configuration.role == "phone")
   }
   #endif
