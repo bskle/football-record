@@ -3,6 +3,7 @@ import Darwin
 import AccountKit
 import MatchStore
 import MatchSession
+import CloudSync
 #if DEBUG
 import MatchPresentation
 #endif
@@ -22,7 +23,7 @@ struct M4IdentityMaterial: Sendable {
   let signer: any DeviceProofSigner
   let vault: any DeviceCredentialVault
 }
-enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename, afterBusinessRename }
+enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename, afterBusinessRename, afterLedgerReservation, afterLedgerRename, afterLedgerInitialization, afterPairSeal }
 
 @MainActor final class M4PreparedIdentity {
   let seed: M4IdentitySeed
@@ -31,14 +32,18 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
   private var repository: SQLiteSessionRepository?
   private var resources: M4PhysicalResourceOwner?
   private var managedResourcesRequired = false
+  private var authorityTrust: AuthorityTrustConfiguration?
+  private var resourceReplyGate: (@MainActor () async -> Void)?
+  private var closing = false
   private var closed = false
   fileprivate init(seed: M4IdentitySeed, material: M4IdentityMaterial, lease: M4NamespaceLease) {
     self.seed = seed; self.material = material; self.lease = lease
   }
-  func prepareManagedResources(crashHook: ((M4ResourceCrashPoint) throws -> Void)? = nil) throws {
+  func prepareManagedResources(crashHook: ((M4ResourceCrashPoint) throws -> Void)? = nil, resourceReplyGate: (@MainActor () async -> Void)? = nil) throws {
     guard !closed, repository == nil, resources == nil else { throw M4BootstrapError.alreadyOpened }
     try lease.verifyIdentity()
     managedResourcesRequired = true
+    self.resourceReplyGate = resourceReplyGate
     resources = try M4PhysicalResourceOwner(seed: seed, keyID: AuthorityWire.deviceKeyID(publicKey: material.signer.publicKey), crashHook: crashHook)
   }
   func openRepository(authorityTrust: AuthorityTrustConfiguration? = nil, cloudSavePolicy: CloudSaveProofPolicy = .unavailable) throws -> SQLiteSessionRepository {
@@ -48,25 +53,71 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
     try lease.verifyIdentity()
     try resources?.verify()
     let value = try SQLiteSessionRepository(rootDirectory: seed.root, databaseNamespace: seed.namespace, authorityTrust: authorityTrust, cloudSavePolicy: cloudSavePolicy)
-    repository = value
+    repository = value; self.authorityTrust = authorityTrust
     try resources?.verify()
     return value
   }
+  func requireUnboundResources() throws {
+    guard !closed, !closing, let resources else { throw AuthorityError.unavailable }
+    try lease.verifyIdentity(); try resources.verify()
+    guard try resources.catalog.phoneResources() == nil, try resources.catalog.index().entries.isEmpty else { throw AuthorityError.unavailable }
+  }
+  func activePhoneAttachment() throws -> M4PhoneScopeAttachment? {
+    guard !closed, !closing, let resources else { throw AuthorityError.unavailable }
+    try lease.verifyIdentity(); return try resources.catalog.phoneResources()?.attachment
+  }
+  func prepareCurrentPhoneResources(expectedIdentityGeneration: Int64, observed: M4CurrentAccountIdentity) async throws -> M4ManagedPhoneResources {
+    guard !closed, !closing, let repository, let resources, let trust = authorityTrust else { throw AuthorityError.unavailable }
+    try lease.verifyIdentity()
+    guard let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: expectedIdentityGeneration),
+          proof.binding.role == .phone else { throw AuthorityError.unavailable }
+    guard !closed, !closing, proof.attempt.publicKey == material.signer.publicKey,
+          M4CatalogIO.raw(proof.binding.deviceID, seed.installationID),
+          M4CatalogIO.raw(proof.binding.accountID, observed.accountID), M4CatalogIO.raw(proof.binding.cloudSpaceID, observed.cloudSpaceID),
+          proof.binding.environment == observed.environment, observed.environment == trust.environment else { throw AuthorityError.identityChanged }
+    let handle = try resources.preparePhone(proof: proof, observed: observed, trust: trust)
+    // A test/observation boundary outside every catalog/SQLite critical section.
+    await resourceReplyGate?()
+    guard !closed, !closing, let current = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: expectedIdentityGeneration),
+          try handle.attachment.matches(current), !closed, !closing else { throw AuthorityError.identityChanged }
+    try requirePhoneResources(handle)
+    return handle
+  }
+  func requirePhoneResources(_ handle: M4ManagedPhoneResources) throws {
+    guard !closed, !closing, let resources else { throw AuthorityError.identityChanged }
+    try lease.verifyIdentity(); try resources.verify()
+    guard try M4CatalogIO.encode(resources.catalog.requirePhoneSeal()) == M4CatalogIO.encode(handle.seal),
+          let original = try resources.catalog.phoneResources(), try original.attachment.digest() == handle.attachment.digest() else { throw AuthorityError.identityChanged }
+  }
   func close() async throws {
     guard !closed else { return }
+    guard !closing else { throw M4BootstrapError.alreadyOpened }; closing = true; defer { closing = false }
     try lease.verifyIdentity()
-    try resources?.close()
+    try await resources?.close()
     try await repository?.close(); repository = nil
     closed = true; lease.close()
   }
 }
-/// Owns only original physical publication in this slice. Ledger slot stays empty
-/// until a later verified scope attachment; no account or deletion authority.
+struct M4ManagedPhoneResources: Sendable {
+  let attachment: M4PhoneScopeAttachment
+  let ledger: SQLiteCloudLedger
+  let storeCapsule, ledgerCapsule: M4OwnershipCapsule
+  let seal: M4PhonePairSeal
+  var scope: CloudScope { attachment.scope }
+  fileprivate init(attachment: M4PhoneScopeAttachment, ledger: SQLiteCloudLedger, storeCapsule: M4OwnershipCapsule, ledgerCapsule: M4OwnershipCapsule, seal: M4PhonePairSeal) {
+    self.attachment = attachment; self.ledger = ledger; self.storeCapsule = storeCapsule; self.ledgerCapsule = ledgerCapsule; self.seal = seal
+  }
+}
+/// Owns original physical publication and the first signed Phone resources.
+/// It grants no deletion authority.
 @MainActor private final class M4PhysicalResourceOwner {
   let catalog: M4OwnedDataCatalog
   let reservation: M4PhysicalResourceReservation
   private var closed = false
+  private var ledger: SQLiteCloudLedger?
+  private let crashHook: ((M4ResourceCrashPoint) throws -> Void)?
   init(seed: M4IdentitySeed, keyID: String, crashHook: ((M4ResourceCrashPoint) throws -> Void)?) throws {
+    self.crashHook = crashHook
     let parent = seed.controlDirectory.deletingLastPathComponent()
     let directory = parent.appendingPathComponent("resources", isDirectory: true)
     let catalogDirectory = parent.appendingPathComponent("catalog", isDirectory: true)
@@ -214,16 +265,82 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
   func verify() throws {
     guard !closed else { throw M4CatalogError.closed }
     let current = try state(), directory = try resourceLocation()
-    guard current.resourcesPublished, current.businessPublished, M4CatalogIO.raw(directory.path, reservation.directory.path),
-          Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == ["resource.owner", "ledger.slot"] else { throw M4CatalogError.unknownControl }
-    try requireEmpty(directory.appendingPathComponent("ledger.slot"), original: reservation.ledgerSlot)
+    guard current.resourcesPublished, current.businessPublished, M4CatalogIO.raw(directory.path, reservation.directory.path) else { throw M4CatalogError.unknownControl }
+    var names: Set<String> = ["resource.owner"]
+    if let phone = current.phone {
+      let source = URL(fileURLWithPath: phone.ledger.source.path), target = URL(fileURLWithPath: phone.ledger.published.path)
+      let hasSource = M4CatalogIO.exists(source), hasTarget = M4CatalogIO.exists(target)
+      guard hasSource != hasTarget, !phone.published || hasTarget else { throw M4CatalogError.identityChanged }
+      let url = hasSource ? source : target
+      try original(reservation.ledgerSlot, at: url); try privateFile(url)
+      guard try M4CatalogIO.encode(phone.ledger.ancestors) == M4CatalogIO.encode(M4CatalogIO.ancestors([phone.ledger.published] + controls)) else { throw M4CatalogError.identityChanged }
+      names.insert(url.lastPathComponent)
+      try rejectSidecarsForUninitializedBusiness(url)
+      for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = URL(fileURLWithPath: url.path + suffix)
+        if M4CatalogIO.exists(sidecar) { _ = try M4CatalogIO.anchor(sidecar); try privateFile(sidecar); names.insert(sidecar.lastPathComponent) }
+      }
+      if hasSource { try requireEmpty(url, original: reservation.ledgerSlot) }
+    } else {
+      try requireEmpty(directory.appendingPathComponent("ledger.slot"), original: reservation.ledgerSlot); names.insert("ledger.slot")
+    }
+    guard Set(try FileManager.default.contentsOfDirectory(atPath: directory.path)) == names else { throw M4CatalogError.unknownControl }
     let business = URL(fileURLWithPath: reservation.businessDatabase.path)
     try original(reservation.businessDatabase, at: business); try privateFile(business)
     try rejectSidecarsForUninitializedBusiness(business)
   }
-  func close() throws {
+  private var controls: [M4CatalogPath] { [reservation.owner] + reservation.identityControls + reservation.catalogControls }
+  private func capsule(_ root: M4CatalogPath, kind: M4OwnedLeafKind, id: String, scope: CloudScope) throws -> M4OwnershipCapsule {
+    let value = M4OwnershipCapsule(version: 1, namespaceID: reservation.reservationID, componentID: id, revision: 1, kind: kind, scope: scope,
+      root: root, retainedControls: controls, ancestors: try M4CatalogIO.ancestors([root] + controls))
+    try value.validate(); return value
+  }
+  func preparePhone(proof: VerifiedLocalAuthenticationEvidenceV4, observed: M4CurrentAccountIdentity, trust: AuthorityTrustConfiguration) throws -> M4ManagedPhoneResources {
+    try verify()
+    let scope = try CloudScope(accountID: proof.binding.accountID, cloudSpaceID: proof.binding.cloudSpaceID, zoneID: observed.zoneID, activationEpoch: proof.binding.activationEpoch)
+    let phone: M4PhoneResourceState
+    if let prior = try catalog.phoneResources() {
+      guard try prior.attachment.matches(proof), prior.attachment.scope == scope else { throw AuthorityError.identityChanged }; phone = prior
+    } else {
+      let id = UUID().uuidString
+      let attachment = M4PhoneScopeAttachment(attachmentID: UUID().uuidString, physicalReservationID: reservation.reservationID,
+        identityGeneration: proof.identityGeneration, currentAuthRequestID: proof.currentAuthRequestID, attempt: proof.attempt,
+        binding: proof.binding, receiptRaw: proof.receipt.raw, scope: scope)
+      let target = M4CatalogPath(path: reservation.directory.path + "/ledger-" + id + ".sqlite", device: reservation.ledgerSlot.device, inode: reservation.ledgerSlot.inode, directory: false)
+      let descriptor = M4PhoneLedgerDescriptor(ledgerID: id, source: reservation.ledgerSlot, published: target, ancestors: try M4CatalogIO.ancestors([target] + controls))
+      phone = M4PhoneResourceState(attachment: attachment, ledger: descriptor, published: false, seal: nil)
+    }
+    try phone.validate(reservation)
+    let verified = try VerifiedAuthorityReceiptV1.verify(phone.attachment.receiptRaw,
+      expected: AuthorityExpectedIntent(requestID: phone.attachment.currentAuthRequestID, digest: phone.attachment.attempt.requestDigest, operation: .authApple, accountID: phone.attachment.binding.accountID, epoch: scope.activationEpoch), trust: trust)
+    guard verified.raw == proof.receipt.raw, verified.body.result == .registered, proof.binding.role == .phone else { throw AuthorityError.unavailable }
+    let store = try capsule(reservation.businessDatabase, kind: .businessStore, id: "m4-business-store", scope: scope)
+    let ledgerCapsule = try capsule(phone.ledger.published, kind: .cloudLedger, id: phone.ledger.componentID, scope: scope)
+    try catalog.reservePhoneResources(phone, store: store, ledger: ledgerCapsule)
+    try crashHook?(.afterLedgerReservation)
+    let source = URL(fileURLWithPath: phone.ledger.source.path), target = URL(fileURLWithPath: phone.ledger.published.path)
+    let hasSource = M4CatalogIO.exists(source), hasTarget = M4CatalogIO.exists(target)
+    guard hasSource != hasTarget else { throw M4CatalogError.identityChanged }
+    if hasSource {
+      guard !phone.published else { throw M4CatalogError.identityChanged }
+      try requireEmpty(source, original: reservation.ledgerSlot); try rejectSidecarsForUninitializedBusiness(source)
+      guard renameatx_np(AT_FDCWD, source.path, AT_FDCWD, target.path, UInt32(RENAME_EXCL)) == 0 else { throw M4CatalogError.storageBlocked }
+      try crashHook?(.afterLedgerRename)
+    }
+    try original(reservation.ledgerSlot, at: target); try privateFile(target); try rejectSidecarsForUninitializedBusiness(target)
+    try M4CatalogIO.syncDirectory(target.deletingLastPathComponent())
+    try catalog.publishPhoneLedger(phone.ledger); try verify()
+    if ledger == nil { ledger = try SQLiteCloudLedger(url: target) }
+    guard let ledger else { throw M4CatalogError.storageBlocked }
+    try crashHook?(.afterLedgerInitialization)
+    try store.verifyCurrent(); try ledgerCapsule.verifyCurrent()
+    let seal = try catalog.sealPhoneResources(store: store, ledger: ledgerCapsule)
+    try crashHook?(.afterPairSeal)
+    return M4ManagedPhoneResources(attachment: phone.attachment, ledger: ledger, storeCapsule: store, ledgerCapsule: ledgerCapsule, seal: seal)
+  }
+  func close() async throws {
     guard !closed else { return }
-    try verify(); try catalog.close(); closed = true
+    try verify(); try await ledger?.close(); try catalog.close(); closed = true
   }
 }
 

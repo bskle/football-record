@@ -69,6 +69,8 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private var quiescing: Task<Void, any Error>?
   private var identityTasks: [UUID: Task<Void, any Error>] = [:]
   private(set) var admittedScope: CloudScope?
+  private var scopeBusy = false
+  private var managedPhoneResources: M4ManagedPhoneResources?
   private init(prepared: M4PreparedIdentity, repository: SQLiteSessionRepository, session: MatchSession, context: AccountAppContext, client: AuthorityClient, accountService: AccountService, phoneRegistration: PhoneWatchRegistrationService, watchRegistration: WatchRegistrationService, cloudBridge: CloudSessionBridge, sync: MatchSyncService, identity: any M4CurrentIdentityObserving, cloudSpaceID: String, watchRelay: M4WatchRegistrationRelay, closeBridge: M4CompositionCloseBridge, controlledAdapters: M4ControlledAdapters?) {
     self.prepared = prepared; self.repository = repository; self.session = session; self.context = context; self.client = client
     self.accountService = accountService; self.phoneRegistration = phoneRegistration; self.watchRegistration = watchRegistration; self.cloudBridge = cloudBridge; self.sync = sync; self.identity = identity; self.cloudSpaceID = cloudSpaceID; self.watchRelay = watchRelay; self.closeBridge = closeBridge; self.controlledAdapters = controlledAdapters
@@ -136,7 +138,11 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     // A new current observation invalidates old UI admission before any await.
     // Failure never leaves recording ready from the prior retained credential.
     admittedScope = nil; context.account.pauseIdentity()
-    try await ownBusiness { try await self.accountAction(action) }
+    try await ownBusiness {
+      guard !self.scopeBusy else { throw AuthorityError.conflict }
+      self.scopeBusy = true; defer { self.scopeBusy = false }
+      try await self.accountAction(action)
+    }
   }
   /// This control owner is deliberately outside businessOperations: it joins the
   /// original business calls and must never wait on its own registration.
@@ -207,37 +213,56 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   private func accountAction(_ action: AccountUserAction) async throws {
     // Pending-deletion renewal requires its purpose-specific control service.
     guard action != .renew else { throw AuthorityError.unavailable }
+    let retained = try prepared.activePhoneAttachment()
+    // An existing active reservation already fixes this namespace, even when a
+    // capsule/seal response was lost. Never dispatch a new generic auth here.
+    guard retained == nil || action == .recover else { throw AuthorityError.identityChanged }
     let observed = try await freshBusinessIdentity(), token = businessLifetime
+    if let retained { try requireObservation(observed, scope: retained.scope, environment: retained.binding.environment) }
     let binding = try await repository.accountBindingV4()
     try requireBusiness(token)
+    guard binding?.role != .watch, binding?.role != .waiting else { throw AuthorityError.unavailable }
+    let watchPending = try await repository.pendingWatchRegistrationAttemptsV4()
+    try requireBusiness(token)
     let result: AccountAuthentication
-    if action == .registerWatch || binding?.role == .watch {
-      guard binding == nil || binding?.role == .watch else { throw AuthorityError.identityChanged }
+    if action == .registerWatch || (action == .recover && !watchPending.isEmpty) {
+      try prepared.requireUnboundResources()
+      try await requireUnboundProtocolState(token: token)
+      guard binding == nil else { throw AuthorityError.unavailable }
+      guard watchPending.count <= 1 else { throw AuthorityError.conflict }
       let originalContext = try await watchRelay.registrationContext()
       try requireBusiness(token)
       guard raw(originalContext.accountID, observed.accountID), raw(originalContext.cloudSpaceID, observed.cloudSpaceID), originalContext.environment == observed.environment else { throw AuthorityError.identityChanged }
       try await watchRegistration.admitCurrentIdentity(context: originalContext)
       try requireBusiness(token)
-      let pending = try await repository.pendingWatchRegistrationAttemptsV4()
+      let pending = watchPending
       try requireBusiness(token)
-      guard pending.count <= 1 else { throw AuthorityError.conflict }
       if let original = pending.first { result = try await watchRegistration.recover(requestID: original.requestID) }
       else {
         guard action != .recover else { throw LifecycleClientError.unknownOriginal }
         result = try await watchRegistration.register(requestID: UUID().uuidString, challengeRequestID: UUID().uuidString)
       }
     } else {
+      guard watchPending.isEmpty else { throw AuthorityError.unavailable }
       try await accountService.admitCurrentIdentity(accountID: observed.accountID)
       try requireBusiness(token)
       let pending = try await repository.pendingAuthAttemptsV4()
       try requireBusiness(token)
       guard pending.count <= 1 else { throw AuthorityError.conflict }
-      if let original = pending.first { result = try authenticated(await accountService.recover(authRequestID: original.requestID)) }
-      else if action == .recover {
-        guard let original = try await repository.currentAuthRequestIDV4() else { throw LifecycleClientError.unknownOriginal }
+      if let original = pending.first {
+        guard retained == nil || retained?.currentAuthRequestID == original.requestID else { throw AuthorityError.identityChanged }
+        result = try authenticated(await accountService.recover(authRequestID: original.requestID))
+      }
+      else if let original = try await repository.currentAuthRequestIDV4() {
+        guard retained == nil || retained?.currentAuthRequestID == original else { throw AuthorityError.identityChanged }
         try requireBusiness(token)
         result = try authenticated(await accountService.recover(authRequestID: original))
       } else {
+        guard action != .recover else { throw LifecycleClientError.unknownOriginal }
+        // A nil current witness alone cannot choose a new protocol. Original
+        // pointers, attempts and unfinished controls must all be absent.
+        try prepared.requireUnboundResources()
+        try await requireUnboundProtocolState(token: token)
         result = try await accountService.signIn(requestID: UUID().uuidString, challengeRequestID: UUID().uuidString)
       }
     }
@@ -246,9 +271,22 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
           raw(result.binding.deviceID, prepared.seed.installationID), result.binding.environment == observed.environment else { throw AuthorityError.identityChanged }
     // A retained credential/configured subject never substitutes for this second
     // independent current observation and the existing checked038 projection.
-    try await admitCurrentIdentity()
+    try await observeAndAdmitIdentity(expectedIdentity: observed)
     try requireBusiness(token)
     reauthenticationID = result.reauthenticationID
+  }
+  private func requireUnboundProtocolState(token: UUID) async throws {
+    let generation = try await repository.identityGenerationV4()
+    let attempts = try await repository.authAttemptsV4(), current = try await repository.currentAuthRequestIDV4()
+    let controls = try await repository.pendingControlsV4(), sagas = try await repository.deletionSagasV4()
+    let migration = try await repository.latestMigrationV4()
+    try requireBusiness(token)
+    guard attempts.isEmpty, current == nil, controls.isEmpty, sagas.isEmpty, migration == nil else { throw AuthorityError.unavailable }
+    // nil is only one checked fact, never a freshness decision on its own.
+    let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: generation)
+    let binding = try await repository.accountBindingV4()
+    guard proof == nil, binding == nil, try await repository.identityGenerationV4() == generation else { throw AuthorityError.unavailable }
+    try requireBusiness(token); try prepared.requireUnboundResources()
   }
   private func authenticated(_ recovery: AuthenticationRecovery) throws -> AccountAuthentication {
     switch recovery {
@@ -284,44 +322,107 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
   /// credential by itself never calls this method or admits the presentation.
   func admitCurrentIdentity() async throws {
     guard !closed, !businessStopped else { throw AuthorityError.identityChanged }
-    let id = UUID(), task = Task { try await self.observeAndAdmitIdentity() }
+    admittedScope = nil; context.account.pauseIdentity()
+    let id = UUID(), task = Task {
+      guard !self.scopeBusy else { throw AuthorityError.conflict }
+      self.scopeBusy = true; defer { self.scopeBusy = false }
+      try await self.observeAndAdmitIdentity()
+    }
     identityTasks[id] = task
     defer { identityTasks[id] = nil }
     try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
   }
-  private func observeAndAdmitIdentity() async throws {
+  private func sameProof(_ lhs: VerifiedLocalAuthenticationEvidenceV4, _ rhs: VerifiedLocalAuthenticationEvidenceV4) throws -> Bool {
+    let bindingMatches = try AuthorityWire.encode(lhs.binding) == AuthorityWire.encode(rhs.binding)
+    let attemptMatches = try AuthorityWire.encode(lhs.attempt) == AuthorityWire.encode(rhs.attempt)
+    return lhs.identityGeneration == rhs.identityGeneration && lhs.admissionGeneration == rhs.admissionGeneration &&
+      raw(lhs.currentAuthRequestID, rhs.currentAuthRequestID) && lhs.receipt.raw == rhs.receipt.raw && bindingMatches && attemptMatches
+  }
+  private func requireIdentityLifetime(_ token: UUID) throws {
+    guard !closed, !businessStopped, finalClosing == nil, lifetime == token else { throw AuthorityError.identityChanged }
+    try Task.checkCancellation()
+  }
+  private func checkedProof(_ original: VerifiedLocalAuthenticationEvidenceV4, token: UUID) async throws {
+    try requireIdentityLifetime(token)
+    guard let current = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: original.identityGeneration),
+          try sameProof(original, current) else { throw AuthorityError.identityChanged }
+    try requireIdentityLifetime(token)
+  }
+  private func requireCredential(_ credential: DeviceCredential, binding: AccountBindingV4) throws {
+    guard raw(credential.accountID, binding.accountID), raw(credential.deviceID, prepared.seed.installationID),
+          raw(credential.deviceID, binding.deviceID), credential.activationEpoch == binding.activationEpoch,
+          raw(credential.keyID, try AuthorityWire.deviceKeyID(publicKey: prepared.material.signer.publicKey)),
+          Double(credential.expiresAt) > Date().timeIntervalSince1970 else { throw AuthorityError.staleAttestation }
+  }
+  private func requireObservation(_ observed: M4CurrentAccountIdentity, scope: CloudScope, environment: AuthorityEnvironment) throws {
+    guard raw(observed.accountID, scope.accountID), raw(observed.cloudSpaceID, scope.cloudSpaceID),
+          raw(observed.cloudSpaceID, cloudSpaceID), raw(observed.zoneID, scope.zoneID),
+          observed.environment == environment, observed.environment == client.trust.environment else { throw AuthorityError.identityChanged }
+  }
+  private func observeAndAdmitIdentity(expectedIdentity: M4CurrentAccountIdentity? = nil) async throws {
     guard !closed, !businessStopped else { throw AuthorityError.identityChanged }
     let token = UUID(); lifetime = token; admittedScope = nil; context.account.pauseIdentity()
     do {
+      _ = try prepared.activePhoneAttachment() // no unmanaged/binding-only bypass
       let generation = try await repository.identityGenerationV4()
-      guard let binding = try await repository.accountBindingV4(), !binding.suspended else { throw AuthorityError.identityChanged }
+      guard let proof = try await repository.currentAuthenticationEvidenceV4(expectedIdentityGeneration: generation),
+            proof.binding.role == .phone, !proof.binding.suspended else { throw AuthorityError.unavailable }
+      try requireIdentityLifetime(token)
       try await identity.advanceIdentityFence(to: generation)
       let observed = try await identity.currentIdentity()
-      try await unchanged(binding, generation: generation, token: token)
       for value in [observed.accountID, observed.cloudSpaceID, observed.zoneID] { try AuthorityWire.identifier(value) }
-      guard raw(observed.accountID, binding.accountID), raw(observed.cloudSpaceID, binding.cloudSpaceID), raw(observed.cloudSpaceID, cloudSpaceID),
-            raw(binding.deviceID, prepared.seed.installationID), observed.environment == binding.environment, observed.environment == client.trust.environment else { throw AuthorityError.identityChanged }
-      let credential = try await prepared.material.vault.credential()
-      guard raw(credential.accountID, binding.accountID), raw(credential.deviceID, binding.deviceID), credential.activationEpoch == binding.activationEpoch,
-            raw(credential.keyID, try AuthorityWire.deviceKeyID(publicKey: prepared.material.signer.publicKey)), Double(credential.expiresAt) > Date().timeIntervalSince1970 else { throw AuthorityError.identityChanged }
-      if binding.role == .watch {
-        let context = try await watchRelay.registrationContext()
-        guard raw(context.accountID, observed.accountID), raw(context.cloudSpaceID, observed.cloudSpaceID), context.activationEpoch == binding.activationEpoch, context.environment == observed.environment else { throw AuthorityError.identityChanged }
-        try await watchRegistration.admitCurrentIdentity(context: context)
-      } else {
-        try await accountService.admitCurrentIdentity(accountID: observed.accountID)
-        if binding.role == .phone { try await phoneRegistration.admitCurrentIdentity(accountID: observed.accountID) }
+      guard raw(observed.accountID, proof.binding.accountID), raw(observed.cloudSpaceID, proof.binding.cloudSpaceID),
+            raw(observed.cloudSpaceID, cloudSpaceID), raw(proof.binding.deviceID, prepared.seed.installationID),
+            raw(proof.attempt.publicKey, prepared.material.signer.publicKey),
+            observed.environment == proof.binding.environment, observed.environment == client.trust.environment else { throw AuthorityError.identityChanged }
+      if let expectedIdentity {
+        guard raw(observed.accountID, expectedIdentity.accountID), raw(observed.cloudSpaceID, expectedIdentity.cloudSpaceID),
+              raw(observed.zoneID, expectedIdentity.zoneID), observed.environment == expectedIdentity.environment else { throw AuthorityError.identityChanged }
       }
-      try await unchanged(binding, generation: generation, token: token)
-      let scope = try CloudScope(accountID: observed.accountID, cloudSpaceID: observed.cloudSpaceID, zoneID: observed.zoneID, activationEpoch: binding.activationEpoch)
-      try await context.lifecycle.projectCloudScope(scope, expectedIdentityGeneration: generation)
-      try await unchanged(binding, generation: generation, token: token)
-      try await context.account.admitIdentity(binding, expectedIdentityGeneration: generation)
-      try await unchanged(binding, generation: generation, token: token)
-      admittedScope = scope
+      try await checkedProof(proof, token: token)
+      let handle = try await prepared.prepareCurrentPhoneResources(expectedIdentityGeneration: generation, observed: observed)
+      try await checkedProof(proof, token: token)
+      try validateOriginalStoreCapsule(handle.storeCapsule, scope: handle.scope)
+      let credential = try await prepared.material.vault.credential()
+      try requireIdentityLifetime(token); try requireCredential(credential, binding: proof.binding)
+      try await accountService.admitCurrentIdentity(accountID: observed.accountID)
+      try await phoneRegistration.admitCurrentIdentity(accountID: observed.accountID)
+      if let prior = managedPhoneResources {
+        guard prior.ledger === handle.ledger, try prior.attachment.digest() == handle.attachment.digest() else { throw AuthorityError.identityChanged }
+      } else {
+        guard identityLifecycle == nil else { throw AuthorityError.identityChanged }
+        try await installIdentityLifecycle(ledger: handle.ledger, scope: handle.scope)
+        managedPhoneResources = handle
+      }
+      try await context.lifecycle.projectCloudScope(handle.scope, expectedIdentityGeneration: generation)
+      try await checkedProof(proof, token: token)
+      // Last independent source observation, after owner/credential/service
+      // tails. Subsequent SQL/model reads are not a global identity lease.
+      try await identity.advanceIdentityFence(to: generation)
+      let finalObserved = try await identity.currentIdentity()
+      try requireObservation(finalObserved, scope: handle.scope, environment: proof.binding.environment)
+      try await checkedProof(proof, token: token)
+      guard try await handle.ledger.scopeState(scope: handle.scope).issue != .accountChanged else { throw AuthorityError.identityChanged }
+      try await checkedProof(proof, token: token)
+      let finalCheck = finalPhoneAdmissionCheck(handle, credential: credential)
+      // Accepted056 executes this veto after model SQL awaits and rechecks its
+      // own stopped/token after callback reentry, immediately before ready.
+      try await context.account.admitIdentity(proof.binding, expectedIdentityGeneration: generation, finalCheck: finalCheck)
+      try finalCheck() // no new vault await before the scope publication
+      admittedScope = handle.scope
     } catch {
       if lifetime == token { admittedScope = nil; context.account.pauseIdentity() }
       throw error
+    }
+  }
+  /// A veto only, never an admission or a substitute for the checked current
+  /// proof and independent source observations in the common gate.
+  func finalPhoneAdmissionCheck(_ handle: M4ManagedPhoneResources, credential: DeviceCredential) -> @MainActor () throws -> Void {
+    let token = lifetime
+    return {
+      try self.requireIdentityLifetime(token)
+      try self.prepared.requirePhoneResources(handle)
+      try self.requireCredential(credential, binding: handle.attachment.binding)
     }
   }
   /// The owner closes business entry synchronously, then joins the original
@@ -447,12 +548,6 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
     guard capsule.kind == .businessStore, !capsule.root.directory, capsule.scope == scope,
           try M4CatalogIO.encode(capsule.root) == M4CatalogIO.encode(M4CatalogIO.anchor(prepared.seed.businessDatabaseURL)) else { throw M4CatalogError.identityChanged }
     try capsule.verifyCurrent()
-  }
-  private func unchanged(_ binding: AccountBindingV4, generation: Int64, token: UUID) async throws {
-    guard !closed, !businessStopped, lifetime == token, try await repository.identityGenerationV4() == generation,
-          let current = try await repository.accountBindingV4(), try AuthorityWire.encode(current) == AuthorityWire.encode(binding), !closed, lifetime == token,
-          try await repository.identityGenerationV4() == generation,
-          !closed, !businessStopped, lifetime == token else { throw AuthorityError.identityChanged }
   }
   private func raw(_ lhs: String, _ rhs: String) -> Bool { Data(lhs.utf8) == Data(rhs.utf8) }
 }

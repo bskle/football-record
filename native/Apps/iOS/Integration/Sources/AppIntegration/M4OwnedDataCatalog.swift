@@ -261,11 +261,75 @@ struct M4PhysicalResourceReservation: Codable, Sendable {
           Set(([owner, businessSlot, ledgerSlot] + identityControls + catalogControls).map { "\($0.device):\($0.inode)" }).count == 8 else { throw M4CatalogError.intentMismatch }
   }
 }
+/// Retained signed-grant provenance; only the original factory witness may
+/// select it. Decoding this DTO is never current identity admission.
+struct M4PhoneScopeAttachment: Codable, Sendable {
+  let attachmentID, physicalReservationID: String
+  let identityGeneration: Int64
+  let currentAuthRequestID: String
+  let attempt: AuthAttemptV4
+  let binding: AccountBindingV4
+  let receiptRaw: Data
+  let scope: CloudScope
+  func validate(_ physical: M4PhysicalResourceReservation) throws {
+    guard UUID(uuidString: attachmentID)?.uuidString == attachmentID,
+          physicalReservationID == physical.reservationID, (0...9_007_199_254_740_991).contains(identityGeneration),
+          binding.role == .phone, !binding.suspended, receiptRaw.count > 0, receiptRaw.count <= 65536,
+          M4CatalogIO.raw(currentAuthRequestID, attempt.requestID),
+          M4CatalogIO.raw(binding.deviceID, physical.installationID), M4CatalogIO.raw(attempt.deviceID, binding.deviceID),
+          M4CatalogIO.raw(attempt.cloudSpaceID, binding.cloudSpaceID), attempt.keyID == physical.keyID,
+          attempt.environment == binding.environment,
+          M4CatalogIO.raw(scope.accountID, binding.accountID), M4CatalogIO.raw(scope.cloudSpaceID, binding.cloudSpaceID),
+          scope.activationEpoch == binding.activationEpoch else { throw M4CatalogError.intentMismatch }
+    guard try AuthorityWire.deviceKeyID(publicKey: attempt.publicKey) == attempt.keyID else { throw M4CatalogError.intentMismatch }
+    _ = try CloudScope(accountID: scope.accountID, cloudSpaceID: scope.cloudSpaceID, zoneID: scope.zoneID, activationEpoch: scope.activationEpoch)
+    guard try M4CatalogIO.encode(self).count <= 131072 else { throw M4CatalogError.budgetExceeded }
+  }
+  func matches(_ value: VerifiedLocalAuthenticationEvidenceV4) throws -> Bool {
+    let attemptMatches = try M4CatalogIO.encode(attempt) == M4CatalogIO.encode(value.attempt)
+    let bindingMatches = try M4CatalogIO.encode(binding) == M4CatalogIO.encode(value.binding)
+    return identityGeneration == value.identityGeneration && value.admissionGeneration == identityGeneration &&
+      M4CatalogIO.raw(currentAuthRequestID, value.currentAuthRequestID) && receiptRaw == value.receipt.raw && attemptMatches && bindingMatches
+  }
+  func digest() throws -> String { M4CatalogIO.hash(try M4CatalogIO.encode(self)) }
+}
+struct M4PhoneLedgerDescriptor: Codable, Sendable {
+  let ledgerID: String
+  let source, published: M4CatalogPath
+  let ancestors: [M4CatalogPath]
+  func validate(_ physical: M4PhysicalResourceReservation) throws {
+    guard UUID(uuidString: ledgerID)?.uuidString == ledgerID,
+          try M4CatalogIO.encode(source) == M4CatalogIO.encode(physical.ledgerSlot),
+          published.path == physical.directory.path + "/ledger-" + ledgerID + ".sqlite",
+          !published.directory, M4CatalogIO.sameInode(source, published), ancestors.count <= 4096 else { throw M4CatalogError.intentMismatch }
+    for value in [source, published] + ancestors { try M4CatalogIO.validate(value) }
+  }
+  var componentID: String { "m4-cloud-ledger-" + ledgerID }
+}
+struct M4PhonePairSeal: Codable, Sendable {
+  let attachmentDigest, storeDigest, ledgerDigest: String
+}
+struct M4PhoneResourceState: Codable, Sendable {
+  let attachment: M4PhoneScopeAttachment
+  let ledger: M4PhoneLedgerDescriptor
+  var published: Bool
+  var seal: M4PhonePairSeal?
+  func validate(_ physical: M4PhysicalResourceReservation) throws {
+    try attachment.validate(physical); try ledger.validate(physical)
+    if let seal {
+      guard published, seal.attachmentDigest == (try attachment.digest()),
+            M4CatalogIO.isDigest(seal.storeDigest), M4CatalogIO.isDigest(seal.ledgerDigest) else { throw M4CatalogError.intentMismatch }
+    }
+  }
+}
 struct M4PhysicalBootstrapState: Codable, Sendable {
   let reservation: M4PhysicalResourceReservation
   var resourcesPublished, businessPublished: Bool
+  var phone: M4PhoneResourceState? = nil
   func validate() throws {
     try reservation.validate()
+    try phone?.validate(reservation)
+    guard phone == nil || businessPublished else { throw M4CatalogError.intentMismatch }
     guard !businessPublished || resourcesPublished else { throw M4CatalogError.intentMismatch }
   }
 }
@@ -319,6 +383,16 @@ struct M4CatalogState: Codable {
     guard Set(entries.map { Data($0.capsule.componentID.utf8) }).count == entries.count,
           try M4CatalogIO.encode(entries) == M4CatalogIO.encode(entries.sorted { Data($0.capsule.componentID.utf8).lexicographicallyPrecedes(Data($1.capsule.componentID.utf8)) }) else { throw M4CatalogError.intentMismatch }
     for entry in entries { try entry.capsule.validate() }
+    if let phone = physicalBootstrap?.phone, let seal = phone.seal {
+      guard let store = entries.first(where: { $0.capsule.componentID == "m4-business-store" }),
+            let ledger = entries.first(where: { $0.capsule.componentID == phone.ledger.componentID }),
+            !store.retired, !ledger.retired, store.capsule.kind == .businessStore, ledger.capsule.kind == .cloudLedger,
+            store.capsule.scope == phone.attachment.scope, ledger.capsule.scope == phone.attachment.scope,
+            try store.capsule.digest() == seal.storeDigest, try ledger.capsule.digest() == seal.ledgerDigest,
+            let physical = physicalBootstrap?.reservation,
+            try M4CatalogIO.encode(store.capsule.root) == M4CatalogIO.encode(physical.businessDatabase),
+            try M4CatalogIO.encode(ledger.capsule.root) == M4CatalogIO.encode(phone.ledger.published) else { throw M4CatalogError.intentMismatch }
+    }
     for plan in plans {
       try plan.validate()
       guard plan.catalogRevision == ownedRevision, plan.catalogRevision <= revision, try M4CatalogIO.encode(plan.entries) == M4CatalogIO.encode(entries) else { throw M4CatalogError.intentMismatch }
@@ -352,6 +426,76 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
       state.physicalBootstrap = prior
     }
     guard let saved = try physicalBootstrap(), saved.resourcesPublished, !business || saved.businessPublished else { throw M4CatalogError.storageBlocked }
+  }
+  func phoneResources() throws -> M4PhoneResourceState? { try journal.read().physicalBootstrap?.phone }
+  func reservePhoneResources(_ phone: M4PhoneResourceState, store: M4OwnershipCapsule, ledger: M4OwnershipCapsule) throws {
+    func matches(_ value: M4PhoneResourceState?) throws -> Bool {
+      guard let value else { return false }
+      return try M4CatalogIO.encode(value.attachment) == M4CatalogIO.encode(phone.attachment) && M4CatalogIO.encode(value.ledger) == M4CatalogIO.encode(phone.ledger)
+    }
+    do {
+      try journal.transaction { state in
+        guard var physical = state.physicalBootstrap, physical.businessPublished, state.plans.isEmpty else { throw M4CatalogError.intentMismatch }
+        try phone.validate(physical.reservation)
+        if physical.phone != nil { guard try matches(physical.phone) else { throw M4CatalogError.intentMismatch }; return }
+        guard !phone.published, phone.seal == nil, state.entries.isEmpty else { throw M4CatalogError.intentMismatch }
+        // Private capacity estimate with exact prospective paths/inodes/capsules.
+        // It is never persisted or returned as a seal before real publication.
+        var bound = state, future = physical, complete = phone
+        complete.published = true
+        complete.seal = M4PhonePairSeal(attachmentDigest: try phone.attachment.digest(), storeDigest: try store.digest(), ledgerDigest: try ledger.digest())
+        future.phone = complete; bound.physicalBootstrap = future
+        bound.entries = [M4CatalogEntry(capsule: store, retired: false), M4CatalogEntry(capsule: ledger, retired: false)]
+        guard try M4CatalogIO.encode(bound).count <= M4CatalogJournal.maximumJournalBytes - 16384 else { throw M4CatalogError.budgetExceeded }
+        physical.phone = phone; state.physicalBootstrap = physical
+      }
+    } catch { guard (try? matches(phoneResources())) == true else { throw error } }
+    guard try matches(phoneResources()) else { throw M4CatalogError.storageBlocked }
+  }
+  func publishPhoneLedger(_ descriptor: M4PhoneLedgerDescriptor) throws {
+    do {
+      try journal.transaction { state in
+        guard var physical = state.physicalBootstrap, var phone = physical.phone, state.plans.isEmpty,
+              try M4CatalogIO.encode(phone.ledger) == M4CatalogIO.encode(descriptor) else { throw M4CatalogError.intentMismatch }
+        phone.published = true; physical.phone = phone; state.physicalBootstrap = physical
+      }
+    } catch { guard (try? phoneResources()?.published) == true else { throw error } }
+    guard let saved = try phoneResources(), saved.published,
+          try M4CatalogIO.encode(saved.ledger) == M4CatalogIO.encode(descriptor) else { throw M4CatalogError.storageBlocked }
+  }
+  func sealPhoneResources(store: M4OwnershipCapsule, ledger: M4OwnershipCapsule) throws -> M4PhonePairSeal {
+    try store.verifyCurrent(); try ledger.verifyCurrent()
+    func recordReadback(_ capsule: M4OwnershipCapsule) throws {
+      do { try record(capsule) }
+      catch {
+        guard let entry = try? index().entries.first(where: { $0.capsule.componentID == capsule.componentID }),
+              try entry.capsule.digest() == capsule.digest() else { throw error }
+      }
+    }
+    try recordReadback(ledger); try recordReadback(store)
+    guard let phone = try phoneResources(), phone.published else { throw M4CatalogError.intentMismatch }
+    let seal = M4PhonePairSeal(attachmentDigest: try phone.attachment.digest(), storeDigest: try store.digest(), ledgerDigest: try ledger.digest())
+    do {
+      try journal.transaction { state in
+        guard var physical = state.physicalBootstrap, var current = physical.phone, state.plans.isEmpty,
+              try current.attachment.digest() == seal.attachmentDigest else { throw M4CatalogError.intentMismatch }
+        if let first = current.seal { guard try M4CatalogIO.encode(first) == M4CatalogIO.encode(seal) else { throw M4CatalogError.intentMismatch }; return }
+        current.seal = seal; physical.phone = current; state.physicalBootstrap = physical
+      }
+    } catch {
+      guard let saved = try? phoneResources(), let first = saved.seal,
+            try M4CatalogIO.encode(first) == M4CatalogIO.encode(seal) else { throw error }
+    }
+    return try requirePhoneSeal()
+  }
+  func requirePhoneSeal() throws -> M4PhonePairSeal {
+    let state = try journal.read()
+    guard let phone = state.physicalBootstrap?.phone, let seal = phone.seal else { throw M4CatalogError.intentMismatch }
+    for id in ["m4-business-store", phone.ledger.componentID] {
+      guard let entry = state.entries.first(where: { $0.capsule.componentID == id }), !entry.retired else { throw M4CatalogError.intentMismatch }
+      try entry.capsule.verifyCurrent()
+    }
+    return seal
   }
   func record(_ capsule: M4OwnershipCapsule) throws {
     try capsule.verifyCurrent()
