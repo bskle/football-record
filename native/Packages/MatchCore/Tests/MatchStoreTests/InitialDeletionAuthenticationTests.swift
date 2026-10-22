@@ -179,6 +179,7 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
             try await capacity.store.closePreparedInitialDeletionAttemptV4(creationID: "delete", authRequestID: "auth-\(index)", expectedIdentityGeneration: 0)
         }
         let full = try rawRows(capacity)
+        XCTAssertEqual(try sql(capacity) { try $0.scalar("SELECT max(length(CAST(id AS BLOB))) FROM lifecycle_steps_v4 WHERE id LIKE 'initial-delete-auth%'").number }, 98)
         await rejected({ _ = try await self.prepare(capacity, auth: "auth-16", challenge: "challenge-16") }, issue: .capacity)
         XCTAssertEqual(try rawRows(capacity), full); try await capacity.store.close()
         for size in [65_537, 2 * 1024 * 1024 + 1] {
@@ -195,6 +196,13 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
             }
             await rejected({ _ = try await x.store.initialDeletionContextV4(creationID: "delete", expectedIdentityGeneration: 0) }, issue: .capacity)
             try await x.store.close()
+        }
+        for kind in ["text", "blob"] {
+            let x = try await fixture(), long = "initial-delete-auth-v1:" + String(repeating: "x", count: 65_536)
+            try insert(x, key: kind == "text" ? .text(long) : .blob(Data(long.utf8)), payload: Data("{}".utf8))
+            let before = try rawRows(x)
+            await rejected({ _ = try await x.store.initialDeletionContextV4(creationID: "delete", expectedIdentityGeneration: 0) }, issue: .capacity)
+            XCTAssertEqual(try rawRows(x), before); try await x.store.close()
         }
     }
 

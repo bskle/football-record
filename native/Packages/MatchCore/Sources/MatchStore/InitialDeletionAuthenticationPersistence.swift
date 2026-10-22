@@ -30,16 +30,19 @@ extension MatchStore {
     }
     /// Shallow, self-contained namespace validation. Never calls another validator.
     func initialDeletionRowsLockedV1() throws -> InitialDeletionRowsV1 {
-        let sizes = try db.rows("SELECT typeof(id),typeof(payload),length(payload),typeof(checksum),length(checksum) FROM lifecycle_steps_v4 WHERE " + initialDeletionPredicateV1, initialDeletionPrefixV1)
+        let maximumKeyBytes = (InitialDeletionWireV1.namespace + "resolution:").utf8.count + 64
+        let sizes = try db.rows("SELECT typeof(id),typeof(payload),length(payload),typeof(checksum),length(checksum),length(CAST(id AS BLOB)) FROM lifecycle_steps_v4 WHERE " + initialDeletionPredicateV1 + " LIMIT 50", initialDeletionPrefixV1)
         guard sizes.count <= 49 else { throw InitialDeletionIssueV1.capacity }
         var result = InitialDeletionRowsV1(); result.rowCount = sizes.count
         for row in sizes {
+            guard let keyBytes = row[5].number, keyBytes >= 0, keyBytes <= maximumKeyBytes else { throw InitialDeletionIssueV1.capacity }
             guard let size = row[2].number, size >= 0, size <= InitialDeletionWireV1.maximumPayload else { throw InitialDeletionIssueV1.capacity }
             result.totalBytes += Int(size)
             guard result.totalBytes <= InitialDeletionWireV1.maximumTotal else { throw InitialDeletionIssueV1.capacity }
             guard row[0].string == "text", row[1].string == "blob", row[3].string == "text", row[4].number == 64 else { throw AuthorityError.invalidWire }
         }
-        let rows = try db.rows("SELECT id,payload,checksum,CAST(id AS BLOB) FROM lifecycle_steps_v4 WHERE " + initialDeletionPredicateV1 + " ORDER BY rowid", initialDeletionPrefixV1)
+        let rows = try db.rows("SELECT id,payload,checksum,CAST(id AS BLOB) FROM lifecycle_steps_v4 WHERE " + initialDeletionPredicateV1 + " AND length(CAST(id AS BLOB))<=? ORDER BY rowid LIMIT 49", initialDeletionPrefixV1 + [.integer(Int64(maximumKeyBytes))])
+        guard rows.count == sizes.count else { throw AuthorityError.invalidWire }
         for row in rows {
             guard let key = row[0].string, row[3].data == Data(key.utf8), let raw = row[1].data,
                 let checksum = row[2].string, checksum == Canonical.hash(raw), key.hasPrefix(InitialDeletionWireV1.namespace) else { throw AuthorityError.invalidWire }

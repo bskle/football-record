@@ -5,8 +5,10 @@ extension MatchStore {
     public func currentAuthRequestIDV4()throws->String? {try readLifecycleV4(String.self,"auth-current")}
 
     public func pendingAuthAttemptsV4()throws->[AuthAttemptV4] {
-        try validateInitialDeletionRowsLockedV1()
-        return try pendingOrdinaryAuthAttemptsLockedV4()
+        try db.transaction {
+            try validateInitialDeletionRowsLockedV1()
+            return try pendingOrdinaryAuthAttemptsLockedV4()
+        }
     }
     public func requireOrdinaryAuthenticationV4(authRequestID:String,challengeRequestID:String?)throws {
         try db.transaction { try requireOrdinaryAuthenticationLockedV4(authRequestID:authRequestID,challengeRequestID:challengeRequestID) }
