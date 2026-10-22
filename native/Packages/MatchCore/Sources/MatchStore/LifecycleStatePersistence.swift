@@ -139,6 +139,7 @@ extension MatchStore {
             for id in try matchIDs() {if let descriptor=try descriptorAndGeneration(id)?.0 {guard try loadOperations(matchID:id,descriptor:descriptor).allSatisfy({$0.state != .pending && $0.state != .needsReconciliation}) else {throw AuthorityError.unavailable}}}
             try db.validateLocalErasureLayoutV4()
             try validateDeletionControlRowsLockedV4()
+            try validateCurrentWatchRegistrationRowsLockedV4()
             for table in localBusinessTablesV4 { try db.execute("DELETE FROM "+table) }
             try db.execute("DELETE FROM lifecycle_steps_v4 WHERE "+localBusinessWitnessPredicateV4)
             try assertLocalBusinessZeroLockedV4()
@@ -218,6 +219,7 @@ extension MatchStore {
         do { return try db.transaction {
             try db.validateLocalErasureLayoutV4()
             try validateDeletionControlRowsLockedV4()
+            try validateCurrentWatchRegistrationRowsLockedV4()
             guard let saga = try deletionSagaV4(requestID: requestID), let original = saga.originalScope,
                   let receipt = saga.backendReceipt, let trust = authorityTrust,
                   saga.intent.requestID.utf8.elementsEqual(requestID.utf8), saga.intent.digest.utf8.elementsEqual(requestDigest.utf8),

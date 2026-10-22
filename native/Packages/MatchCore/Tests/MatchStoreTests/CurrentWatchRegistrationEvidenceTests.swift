@@ -233,7 +233,12 @@ final class CurrentWatchRegistrationEvidenceTests: XCTestCase, @unchecked Sendab
                 if field == "extra-marker" { try write(db, id: "watch-current-v2", value: "unknown"); return }
                 if field == "checksum" { try db.execute("UPDATE lifecycle_steps_v4 SET checksum=? WHERE id='watch-current-v1'", [.text(String(repeating: "0", count: 64))]); return }
                 if field == "noncanonical" { var obj = try object(db); obj["unexpected"] = true; try writeObject(db, id: "watch-current-v1", object: obj); return }
-                if field == "oversized-receipt" { try write(db, id: "watch-receipt:watch-original", value: Data(repeating: 0, count: 16_385)); return }
+                if field == "oversized-receipt" {
+                    let raw = Data(repeating: 0, count: 16_385)
+                    try write(db, id: "watch-receipt:watch-original", value: raw)
+                    var marker = try object(db); marker["receiptDigest"] = AuthorityWire.hash(raw)
+                    try writeObject(db, id: "watch-current-v1", object: marker); return
+                }
                 let raw = Data(repeating: 32, count: 32_769)
                 let key = ["oversized-marker": "watch-current-v1", "oversized-binding": "current", "oversized-attempt": "watch-attempt:watch-original", "oversized-admission": "watch-admission:watch", "oversized-migration": "migration-latest"][field]!
                 try db.execute("INSERT INTO " + (field == "oversized-binding" ? "account_binding_v4" : "lifecycle_steps_v4") + " VALUES (?,?,?) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,checksum=excluded.checksum", [.text(key), .blob(raw), .text(Canonical.hash(raw))])
@@ -271,6 +276,90 @@ final class CurrentWatchRegistrationEvidenceTests: XCTestCase, @unchecked Sendab
         try writer.close(); try await f.store.setAnalyticsEnabledV4(true)
         let enabled = try await f.store.analyticsEnabledV4(); XCTAssertTrue(enabled); try await f.store.close()
     }
+    func testMigrationAndDeletionControlsBlockCurrentEvidenceWithoutChangingHistory() async throws {
+        for control in ["migration", "deletion"] {
+            let f = try await fixture()
+            let s = try await mutate(f) { db in
+                if control == "deletion" { try write(db, id: "deletion:pending-control", value: "retained-unknown-deletion-control"); return }
+                var fields = AuthorityFields(); fields.newPhoneID = "next-phone"; fields.activationEpoch = 1
+                let intent = try ControlIntentV1(requestID: "migration", operation: .prepareMigration, fields: fields)
+                let migration: [String: Any] = ["migrationID": "migration", "kind": "normal", "state": "oldPhonePrepared", "oldPhoneID": "phone", "newPhoneID": "next-phone", "cloudSpaceID": "cloud", "checkpointID": "", "contentCommitment": "", "oldActivationEpoch": 1, "requestedAt": 100, "eligibleAt": 100]
+                let receipt = try h.receipt(f.context, requestID: intent.requestID, digest: intent.digest, operation: .prepareMigration, result: .waitingMigration, extra: ["migration": migration])
+                try write(db, id: "migration-latest", value: StoredLifecycleControlV4(intent: intent, accountID: f.binding.accountID, epoch: 1, raw: receipt.raw))
+            }
+            let before = try await s.watchEvidenceTestState(); await rejected(s, error: .identityChanged)
+            let raw = try await s.watchRegistrationReceiptV4(requestID: f.attempt.requestID), after = try await s.watchEvidenceTestState()
+            XCTAssertEqual(raw, f.receipt.raw); XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+            try await s.close()
+        }
+    }
+    func testControlReadUsesSameSnapshotAsOriginalAcceptance() async throws {
+        let f = try await fixture(), other = try SQLite(url: f.context.url, fault: nil)
+        let bytes = try Canonical.data("concurrent-deletion")
+        let value = try await f.store.checkedCurrentWatchRegistrationEvidenceV4(expectedIdentityGeneration: 0, afterSnapshot: {
+            try other.transaction { try other.execute("INSERT INTO lifecycle_steps_v4 VALUES (?,?,?)", [.text("deletion:concurrent"), .blob(bytes), .text(Canonical.hash(bytes))]) }
+        })
+        XCTAssertEqual(value?.receipt.raw, f.receipt.raw); await rejected(f.store, error: .identityChanged)
+        try other.close(); try await f.store.close()
+    }
+    func corruptMarker(_ db: SQLite, kind: String) throws {
+        if kind == "missing-attempt" { try db.execute("DELETE FROM lifecycle_steps_v4 WHERE id='watch-attempt:watch-original'"); return }
+        if kind == "extra" { try write(db, id: "watch-current-v2", value: "unknown-version"); return }
+        var marker = try object(db); marker["version"] = 2; try writeObject(db, id: "watch-current-v1", object: marker)
+    }
+    func deletionFixture() async throws -> (Fixture, MatchStore, DeletionSagaV4) {
+        let f = try await fixture()
+        let s = try await mutate(f) { db in try write(db, table: "account_binding_v4", id: "current", value: f.context.binding) }
+        let saga = try h.saga(f.context)
+        let start = StartIntent(id: "erase-intent", matchID: "erase-match", recordingDeviceID: "phone", requestedAt: h.h.t)
+        _ = try await s.commit(StoreCommit(commandID: "erase-business", expectedGeneration: 0, descriptor: MatchDescriptor(startIntent: start, starter: true), events: [], packets: []))
+        try await s.createDeletionSagaV4(saga)
+        let receipt = try h.receipt(f.context, requestID: saga.intent.requestID, digest: saga.intent.digest, operation: .deleteAccount, result: .deleted, extra: ["deletion": ["backend": "backendDeleted", "apple": "revoked", "cloud": "clientManaged", "local": "clientManaged", "health": "separateConfirmation"]])
+        let backend = try await s.acceptDeletionV4(requestID: saga.intent.requestID, receipt: receipt, expectedRevision: 0)
+        return (f, s, backend)
+    }
+    func testInventoryRejectsUnknownOrIncompleteRetainedMarkerWithoutMutation() async throws {
+        for kind in ["version", "extra", "missing-attempt"] {
+            let f = try await fixture(), s = try await mutate(f) { try corruptMarker($0, kind: kind) }
+            let before = try await s.watchEvidenceTestState()
+            do { _ = try await s.captureInventoryV4(); XCTFail("inventory must validate retained Watch control rows") } catch {}
+            let after = try await s.watchEvidenceTestState(); XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+            try await s.close()
+        }
+    }
+    func testEraseRejectsMalformedRetainedMarkerBeforeDeletingBusiness() async throws {
+        let (f, seed, saga) = try await deletionFixture(); try await seed.close()
+        let db = try SQLite(url: f.context.url, fault: nil); try corruptMarker(db, kind: "version"); try db.close()
+        let s = try h.store(f.context), before = try await s.watchEvidenceTestState()
+        do { _ = try await s.eraseLocalBusinessV4(requestID: saga.intent.requestID, expectedRevision: saga.revision); XCTFail("erase must not ignore unknown retained marker") } catch {}
+        let after = try await s.watchEvidenceTestState(); XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+        try await s.close()
+    }
+    func testZeroValidationRejectsMalformedMarkerAfterSuccessfulErasure() async throws {
+        let (f, seed, saga) = try await deletionFixture()
+        _ = try await seed.eraseLocalBusinessV4(requestID: saga.intent.requestID, expectedRevision: saga.revision); try await seed.close()
+        let db = try SQLite(url: f.context.url, fault: nil); try corruptMarker(db, kind: "version"); try db.close()
+        let s = try h.store(f.context), before = try await s.watchEvidenceTestState()
+        do { _ = try await s.validateLocalBusinessErasedV4(requestID: saga.intent.requestID, requestDigest: saga.intent.digest, scope: XCTUnwrap(saga.originalScope)); XCTFail("current zero proof must validate retained marker") } catch {}
+        let after = try await s.watchEvidenceTestState(); XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+        try await s.close()
+    }
+    func testEraseRetainsOriginalMarkerAndControlFactsWithoutCurrentAdmission() async throws {
+        let (f, s, saga) = try await deletionFixture(), prior = try marker(f.context.url)
+        let db = try SQLite(url: f.context.url, fault: nil)
+        let retainedBefore = try db.rows("SELECT id,payload,checksum FROM lifecycle_steps_v4 WHERE id GLOB 'watch-*' ORDER BY id")
+        _ = try await s.eraseLocalBusinessV4(requestID: saga.intent.requestID, expectedRevision: saga.revision)
+        let retainedAfter = try db.rows("SELECT id,payload,checksum FROM lifecycle_steps_v4 WHERE id GLOB 'watch-*' ORDER BY id")
+        XCTAssertEqual(retainedBefore.map { ($0[0].string ?? "") + ":" + ($0[1].data?.base64EncodedString() ?? "") + ":" + ($0[2].string ?? "") }, retainedAfter.map { ($0[0].string ?? "") + ":" + ($0[1].data?.base64EncodedString() ?? "") + ":" + ($0[2].string ?? "") }); XCTAssertEqual(try marker(f.context.url), prior)
+        let zero = try await s.validateLocalBusinessErasedV4(requestID: saga.intent.requestID, requestDigest: saga.intent.digest, scope: XCTUnwrap(saga.originalScope))
+        XCTAssertEqual(zero.requestID, saga.intent.requestID)
+        let saved = try await s.deletionSagaV4(requestID: saga.intent.requestID)
+        XCTAssertEqual(saved?.recoveryCapability, saga.recoveryCapability); XCTAssertEqual(saved?.localProgress, .completed)
+        let matches = try await s.matchIDs(); XCTAssertTrue(matches.isEmpty)
+        await rejected(s, generation: 1, error: .identityChanged)
+        try db.close(); try await s.close()
+    }
+
 }
 
 extension MatchStore {
