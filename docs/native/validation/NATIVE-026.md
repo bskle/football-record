@@ -626,3 +626,19 @@ Evidence prefix `/private/tmp/football-record-NATIVE026-build/bootstrap/controll
 | frozen-watch.log | `040f3377879443119d770a21277aeb426dab3c6c43b2f0cee0a361f742acdb5b` |
 
 This minimal factory still has no actual original CloudLedger/catalog resource owner. Its identityChanged action therefore permanently pauses/joins original business but explicitly returns unavailable without claiming AccountKit's full ledger fence. The next owned resource slice must use real original ledger plus durable catalog scope, preserve unknown/missing mappings and run within complete service/control ownership.052 remains unconsumed. Prior92/0 and52/0 stay separate source layers.
+
+
+### 2026-10-22 pending control renewal cannot use generic authentication
+
+Source `affaad18610835dc6650c360ef8ee76a59aca7ad` changes only original M4AccountComposition and its owned tests. The genuine unguarded runtime test fails1test/2assertions/0unexpected: generic challenge fallback makes a second HTTP relay call and produces invalidWire instead of the required typed unavailable. With the minimal guard, prior admission is paused before the failure and the same original binding, credential and identity generation remain unchanged.
+
+One frozen related command passes **59/0** (Composition32, Context9, Identity13, DevicePair1, controlled bootstrap3 and production-beforeDB1). The original foreign-cloud renewal regression is included. All355 before/post hashes are unchanged and match the source commit; diff-check passes. These are host/software checks, so no physical device is applicable to this guard. No SDK/App/UI, actual Apple account/provider,052 or whole026 matrix is inferred.
+
+Persistent evidence directory: `/Users/liam/.codex/visualizations/2026/10/15/01a13ea0-175e-7362-b38a-36e561719b89/native-validation/NATIVE-026/renew-guard-20261022`. Original supplied WIP, unguarded RED source/test/diff/log, frozen guarded source/tests, inputs/post/commit-match and command/exit metadata are retained.
+
+| Raw log | SHA256 |
+| --- | --- |
+| red.log | `de78082bdd80c3d31aadcc7a94e350d31867cc38a1a67dadd5a20dc75b8d4ee8` |
+| frozen-related.log | `d8e8c3cd53f264d813462f01717eae16d2e1b3b3e309267a990f5fabe0697fd1` |
+
+Source review is scoped root plus a second independent non-author PASS; whole026 and original-resource/bootstrap-reservation implementation remain pending. The previous58/0 plus two unsigned Debug Simulator App builds belong to a8f69cb and are not reused as guard App evidence.
