@@ -195,9 +195,14 @@ extension MatchStore {
             return InitialDeletionAssociationV1(creationID: head.request.creationID, authRequestID: id, requestDigest: result.requestDigest,
                 receipt: try initialDeletionSignedAuthV1(result.receiptRaw, attempt: attempt, source: head.source), opaqueReauthenticationID: result.opaqueReauthenticationID)
         }
+        let reservation: InitialDeletionReservationV1?
+        if head.phase == .reserved {
+            try initialDeletionAbsenceLockedV1()
+            reservation = try initialDeletionReservationLockedV1(rows, head: head)
+        } else { reservation = nil }
         return InitialDeletionContextV1(request: head.request, originalAuthentication: source, phase: head.phase,
             attempts: rows.attempts.map { InitialDeletionAttemptV1(authRequestID: $0.authRequestID, challengeRequestID: $0.challengeRequestID,
-                authentication: $0.authentication, resolution: rows.resolutions[$0.authRequestID]?.resolution) }, association: association)
+                authentication: $0.authentication, resolution: rows.resolutions[$0.authRequestID]?.resolution) }, association: association, reservation: reservation)
     }
     private func insertInitialDeletionLockedV1<T: Encodable>(_ value: T, key: String) throws {
         let raw = try Canonical.data(value)
@@ -396,19 +401,28 @@ extension MatchStore {
         let reservation = try db.transaction {
             let rows = try validateInitialDeletionRowsLockedV1(), head = try requireInitialDeletionHeadV1(rows, creationID: creationID)
             _ = try initialDeletionCurrentSourceLockedV1(generation: expectedIdentityGeneration, expected: head.source)
-            guard head.phase == .associated || head.phase == .reserved, let selected = head.selectedAuthRequestID,
-                let result = rows.results[selected] else { throw InitialDeletionIssueV1.unresolved }
-            guard let opaqueID = result.opaqueReauthenticationID else { throw InitialDeletionIssueV1.missingReauthentication }
+            try initialDeletionAbsenceLockedV1()
+            let descriptor = try initialDeletionReservationLockedV1(rows, head: head)
             try reserveInitialDeletionBudgetV1(rows, terminal: true)
             if head.phase != .reserved {
                 var next = head; next.phase = .reserved; try replaceInitialDeletionHeadLockedV1(next, prior: head)
                 try validateInitialDeletionRowsLockedV1(); try fail(.beforeCommit)
             }
-            return InitialDeletionReservationV1(request: head.request, identityGeneration: head.source.identityGeneration,
-                originalAuthRequestID: head.source.currentAuthRequestID, originalAuthReceiptDigest: AuthorityWire.hash(head.source.receiptRaw),
-                initialAuthRequestID: selected, initialAuthRequestDigest: result.requestDigest, initialAuthReceiptDigest: AuthorityWire.hash(result.receiptRaw), opaqueReauthenticationID: opaqueID)
+            return descriptor
         }
         try completedInitialDeletionMutationV1(); return reservation
+    }
+
+    private func initialDeletionReservationLockedV1(_ rows: InitialDeletionRowsV1, head: StoredInitialDeletionHeadV1) throws -> InitialDeletionReservationV1 {
+        guard head.phase == .associated || head.phase == .reserved, let selected = head.selectedAuthRequestID,
+            let result = rows.results[selected], let attempt = rows.attempts.first(where: { $0.authRequestID == selected })?.authentication else { throw InitialDeletionIssueV1.unresolved }
+        _ = try initialDeletionSignedAuthV1(result.receiptRaw, attempt: attempt, source: head.source)
+        guard let opaqueID = result.opaqueReauthenticationID else { throw InitialDeletionIssueV1.missingReauthentication }
+        try AuthorityWire.identifier(opaqueID)
+        return InitialDeletionReservationV1(request: head.request, identityGeneration: head.source.identityGeneration,
+            originalAuthRequestID: head.source.currentAuthRequestID, originalAuthReceiptDigest: AuthorityWire.hash(head.source.receiptRaw),
+            initialAuthRequestID: selected, initialAuthRequestDigest: result.requestDigest,
+            initialAuthReceiptDigest: AuthorityWire.hash(result.receiptRaw), opaqueReauthenticationID: opaqueID)
     }
 
     func validateInitialDeletionSagaContractLockedV1(_ saga: DeletionSagaV4, request: InitialDeletionRequestV1) throws {

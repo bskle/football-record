@@ -51,6 +51,7 @@ public struct InitialDeletionContextV1: Sendable {
     public let phase: InitialDeletionPhaseV1
     public let attempts: [InitialDeletionAttemptV1]
     public let association: InitialDeletionAssociationV1?
+    public let reservation: InitialDeletionReservationV1?
 }
 public struct InitialDeletionReservationV1: Sendable {
     public let request: InitialDeletionRequestV1

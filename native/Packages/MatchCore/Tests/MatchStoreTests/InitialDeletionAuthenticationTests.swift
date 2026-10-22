@@ -85,6 +85,11 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
             accountID: f.source.binding.accountID, activationEpoch: f.source.binding.activationEpoch, recoveryCapability: cap,
             cloudChoice: .keep, localChoice: .delete, healthChoice: .keep, healthConfirmed: false, originalScope: f.request.originalScope)
     }
+    private func reservationBytes(_ value: InitialDeletionReservationV1) throws -> Data {
+        try Canonical.data([AuthorityWire.encode(value.request).base64EncodedString(), String(value.identityGeneration),
+            value.originalAuthRequestID, value.originalAuthReceiptDigest, value.initialAuthRequestID, value.initialAuthRequestDigest,
+            value.initialAuthReceiptDigest, value.opaqueReauthenticationID])
+    }
     private func watch(_ f: Fixture, requestID: String, challengeID: String) throws -> WatchRegistrationAttemptV4 {
         let key = Curve25519.Signing.PrivateKey(), publicKey = AuthorityWire.base64URL(key.publicKey.rawRepresentation)
         let hash = String(repeating: "c", count: 64)
@@ -288,6 +293,7 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
                 receipt: receipt, opaqueReauthenticationID: opaque, expectedIdentityGeneration: 0) }
             let context = try await f.store.initialDeletionContextV4(creationID: "delete", expectedIdentityGeneration: 0)
             XCTAssertEqual(context?.association?.receipt.raw, receipt.raw); XCTAssertEqual(context?.association?.opaqueReauthenticationID, opaque)
+            XCTAssertNil(context?.reservation)
             let before = try rawRows(f)
             await rejected { try await f.store.acceptInitialDeletionAuthenticationV4(creationID: "delete", authRequestID: fresh.requestID,
                 receipt: receipt, opaqueReauthenticationID: "other-reauth", expectedIdentityGeneration: 0) }
@@ -305,8 +311,37 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
                 XCTAssertEqual(first.originalAuthReceiptDigest, AuthorityWire.hash(f.source.receipt.raw))
                 XCTAssertEqual(first.initialAuthRequestID, fresh.requestID); XCTAssertEqual(first.initialAuthReceiptDigest, AuthorityWire.hash(receipt.raw))
                 XCTAssertEqual(first.opaqueReauthenticationID, opaque)
+                let beforeRead = try LocalBusinessErasureValidationTests().controls(f.context.url)
+                let changes = try await f.store.initialDeletionTestChanges()
+                for _ in 0..<2 {
+                    let read = try await f.store.initialDeletionContextV4(creationID: "delete", expectedIdentityGeneration: 0)
+                    let reservation = try XCTUnwrap(read?.reservation)
+                    XCTAssertEqual(try reservationBytes(reservation), try reservationBytes(first))
+                }
+                let afterChanges = try await f.store.initialDeletionTestChanges(); XCTAssertEqual(afterChanges, changes)
+                XCTAssertEqual(try LocalBusinessErasureValidationTests().controls(f.context.url), beforeRead)
                 await rejected({ _ = try await self.prepare(f, auth: "another", challenge: "another-challenge") }, issue: .alreadyReserved)
             }
+            try await f.store.close()
+        }
+        for fault in [StoreFault.beforeCommit, .afterCommit] {
+            let f = try await fixture(); let supplied = try await associated(f); let descriptor = try XCTUnwrap(supplied)
+            let rows = try rawRows(f); try await f.store.close()
+            let original = try h.store(f.context, fault: fault), changes = try await original.initialDeletionTestChanges()
+            let read = try await original.initialDeletionContextV4(creationID: "delete", expectedIdentityGeneration: 0)
+            XCTAssertEqual(try reservationBytes(XCTUnwrap(read?.reservation)), try reservationBytes(descriptor))
+            let after = try await original.initialDeletionTestChanges(); XCTAssertEqual(after, changes)
+            XCTAssertEqual(try rawRows(f), rows); try await original.close()
+        }
+        for variant in ["source", "selected", "saga"] {
+            let f = try await fixture(); _ = try await associated(f)
+            if variant == "source" {
+                let raw = try Canonical.data(Int64(1))
+                try sql(f) { try $0.execute("UPDATE lifecycle_steps_v4 SET payload=?,checksum=? WHERE id='auth-admission:original-auth'", [.blob(raw), .text(Canonical.hash(raw))]) }
+            } else if variant == "selected" {
+                try update(f, key: "initial-delete-auth-v1:head") { $0["selectedAuthRequestID"] = "absent-selected" }
+            } else { try await f.store.createDeletionSagaV4(saga(f)) }
+            await rejected { _ = try await f.store.initialDeletionContextV4(creationID: "delete", expectedIdentityGeneration: 0) }
             try await f.store.close()
         }
     }
@@ -415,4 +450,7 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
         await rejected({ _ = try await self.prepare(existing) }, issue: .parentExists)
         try await existing.store.close()
     }
+}
+private extension MatchStore {
+    func initialDeletionTestChanges() throws -> Int64 { try db.scalar("SELECT total_changes()").number ?? -1 }
 }

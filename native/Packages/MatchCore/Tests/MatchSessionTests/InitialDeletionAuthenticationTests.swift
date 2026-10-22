@@ -55,6 +55,22 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
                 try await x.base.close()
             }
         }
+        // Reserved retry is a read of the original descriptor even after permanent retirement.
+        let reserved = try await InitialSessionFixture(); try await reserved.stage("reserve"); try await reserved.accept()
+        let descriptor = try await reserved.session.reserveInitialDeletion(creationID: "delete", expectedIdentityGeneration: 0)
+        try await reserved.session.retireBusiness()
+        let rows = try await reserved.state(), originalStore = await reserved.base.store
+        let changes = try await originalStore.initialSessionTestChanges()
+        let read = try await reserved.base.initialDeletionContextV4(creationID: "delete", expectedIdentityGeneration: 0)
+        XCTAssertEqual(read?.reservation?.request, descriptor.request)
+        XCTAssertEqual(read?.reservation?.opaqueReauthenticationID, descriptor.opaqueReauthenticationID)
+        XCTAssertEqual(read?.reservation?.originalAuthReceiptDigest, descriptor.originalAuthReceiptDigest)
+        let after = try await reserved.state(), afterChanges = try await originalStore.initialSessionTestChanges()
+        XCTAssertEqual(after, rows); XCTAssertEqual(afterChanges, changes); try await reserved.base.close()
+        let associated = try await InitialSessionFixture(); try await associated.stage("reserve"); try await associated.accept()
+        try await associated.session.retireBusiness(); let associatedBefore = try await associated.state()
+        await rejected({ _ = try await associated.session.reserveInitialDeletion(creationID: "delete", expectedIdentityGeneration: 0) }, retired: true)
+        let associatedAfter = try await associated.state(); XCTAssertEqual(associatedAfter, associatedBefore); try await associated.base.close()
     }
     func testLateFactsAndOriginalCommitLoss() async throws {
         // J03: retirement permits only results of the same already-persisted sent attempt.
@@ -127,6 +143,7 @@ private extension MatchSession {
     func initialDeletionBusinessCount() -> Int { businessEntries }
 }
 private extension MatchStore {
+    func initialSessionTestChanges() throws -> Int64 { try db.scalar("SELECT total_changes()").number ?? -1 }
     func initialSessionTestState(normalOnly: Bool) throws -> Data {
         let whereClause = normalOnly ? " WHERE substr(CAST(id AS BLOB),1,19) != CAST('initial-delete-auth' AS BLOB)" : ""
         var rows = try db.rows("SELECT quote(id),quote(payload),quote(checksum) FROM lifecycle_steps_v4" + whereClause + " ORDER BY id").map { $0.map { $0.string! } }
