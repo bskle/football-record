@@ -344,3 +344,10 @@ public struct DeletionControlAuthorizationRecordV1: Sendable {
 - 原attempt一旦已有可信closing或resolution，活动ready接受在同一SQL门拒绝，即使相同ready签名/TTL仍有效；历史读取保持原ready+closing，不能借幂等重放刷新vault。
 
 本批Core验证脚本的207项保守输入包含未提交的AccountKit两个占位/测试文件，它们不被Core package命令消费；精确Core Git输入以checkpoint逐项限定。AccountKit仍在独立TDD阶段，不能将本批Core结果声称为whole052。
+
+
+## 2026-10-22 AccountKit owner 与 challenge 丢响应阶段
+
+所有public renew/recover/status/explicit-abnormal由本实例独立owned Task持有，并以FIFO串行覆盖当前身份source、Apple、signer、HTTP、原SQL、同vault CAS和最终复验。caller取消传播后仍join原任务；stopAndJoin永久封entry、取消并join所有owned尾部，不关闭借用Session/repository/vault/HTTP。026外层仍须串行该服务与原Lifecycle.resume，finalclose先join控制服务再关闭原DB；SQL与vault不称原子事务。ready SQL后再次读同attempt当前firstproof/resolution，已closing不允许vault刷新。
+
+仅在专用challenge HTTP响应发生明确networkConnectionLost、此lexical流程尚未调用Apple/持久auth attempt/派发auth POST时，可在原parent/gen/独立scope及同authID仍无attempt复验后返回既有needsFreshAuthorization。它只要求用户下一次明确采用新的challenge/auth IDs；本服务不自动生成它们，不关闭旧challenge、不称knownAbandoned或从未commit。401/404/timeout/其他未知响应保留unresolved；一旦auth attempt存在，renew只恢复其原ID，任何网络错误都不能回退此分支。新TDD以真实server已保存challenge后的丢响应复现该区别，不改变server首次request bytes、wire或预算。
