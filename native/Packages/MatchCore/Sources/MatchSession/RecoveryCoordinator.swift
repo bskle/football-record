@@ -4,6 +4,7 @@ import MatchStore
 
 extension MatchSession {
   public func recover() async throws -> RecoverySelection {
+    try beginBusiness(); defer { endBusiness() }
     try await validateEnvironment()
     let device = try await identity()
     var candidates: [StoreSnapshotV2] = []
@@ -14,6 +15,7 @@ extension MatchSession {
         s = try await store.snapshotV2(matchID: match)
         try await updateAuthorityFence(s)
       }
+      try requireBusinessActive()
       guard !s.business.diagnostics.contains(where: { $0.severity == .blocking }) else {
         throw SessionError.blockedDiagnostics
       }
@@ -23,6 +25,7 @@ extension MatchSession {
         scheduleCapture(match)
       }
     }
+    try requireBusinessActive()
     guard candidates.count <= 1 else { throw SessionError.multipleCandidates }
     guard let candidate = candidates.first else { return .none }
     try requireWritable(candidate, device: device)

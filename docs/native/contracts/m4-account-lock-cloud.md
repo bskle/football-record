@@ -212,3 +212,14 @@ receipt仅证明**该文件四类canonical的逻辑清理**，不能代表全本
 实现依据（2026-10-18 官方预检）：[Apple 用户验证](https://developer.apple.com/documentation/signinwithapple/verifying-a-user)、[Apple JWKS](https://appleid.apple.com/auth/keys)、[CloudKit zone 变更](https://developer.apple.com/documentation/cloudkit/ckfetchrecordzonechangesoperation)、[条件保存策略](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/recordsavepolicy/ifserverrecordunchanged)、[Apple private DB 示例](https://github.com/apple/sample-cloudkit-privatedb-sync)、[Node 22.23.1 SQLite](https://nodejs.org/download/release/v22.23.1/docs/api/sqlite.html)、[Node crypto](https://nodejs.org/download/release/v22.23.1/docs/api/crypto.html)。官方 API 页面与本机 SDK 编译只证明接口依据；Node SQLite 文档仍标 active development，真实 Apple/CloudKit/Serverless 行为另验。
 
 027/028补充依据（2026-10-19官方只读预检）：[Apple token验证/交换](https://developer.apple.com/documentation/signinwithapplerestapi/generate-and-validate-tokens)、[token撤销](https://developer.apple.com/documentation/signinwithapplerestapi/revoke-tokens)、[服务端client secret](https://developer.apple.com/documentation/accountorganizationaldatasharing/creating-a-client-secret)、[HKSource](https://developer.apple.com/documentation/healthkit/hksource)、[限定predicate删除](https://developer.apple.com/documentation/healthkit/hkhealthstore/deleteobjects%28of%3Apredicate%3Awithcompletion%3A%29)。文档和SDK检查不表示实际Apple凭据、用户HealthStore授权或删除已执行。
+
+
+### 7.4 NATIVE-052：原删除parent的专用fresh认证控制面
+
+本段追加原删除恢复的目的边界，不改既有auth/delete/lock canonical wire、旧receipt或历史证明。普通signIn/recover安装binding属于业务入口；业务永久退役后不得解gate、创建新Session/业务DB或用generic auth/apple重建身份假装原delete重试。052只定义独立`deleteControl.v1`目的的challenge/apple/recover端点，具体闭合字段与固定新签名域见[052计划](../../superpowers/plans/2026-10-20-m4-deletion-control-reauth.md)。capability仍只放body，单独不能创建会话或账号；专用认证必须同时证明fresh verifiedApple与原device purpose签名，并在await后原SQL事务重查原account/device/key/epoch/cloud及原parent canonical digest/cap hash。
+
+若原client已持久意图但从未在server预留，只可对仍存在的原身份将同一原canonical intent absent→requested；已有pending仅同parent/digest/cap可继续，不同pending/已删/缺身份拒绝，零新account/device/epoch。原delete bytes中的旧reauthID不改，requested/lockReconciled使用server新mutable reauthID；appleRevocation只恢复控制凭证，不倒退或重复撤销。COMMITlost恢复原attempt/首次proof，unknown不得重POST单次code或改ID；receiptExpired不退回generic登录。
+
+控制session的持久purpose只准原delete/query；为原活动锁对账，仅可增加原parent固定的实际match/lock/recorder/epoch及原signed held acquire对应的live-status、用户明确确认后的一个稳定abnormal请求和原query，绝不normal/acquire/释放新锁。pin必须来自server原行及原签名receipt并由client与Store复验/持久，缺真实映射保全typed blocked，不从配置猜、不新造Match/permit/capture。known本机held仍在Saga/freeze前走原异常终结，原createDeletionSaga拒绝不变。
+
+Core新可选控制入口在原Store同事务验原Saga/control/cap/rawscope/key/gen，retained typedkind与046全inventory、045当前零及LocalErasure兼容，历史最小控制可读且不含业务副本；backendDeleted/local完成后不能再添auth事实或刷新vault。052不改binding/gen、不admitIdentity、不解除录制。原owner保留控制通道到原Saga恢复完毕，finalclose须先stop/cancel/join全部owned控制任务再关原资源。root+m2源码/最终双审及本机矩阵不等于026整体或真实Apple/账号/设备/部署完成，production默认Unavailable保持。
