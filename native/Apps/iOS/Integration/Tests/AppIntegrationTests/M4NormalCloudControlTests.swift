@@ -210,6 +210,44 @@ import MatchPresentation
       }
     }
   }
+  func testUnreadableAndMalformedIdentityAfterCloudWaitClearAdmission() async throws {
+    for mode in ["unreadable", "malformed"] {
+      try await withFixture { f in
+        let c = try await f.bootstrapStrict(workout: M4HTTPWorkoutGateway())
+        _ = try await f.signIn(); let id = try await self.ended(c.context), h = try await f.originalResources(c)
+        let generation = try await c.repository.identityGenerationV4(), binding = try await c.repository.accountBindingV4()
+        let authentication = try await c.repository.currentAuthRequestIDV4(), repositoryIdentity = await c.repository.syncRepositoryIdentity()
+        let queue = try await c.repository.controlQueueV4()
+        isTrue(c.context.account.canEnterRecording); notNil(c.admittedScope)
+        f.holdCloudReplies = true; _ = try await f.refreshIdentity()
+        let action = f.beginOriginalLifecycle(.synchronize(id), composition: c)
+        try await f.waitUntil { f.cloudHeld }
+        let original = try unwrap(try await h.ledger.uploads(scope: h.scope).first)
+        try f.damageIndependentIdentitySource(mode); f.holdCloudReplies = false
+        let failure = try unwrap(await action.value)
+        if mode == "unreadable" { isTrue(failure as? AuthorityError == .unavailable, "preserve the original independent-source unavailable error") }
+        else { isTrue(failure is DecodingError, "preserve the original independent-source decoding error") }
+        isTrue(c.admittedScope == nil, "failed independent observation must clear the old admission: " + mode)
+        isFalse(c.context.account.canEnterRecording, "failed independent observation must clear the old ready projection: " + mode)
+        isFalse(c.context.recording.canStartNext)
+        equal(c.context.recording.snapshot?.replay.state, .endedPendingSync)
+        equal(try await c.repository.identityGenerationV4(), generation)
+        let retainedBinding = try await c.repository.accountBindingV4()
+        isTrue(try AuthorityWire.encode(retainedBinding) == AuthorityWire.encode(binding))
+        equal(try await c.repository.currentAuthRequestIDV4(), authentication)
+        equal(await c.repository.syncRepositoryIdentity(), repositoryIdentity)
+        equal(await c.session.syncRepositoryIdentity(), repositoryIdentity)
+        isNil(try await c.repository.matchingCloudSaveV4(matchID: id))
+        let retained = try await c.repository.controlQueueV4()
+        isTrue(retained == queue, "preserve the original control history without a replacement intent")
+        noTerminationWithOriginalAcquire(retained)
+        let uploads = try await h.ledger.uploads(scope: h.scope)
+        equal(uploads.count, 1)
+        isTrue(uploads.first?.upload == original.upload); isTrue(uploads.first?.originalBytes == original.originalBytes)
+        equal(f.cloudSaveCalls, 1)
+      }
+    }
+  }
   func testIdentityChangeAfterActualNormalHTTPKeepsOriginalUnknownBeforeAcceptance() async throws {
     try await withFixture { f in
       let c = try await f.bootstrapStrict(workout: M4HTTPWorkoutGateway(), holdTerminate: true)

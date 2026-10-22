@@ -254,6 +254,36 @@ enum M4HTTPFixtureError: Error, Equatable { case configuration, shape, correlati
     let id = UUID(), task = Task { await owner.context.lifecycle.perform(action, matchID: matchID) }
     actions[id] = task; return task
   }
+  func beginOriginalLifecycle(_ action: LifecycleUserAction, composition: M4AccountComposition) -> Task<(any Error)?, Never> {
+    let task = Task { @MainActor () -> (any Error)? in
+      do { try await composition.performLifecycle(action); return nil }
+      catch { return error }
+    }
+    actions[UUID()] = Task {
+      await withTaskCancellationHandler { _ = await task.value } onCancel: { task.cancel() }
+    }
+    return task
+  }
+  func damageIndependentIdentitySource(_ mode: String) throws {
+    let url = nativeRoot.appendingPathComponent("development/current-identity/apple-account.json")
+    guard let original = identityFiles[url], try Self.anchor(url) == original else { throw M4HTTPFixtureError.mailboxChanged }
+    switch mode {
+    case "unreadable":
+      let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+      guard fd >= 0 else { throw M4HTTPFixtureError.mailboxChanged }; defer { Darwin.close(fd) }
+      var held = stat()
+      guard fstat(fd, &held) == 0, Anchor(device: held.st_dev, inode: held.st_ino) == original,
+            fchmod(fd, 0o400) == 0, fstat(fd, &held) == 0, held.st_mode & 0o7777 == 0o400 else { throw M4HTTPFixtureError.mailboxChanged }
+      var current = stat()
+      guard lstat(url.path, &current) == 0, Anchor(device: current.st_dev, inode: current.st_ino) == original else { throw M4HTTPFixtureError.mailboxChanged }
+    case "malformed":
+      let malformed = Data("{".utf8)
+      try write(malformed, to: url, original: original)
+      let current = try Self.read(url)
+      guard current.0 == malformed, current.1 == original else { throw M4HTTPFixtureError.mailboxChanged }
+    default: throw M4HTTPFixtureError.configuration
+    }
+  }
   func changeIndependentField(_ field: String) async throws {
     if field == "account" { _ = try await refreshIdentity("alternate"); return }
     let observed = try await refreshIdentity()

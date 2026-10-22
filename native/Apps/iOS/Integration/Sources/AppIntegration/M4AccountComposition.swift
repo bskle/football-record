@@ -241,9 +241,7 @@ private struct M4UnavailableAppleAuthorization: AppleSignInDriver {
       try prepared.requirePhoneResources(handle); try requireCredential(credential, binding: proof.binding)
       return handle
     } catch {
-      if error as? AuthorityError == .identityChanged || error as? AuthorityError == .staleAttestation {
-        admittedScope = nil; context.account.pauseIdentity()
-      }
+      admittedScope = nil; context.account.pauseIdentity()
       throw error
     }
   }
