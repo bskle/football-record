@@ -191,12 +191,14 @@ public actor InitialDeletionAuthenticationService {
         try initial(first.context)
         if let context = first.context {
             if let association = context.association {
-                guard same(association.authRequestID, authID) else { throw AuthorityError.conflict }; return .associated(association)
+                guard same(association.authRequestID, authID),
+                    let saved = context.attempts.first(where: { same($0.authRequestID, authID) }),
+                    same(saved.challengeRequestID, challengeID) else { throw AuthorityError.conflict }; return .associated(association)
             }
             if let attempt = context.attempts.first(where: { same($0.authRequestID, authID) }) {
                 guard same(attempt.challengeRequestID, challengeID) else { throw AuthorityError.conflict }
                 if let resolution = attempt.resolution { return .closed(resolution) }
-                if attempt.authentication != nil { return try await recoverOwned(request.creationID, authID, first, token) }
+                if attempt.authentication != nil { return .unresolved }
             }
         }
         let generation = first.source.identityGeneration, a = first.source.attempt

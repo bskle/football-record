@@ -27,6 +27,9 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
         let after = try await f.normal(), afterVault = try await f.vault.credential(), afterWrites = await f.vault.writes()
         XCTAssertEqual(after, normal); XCTAssertEqual(afterVault, vault); XCTAssertEqual(afterWrites, writes)
         let counts = await f.counts()
+        await rejected { _ = try await f.authenticate(challenge: "changed-challenge") }
+        let unchangedNormal = try await f.normal(), unchangedVault = try await f.vault.credential()
+        XCTAssertEqual(unchangedNormal, normal); XCTAssertEqual(unchangedVault, vault)
         await rejected { _ = try await f.ordinary.signIn(requestID: "ordinary-new", challengeRequestID: "ordinary-challenge") }
         await rejected { _ = try await f.ordinary.recover(authRequestID: "original-auth") }
         let blocked = await f.counts(); XCTAssertEqual(blocked, counts)
@@ -64,6 +67,9 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
         let f = try await InitialLeafFixture(); await f.relay.setLoss(true)
         guard case .unresolved = try await f.authenticate() else { return XCTFail("lost reply must stay unresolved") }
         let normal = try await f.normal(), v = try await f.vault.credential(), writes = await f.vault.writes()
+        let beforeSame = await f.counts()
+        guard case .unresolved = try await f.authenticate() else { return XCTFail("sent same-ID authentication requires explicit recovery") }
+        let afterSame = await f.counts(); XCTAssertEqual(afterSame, beforeSame)
         await rejected { _ = try await f.authenticate(id: "second", challenge: "second-challenge") }
         for mode in ["401", "404", "timeout", "knownNotFound"] {
             await f.relay.setRecoverStatus(mode)
@@ -173,6 +179,10 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
             case "generation": try await f.changeGeneration()
             default: stopper = Task { try await f.service.stopAndJoin() }
             }
+            if kind == "stop" { await eventually {
+                do { _ = try await f.authenticate(id: "stop-probe", challenge: "stop-probe-challenge"); return false }
+                catch { return error as? InitialDeletionIssueV1 == .stopped }
+            } }
             await f.apple.gate.release(); await rejected { _ = try await worker.value }; if let stopper { try await stopper.value }
             try await f.close()
         }
@@ -199,6 +209,10 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
             if kind == "generation" { try await x.changeGeneration() }
             if kind == "stop" { stop = Task { try await x.service.stopAndJoin() } }
             if kind == "close" { try await x.base.close() }
+            if kind == "stop" { await eventually {
+                do { _ = try await x.authenticate(id: "stop-probe", challenge: "stop-probe-challenge"); return false }
+                catch { return error as? InitialDeletionIssueV1 == .stopped }
+            } }
             await x.reads.beforeGate.release(); await rejected { _ = try await read.value }
             if let stop { try await stop.value }
             if kind != "close" { try await x.close() } else { try await x.service.stopAndJoin() }
