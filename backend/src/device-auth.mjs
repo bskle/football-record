@@ -6,6 +6,7 @@ import {authorityState} from './authority.mjs';
 import {canonicalJSON,sha256,edPublicKey,decodeBase64URL,makeReceipt} from './receipt.mjs';
 import {transaction,fail,nextEpoch} from './database.mjs';
 const input=(domain,body)=>Buffer.from(domain+'\n'+canonicalJSON(body));
+export function accountIDForAppleIdentity(accountHMACKey,identity){return createHmac('sha256',accountHMACKey).update(identity.issuer+'\n'+identity.subject).digest('hex');}
 export function makePoP(privateKey,fields){return {keyID:fields.keyID,nonce:fields.nonce,issuedAt:fields.issuedAt,signature:sign(null,input('football-record.device.pop.v1',fields),privateKey).toString('base64url')};}
 export function signRecover(privateKey,request){const r={...request};delete r.deviceProof;return sign(null,input('football-record.device.auth-recover.v1',r),privateKey).toString('base64url');}
 function signatureOK(key,domain,body,signature){try{return verify(null,input(domain,body),edPublicKey(key),decodeBase64URL(signature,64));}catch{return false;}}
@@ -43,7 +44,7 @@ export function createDeviceAuth({authority,appleVerifier}){
    try{return transaction(db,config,()=>{
     if(db.prepare('SELECT 1 FROM auth_absence_fences WHERE fence_id=?').get(absenceKey(r.requestID,r.deviceID,sha256(r.devicePublicKey))))fail('unauthorized',401);
     checkChallenge(r,r.devicePublicKey,r.deviceID);
-    const accountID=createHmac('sha256',config.accountHMACKey).update(verified.issuer+'\n'+verified.subject).digest('hex');
+    const accountID=accountIDForAppleIdentity(config.accountHMACKey,verified);
     let a=db.prepare('SELECT * FROM accounts WHERE account_id=?').get(accountID);
     const prior=db.prepare('SELECT * FROM devices WHERE device_id=?').get(r.deviceID);
     if(prior&&(prior.account_id!==accountID||prior.public_key!==r.devicePublicKey||prior.role==='watch'))fail('unauthorized',401);
