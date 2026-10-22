@@ -122,9 +122,18 @@ func presentationBindingsEqual(_ lhs: AccountBindingV4, _ rhs: AccountBindingV4)
   /// Called only after the identity service has admitted the current identity.
   /// This checks its projection against durable truth; it does not authenticate.
   public func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64) async throws {
-    try await admitIdentity(binding, expectedIdentityGeneration: expectedIdentityGeneration, read: { try await PresentationAccountAdmissionRead.read(self.repository) })
+    try await admitIdentity(binding, expectedIdentityGeneration: expectedIdentityGeneration, finalCheck: {})
   }
-  func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64, read: @MainActor () async throws -> PresentationAccountAdmissionRead) async throws {
+  /// Runs an additional synchronous veto after durable projection checks.
+  /// Passing this check does not authenticate or grant business authority.
+  public func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64,
+                            finalCheck: @MainActor () throws -> Void) async throws {
+    try await admitIdentity(binding, expectedIdentityGeneration: expectedIdentityGeneration,
+      read: { try await PresentationAccountAdmissionRead.read(self.repository) }, finalCheck: finalCheck)
+  }
+  func admitIdentity(_ binding: AccountBindingV4, expectedIdentityGeneration: Int64,
+                     read: @MainActor () async throws -> PresentationAccountAdmissionRead,
+                     finalCheck: @MainActor () throws -> Void = {}) async throws {
     guard !stopped else { throw AuthorityError.identityChanged }
     let token = UUID(); generation = token; identityVerified = false; checkedIdentity = nil; phase = .suspended
     let value = try await read()
@@ -133,6 +142,8 @@ func presentationBindingsEqual(_ lhs: AccountBindingV4, _ rhs: AccountBindingV4)
           value.identityGeneration == expectedIdentityGeneration, durableGeneration == expectedIdentityGeneration,
           let current = value.binding, !current.suspended, !binding.suspended,
           presentationBindingsEqual(current, binding) else { throw AuthorityError.identityChanged }
+    try finalCheck()
+    guard !stopped, generation == token else { throw AuthorityError.identityChanged }
     checkedIdentity = (current, expectedIdentityGeneration); identityVerified = true
     apply(current, authIDs: value.authIDs, watchIDs: value.watchIDs)
   }

@@ -109,15 +109,31 @@ extension AccountStatusTests {
       try await model.admitIdentity(b, expectedIdentityGeneration: try await repo.identityGenerationV4())
       XCTAssertEqual(model.phase, role == .waiting ? .waitingMigration : .ready)
       XCTAssertEqual(model.canEnterRecording, role != .waiting)
+      var readyChecks = 0
+      try await model.admitIdentity(b, expectedIdentityGeneration: try await repo.identityGenerationV4(),
+                                    finalCheck: { readyChecks += 1 })
+      XCTAssertEqual(readyChecks, 1)
+      XCTAssertEqual(model.phase, role == .waiting ? .waitingMigration : .ready)
+      XCTAssertEqual(model.canEnterRecording, role != .waiting)
       let unavailable = AccountStatusModel(repository:repo)
       try await unavailable.admitIdentity(b, expectedIdentityGeneration: try await repo.identityGenerationV4())
       XCTAssertEqual(unavailable.phase,.unavailable); XCTAssertFalse(unavailable.canEnterRecording)
+      var unavailableChecks = 0
+      try await unavailable.admitIdentity(b, expectedIdentityGeneration: try await repo.identityGenerationV4(),
+                                          finalCheck: { unavailableChecks += 1 })
+      XCTAssertEqual(unavailableChecks, 1)
+      XCTAssertEqual(unavailable.phase, .unavailable); XCTAssertFalse(unavailable.canEnterRecording)
       if role == .phone {
         let key = Curve25519.Signing.PrivateKey()
         let attempt = try AuthAttemptV4(requestID:"pending-original",deviceID:b.deviceID,publicKey:AuthorityWire.base64URL(key.publicKey.rawRepresentation),cloudSpaceID:b.cloudSpaceID,challengeID:"challenge",requestDigest:String(repeating:"a",count:64),environment:.development)
         try await repo.saveAuthAttemptV4(attempt)
         try await model.admitIdentity(b, expectedIdentityGeneration: try await repo.identityGenerationV4())
         XCTAssertEqual(model.phase,.pending); XCTAssertFalse(model.canEnterRecording)
+        var pendingChecks = 0
+        try await model.admitIdentity(b, expectedIdentityGeneration: try await repo.identityGenerationV4(),
+                                      finalCheck: { pendingChecks += 1 })
+        XCTAssertEqual(pendingChecks, 1)
+        XCTAssertEqual(model.phase, .pending); XCTAssertFalse(model.canEnterRecording)
       }
       try await repo.close()
     }
@@ -203,3 +219,117 @@ extension AccountStatusTests {
   }
 }
 private struct AccountCheckedIdentity: DeviceIdentityProvider { func localDeviceID() async throws -> String { "checked-local" } }
+
+extension AccountStatusTests {
+  func testLegacyAdmissionHeldReadPublishesOriginalProjectionWithoutExtraVeto() async throws {
+    let repo = try accountRepository("legacy-final-check-baseline"), b = try binding(.phone)
+    try await repo.bindAccountV4(b)
+    let model = AccountStatusModel(repository: repo, development: true, action: { _ in })
+    let entered = expectation(description: "legacy read held"), gate = AccountActionGate(entered)
+    let expiresAt = Date().addingTimeInterval(1)
+    let admission = Task {
+      try await model.admitIdentity(b, expectedIdentityGeneration: 0, read: {
+        let value = try await PresentationAccountAdmissionRead.read(repo)
+        XCTAssertLessThan(Date(), expiresAt)
+        await gate.hold(); return value
+      })
+    }
+    await fulfillment(of: [entered], timeout: 3)
+    XCTAssertFalse(model.canEnterRecording)
+    let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+    while Date() < expiresAt && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertGreaterThanOrEqual(Date(), expiresAt)
+    await gate.release(); try await admission.value
+    XCTAssertTrue(model.canEnterRecording)
+    try await repo.close()
+  }
+}
+
+extension AccountStatusTests {
+  func testFinalCheckRejectsCredentialExpiredWhileOriginalReadWasHeld() async throws {
+    let repo = try accountRepository("final-check-expiry"), b = try binding(.phone)
+    try await repo.bindAccountV4(b)
+    let model = AccountStatusModel(repository: repo, development: true, action: { _ in })
+    let entered = expectation(description: "guarded read held"), gate = AccountActionGate(entered)
+    let expiresAt = Date().addingTimeInterval(1)
+    var checks = 0
+    let admission = Task { () -> AuthorityError? in
+      do {
+        try await model.admitIdentity(b, expectedIdentityGeneration: 0, read: {
+          let value = try await PresentationAccountAdmissionRead.read(repo)
+          XCTAssertLessThan(Date(), expiresAt)
+          await gate.hold(); return value
+        }, finalCheck: {
+          checks += 1
+          XCTAssertFalse(model.canEnterRecording)
+          guard Date() < expiresAt else { throw AuthorityError.staleAttestation }
+        })
+        return nil
+      } catch { return error as? AuthorityError }
+    }
+    await fulfillment(of: [entered], timeout: 3)
+    XCTAssertFalse(model.canEnterRecording); XCTAssertEqual(checks, 0)
+    let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+    while Date() < expiresAt && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+    XCTAssertGreaterThanOrEqual(Date(), expiresAt)
+    await gate.release(); let error = await admission.value
+    XCTAssertEqual(error, .staleAttestation); XCTAssertEqual(checks, 1)
+    XCTAssertFalse(model.canEnterRecording); XCTAssertEqual(model.phase, .suspended)
+    try await repo.close()
+  }
+  func testFinalCheckThrowClearsAnEarlierReadyProjection() async throws {
+    let repo = try accountRepository("final-check-throw"), b = try binding(.phone)
+    try await repo.bindAccountV4(b)
+    let model = AccountStatusModel(repository: repo, development: true, action: { _ in })
+    try await model.admitIdentity(b, expectedIdentityGeneration: 0)
+    XCTAssertTrue(model.canEnterRecording)
+    do {
+      try await model.admitIdentity(b, expectedIdentityGeneration: 0, finalCheck: {
+        XCTAssertFalse(model.canEnterRecording)
+        throw AuthorityError.unavailable
+      })
+      XCTFail("additional veto must propagate")
+    } catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+    XCTAssertFalse(model.canEnterRecording); XCTAssertEqual(model.phase, .suspended)
+    try await repo.close()
+  }
+  func testDurableRejectionDoesNotCallFinalCheck() async throws {
+    let repo = try accountRepository("final-check-durable"), b = try binding(.phone)
+    try await repo.bindAccountV4(b)
+    let model = AccountStatusModel(repository: repo, development: true, action: { _ in })
+    let wrong = try AccountBindingV4(accountID: "other", cloudSpaceID: b.cloudSpaceID,
+      deviceID: b.deviceID, activationEpoch: b.activationEpoch, role: b.role, environment: b.environment)
+    var checks = 0
+    for (value, generation) in [(b, Int64(1)), (wrong, Int64(0))] {
+      do {
+        try await model.admitIdentity(value, expectedIdentityGeneration: generation, finalCheck: { checks += 1 })
+        XCTFail("durable mismatch must reject before veto")
+      } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+      XCTAssertFalse(model.canEnterRecording)
+    }
+    XCTAssertEqual(checks, 0); try await repo.close()
+  }
+  func testSynchronousFinalCheckCannotRevivePausedStoppedOrReloadedModel() async throws {
+    for change in ["pause", "stop", "reload"] {
+      let repo = try accountRepository("final-check-reentry"), b = try binding(.phone)
+      try await repo.bindAccountV4(b)
+      let model = AccountStatusModel(repository: repo, development: true, action: { _ in })
+      var checks = 0
+      do {
+        try await model.admitIdentity(b, expectedIdentityGeneration: 0, finalCheck: {
+          checks += 1
+          switch change {
+          case "pause": model.pauseIdentity()
+          case "stop": model.stop()
+          default: model.requireReload()
+          }
+        })
+        XCTFail("synchronous tightening must invalidate original publication")
+      } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+      XCTAssertEqual(checks, 1); XCTAssertFalse(model.canEnterRecording)
+      XCTAssertEqual(model.phase, change == "stop" ? .unavailable : .suspended)
+      XCTAssertEqual(model.requiresReload, change == "reload")
+      try await repo.close()
+    }
+  }
+}
