@@ -223,3 +223,97 @@ extension M4IdentityBootstrapTests {
   }
 }
 #endif
+
+
+extension M4IdentityBootstrapTests {
+  func testManagedResourceReservationPrecedesPositiveBusinessSQLiteAndKeepsOriginalInode() async throws {
+    let (root, control) = location(), namespace = "managed-physical-first"
+    let prepared = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    var reserved = false
+    try prepared.prepareManagedResources { point in
+      if point == .afterReservation {
+        reserved = true
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
+        let catalog = try Data(contentsOf: control.deletingLastPathComponent().appendingPathComponent("catalog/catalog.json"))
+        XCTAssertTrue(String(decoding: catalog, as: UTF8.self).contains(prepared.seed.installationID))
+      }
+    }
+    XCTAssertTrue(reserved)
+    var before = stat(); XCTAssertEqual(lstat(prepared.seed.businessDatabaseURL.path, &before), 0); XCTAssertEqual(before.st_size, 0)
+    let repository = try prepared.openRepository()
+    let binding = try await repository.accountBindingV4(); XCTAssertNil(binding)
+    try await prepared.close()
+    var after = stat(); XCTAssertEqual(lstat(prepared.seed.businessDatabaseURL.path, &after), 0)
+    XCTAssertEqual(before.st_dev, after.st_dev); XCTAssertEqual(before.st_ino, after.st_ino); XCTAssertGreaterThan(after.st_size, 0)
+  }
+  func testManagedNoLoginReopenRetainsOriginalReservationIdentityAndBusinessInode() async throws {
+    let (root, control) = location(), namespace = "managed-no-login"
+    let first = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    try first.prepareManagedResources(); let db = try first.openRepository(), database = await db.databaseURL
+    let id = first.seed.installationID, key = first.material.signer.publicKey
+    try await first.close(); let bytes = try Data(contentsOf: database)
+    let owner = control.deletingLastPathComponent().appendingPathComponent("resources/resource.owner"), ownerBytes = try Data(contentsOf: owner)
+    let next = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    try next.prepareManagedResources()
+    XCTAssertEqual(next.seed.installationID, id); XCTAssertEqual(next.material.signer.publicKey, key)
+    XCTAssertEqual(try Data(contentsOf: owner), ownerBytes); XCTAssertEqual(try Data(contentsOf: database), bytes)
+    let original = try next.openRepository(); let binding = try await original.accountBindingV4(); XCTAssertNil(binding)
+    try await next.close()
+  }
+  func testManagedReplacedOwnerCannotAdoptPositiveDatabaseOrRegenerateReservation() async throws {
+    let (root, control) = location(), namespace = "managed-replaced-owner"
+    let first = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    try first.prepareManagedResources(); _ = try first.openRepository(); let database = first.seed.businessDatabaseURL
+    try await first.close(); let before = try Data(contentsOf: database)
+    let owner = control.deletingLastPathComponent().appendingPathComponent("resources/resource.owner"), old = owner.appendingPathExtension("original")
+    let bytes = try Data(contentsOf: owner); try FileManager.default.moveItem(at: owner, to: old); try bytes.write(to: owner)
+    let next = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    XCTAssertThrowsError(try next.prepareManagedResources())
+    XCTAssertEqual(try Data(contentsOf: database), before); XCTAssertEqual(try Data(contentsOf: owner), bytes)
+    try await next.close()
+  }
+  func testManagedReservationAndPublicationCrashesResumeOnlyOriginalPhysicalSlots() async throws {
+    for point in [M4ResourceCrashPoint.afterReservation, .afterResourceRename, .afterBusinessRename] {
+      let (root, control) = location(), namespace = "managed-crash"
+      let first = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+      let id = first.seed.installationID
+      XCTAssertThrowsError(try first.prepareManagedResources { if $0 == point { throw M4BootstrapError.storageUnavailable } })
+      try await first.close()
+      let next = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+      try next.prepareManagedResources(); XCTAssertEqual(next.seed.installationID, id)
+      let db = try next.openRepository(); let binding = try await db.accountBindingV4(); XCTAssertNil(binding)
+      try await next.close()
+    }
+  }
+}
+
+
+extension M4IdentityBootstrapTests {
+  func testManagedReplacementCatalogCannotBorrowOriginalPhysicalReservation() async throws {
+    let (root, control) = location(), namespace = "managed-catalog-replacement"
+    let first = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    try first.prepareManagedResources(); _ = try first.openRepository(); let database = first.seed.businessDatabaseURL
+    try await first.close(); let bytes = try Data(contentsOf: database)
+    let path = control.deletingLastPathComponent().appendingPathComponent("catalog")
+    let original = try M4OwnedDataCatalog(directory: path), saved = try XCTUnwrap(original.physicalBootstrap())
+    try original.close()
+    try FileManager.default.moveItem(at: path, to: path.appendingPathExtension("original"))
+    let replacement = try M4OwnedDataCatalog(directory: path)
+    try replacement.reservePhysicalBootstrap(saved.reservation)
+    try replacement.recordPhysicalPublication(saved.reservation, business: false)
+    try replacement.recordPhysicalPublication(saved.reservation, business: true)
+    try replacement.close()
+    let next = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    XCTAssertThrowsError(try next.prepareManagedResources(), "a new valid catalog cannot adopt original positive SQLite via copied reservation bytes")
+    XCTAssertEqual(try Data(contentsOf: database), bytes)
+    try await next.close()
+  }
+  func testManagedPreparationFailureCannotFallBackToUnreservedSQLiteOpen() async throws {
+    let (root, control) = location(), namespace = "managed-failed-preparation"
+    let prepared = try await M4IdentityBootstrap.prepare(root: root, namespace: namespace, controlDirectory: control) { try self.material($0) }
+    XCTAssertThrowsError(try prepared.prepareManagedResources { if $0 == .afterReservation { throw M4BootstrapError.storageUnavailable } })
+    XCTAssertThrowsError(try prepared.openRepository(), "a failed managed resource path cannot silently use the legacy fixture opening")
+    XCTAssertFalse(FileManager.default.fileExists(atPath: prepared.seed.businessDatabaseURL.path))
+    try await prepared.close()
+  }
+}

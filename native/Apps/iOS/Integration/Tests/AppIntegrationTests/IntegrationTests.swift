@@ -114,6 +114,22 @@ extension IntegrationTests {
     XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(configuration.namespace).path))
     XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("development/m4-controls").path))
   }
+  func testControlledM4BootstrapRetainsActualCatalogPublicationBeforeOriginalFacade() async throws {
+    let (root, configuration) = try controlledApplicationFixture()
+    let app = try await M4ApplicationBootstrap.controlled(configuration: configuration, rootDirectory: root)
+    let controls = root.appendingPathComponent("development/m4-controls/" + configuration.namespace)
+    guard FileManager.default.fileExists(atPath: controls.appendingPathComponent("catalog/catalog.json").path) else {
+      XCTFail("the formal controlled factory must retain original physical publication before opening its facade")
+      try await app.shutdown(); return
+    }
+    let catalog = try M4OwnedDataCatalog(directory: controls.appendingPathComponent("catalog"))
+    let saved = try XCTUnwrap(catalog.physicalBootstrap())
+    XCTAssertTrue(saved.resourcesPublished); XCTAssertTrue(saved.businessPublished)
+    let original = try M4CatalogIO.anchor(root.appendingPathComponent(configuration.namespace + "/matches.sqlite"))
+    XCTAssertTrue(M4CatalogIO.sameInode(original, saved.reservation.businessDatabase))
+    XCTAssertTrue(try catalog.index().entries.isEmpty, "physical reservation cannot invent an account scope")
+    try catalog.close(); try await app.shutdown()
+  }
   func testControlledM4BootstrapUsesOriginalMaterialAndOneFacadeAcrossReopen() async throws {
     for role in ["phone", "watch"] {
       let (root, configuration) = try controlledApplicationFixture(role: role)

@@ -211,6 +211,7 @@ public enum M4ApplicationBootstrapError: Error, Sendable, Equatable { case unava
       guard Data(material.namespace.utf8) == Data(seed.namespace.utf8), Data(material.deviceID.utf8) == Data(seed.installationID.utf8) else { throw M4BootstrapError.identityUnavailable }
       return M4IdentityMaterial(signer: material.signer, vault: material.vault)
     }
+    try prepared.prepareManagedResources()
     let adapters = try M4ControlledAdapters.make(configuration: configuration, rootDirectory: rootDirectory)
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: [configuration.keyID: configuration.publicKey])
     let original = try await M4AccountComposition.make(prepared: prepared, trust: trust, cloudSpaceID: configuration.cloudSpaceID, identity: identity, controlledAdapters: adapters)

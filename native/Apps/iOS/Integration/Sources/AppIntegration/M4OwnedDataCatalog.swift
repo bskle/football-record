@@ -235,12 +235,47 @@ struct M4FrozenDeletionPlan: Codable, Sendable {
     }
   }
 }
+/// Physical ownership only. No account, epoch, deletion parent or business permission.
+struct M4PhysicalResourceReservation: Codable, Sendable {
+  let version: Int
+  let reservationID, namespace, installationID, keyID: String
+  let candidate, directory, owner, businessSlot, businessDatabase, ledgerSlot: M4CatalogPath
+  let identityControls, catalogControls, ancestors: [M4CatalogPath]
+  let catalogOwnerDigest: String
+  func validate() throws {
+    guard version == 1, UUID(uuidString: reservationID)?.uuidString == reservationID,
+          UUID(uuidString: installationID)?.uuidString == installationID,
+          M4CatalogIO.opaque(namespace, limit: 128), M4CatalogIO.isDigest(keyID),
+          candidate.directory, directory.directory, !owner.directory, !businessSlot.directory,
+          !businessDatabase.directory, !ledgerSlot.directory,
+          M4CatalogIO.sameInode(candidate, directory), M4CatalogIO.sameInode(businessSlot, businessDatabase),
+          identityControls.count == 2, catalogControls.count == 3, M4CatalogIO.isDigest(catalogOwnerDigest), ancestors.count <= 4096 else { throw M4CatalogError.intentMismatch }
+    for path in [candidate, directory, owner, businessSlot, businessDatabase, ledgerSlot] + identityControls + catalogControls + ancestors { try M4CatalogIO.validate(path) }
+    let catalogDirectory = URL(fileURLWithPath: directory.path).deletingLastPathComponent().appendingPathComponent("catalog")
+    guard catalogControls.map({ $0.path }) == ["catalog.owner", "catalog.slot0", "catalog.slot1"].map({ catalogDirectory.appendingPathComponent($0).path }), catalogControls.allSatisfy({ !$0.directory }),
+          owner.path == directory.path + "/resource.owner", businessSlot.path == directory.path + "/business.slot",
+          ledgerSlot.path == directory.path + "/ledger.slot", businessDatabase.path != businessSlot.path,
+          candidate.path == URL(fileURLWithPath: directory.path).deletingLastPathComponent().appendingPathComponent(".resources.init-" + reservationID).path,
+          businessDatabase.path.hasSuffix("/matches.sqlite"),
+          Set(identityControls.map { Data($0.path.utf8) }).count == 2,
+          Set(([owner, businessSlot, ledgerSlot] + identityControls + catalogControls).map { "\($0.device):\($0.inode)" }).count == 8 else { throw M4CatalogError.intentMismatch }
+  }
+}
+struct M4PhysicalBootstrapState: Codable, Sendable {
+  let reservation: M4PhysicalResourceReservation
+  var resourcesPublished, businessPublished: Bool
+  func validate() throws {
+    try reservation.validate()
+    guard !businessPublished || resourcesPublished else { throw M4CatalogError.intentMismatch }
+  }
+}
 struct M4CatalogState: Codable {
   let version: Int
   var revision: UInt64
   var entries: [M4CatalogEntry]
   var plans: [M4FrozenDeletionPlan]
   var membershipRevision: UInt64? = nil
+  var physicalBootstrap: M4PhysicalBootstrapState? = nil
   var ownedRevision: UInt64 { membershipRevision ?? plans.first?.catalogRevision ?? revision }
   static let empty = Self(version: 1, revision: 0, entries: [], plans: [])
   /// Encode a private, deliberately invalid upper-bound shape only to measure
@@ -279,6 +314,7 @@ struct M4CatalogState: Codable {
   func validate() throws {
     guard version == 1 else { throw M4CatalogError.unsupportedSchema }
     guard ownedRevision <= revision else { throw M4CatalogError.intentMismatch }
+    try physicalBootstrap?.validate()
     guard entries.count <= 256, plans.count <= 1 else { throw M4CatalogError.budgetExceeded }
     guard Set(entries.map { Data($0.capsule.componentID.utf8) }).count == entries.count,
           try M4CatalogIO.encode(entries) == M4CatalogIO.encode(entries.sorted { Data($0.capsule.componentID.utf8).lexicographicallyPrecedes(Data($1.capsule.componentID.utf8)) }) else { throw M4CatalogError.intentMismatch }
@@ -294,6 +330,29 @@ struct M4CatalogState: Codable {
 final class M4OwnedDataCatalog: @unchecked Sendable {
   private let journal: M4CatalogJournal
   init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws { journal = try M4CatalogJournal(directory: directory, crashHook: crashHook, synchronizationFault: synchronizationFault) }
+  func physicalBootstrap() throws -> M4PhysicalBootstrapState? { try journal.read().physicalBootstrap }
+  func reservePhysicalBootstrap(_ reservation: M4PhysicalResourceReservation) throws {
+    try reservation.validate()
+    try journal.transaction { state in
+      if let prior = state.physicalBootstrap {
+        guard try M4CatalogIO.encode(prior.reservation) == M4CatalogIO.encode(reservation) else { throw M4CatalogError.intentMismatch }; return
+      }
+      guard state.entries.isEmpty, state.plans.isEmpty else { throw M4CatalogError.intentMismatch }
+      state.membershipRevision = state.ownedRevision
+      state.physicalBootstrap = M4PhysicalBootstrapState(reservation: reservation, resourcesPublished: false, businessPublished: false)
+    }
+    guard let saved = try physicalBootstrap(), try M4CatalogIO.encode(saved.reservation) == M4CatalogIO.encode(reservation) else { throw M4CatalogError.storageBlocked }
+  }
+  func recordPhysicalPublication(_ reservation: M4PhysicalResourceReservation, business: Bool) throws {
+    try journal.transaction { state in
+      guard var prior = state.physicalBootstrap, state.plans.isEmpty,
+            try M4CatalogIO.encode(prior.reservation) == M4CatalogIO.encode(reservation) else { throw M4CatalogError.intentMismatch }
+      if business { guard prior.resourcesPublished else { throw M4CatalogError.intentMismatch }; prior.businessPublished = true }
+      else { prior.resourcesPublished = true }
+      state.physicalBootstrap = prior
+    }
+    guard let saved = try physicalBootstrap(), saved.resourcesPublished, !business || saved.businessPublished else { throw M4CatalogError.storageBlocked }
+  }
   func record(_ capsule: M4OwnershipCapsule) throws {
     try capsule.verifyCurrent()
     try journal.transaction { state in
@@ -330,6 +389,7 @@ final class M4OwnedDataCatalog: @unchecked Sendable {
   }
   func reserve(requestID: String, scope: CloudScope, choices: M4DeletionChoices, health: M4HealthReservation) throws -> M4FrozenDeletionPlan {
     try journal.transaction { state in
+      guard state.physicalBootstrap == nil else { throw M4CatalogError.intentMismatch }
       if let prior = state.plans.first {
         guard M4CatalogIO.raw(prior.requestID, requestID), prior.scope == scope,
               try M4CatalogIO.encode(prior.choices) == M4CatalogIO.encode(choices),
