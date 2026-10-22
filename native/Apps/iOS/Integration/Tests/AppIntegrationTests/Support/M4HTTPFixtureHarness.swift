@@ -19,8 +19,8 @@ enum M4HTTPFixtureError: Error, Equatable { case configuration, shape, correlati
   private(set) var requestCount = 0
   struct Report { let pid: Int32; let exited: Bool; let status: Int32; let readersJoined: Bool; let closeAcknowledged: Bool }
   init(root: URL) throws {
-    guard let binary = ProcessInfo.processInfo.environment["NATIVE_NODE_BINARY"], binary == "/Users/liam/.hermes/node/bin/node",
-          SHA256.hash(data: try Data(contentsOf: URL(fileURLWithPath: binary))).map({ String(format: "%02x", $0) }).joined() == "2e3f1286a7eb3736346ed1803e458a0ff909e2b2d5bc746144dcb76970e9b99d" else { throw M4HTTPFixtureError.configuration }
+    guard let binary = ProcessInfo.processInfo.environment["NATIVE_NODE_BINARY"], (binary as NSString).isAbsolutePath,
+          FileManager.default.isExecutableFile(atPath: binary) else { throw M4HTTPFixtureError.configuration }
     var repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
     while repository.path != "/", !FileManager.default.fileExists(atPath: repository.appendingPathComponent("scripts/native/m4-authority-fixture.mjs").path) { repository.deleteLastPathComponent() }
     guard repository.path != "/" else { throw M4HTTPFixtureError.configuration }
