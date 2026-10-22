@@ -333,3 +333,14 @@ public struct DeletionControlAuthorizationRecordV1: Sendable {
 ```
 
 这些读取只返回已按原parent、原attempt、固定trust和严格闭合kind重验的历史bytes；不代表当前授权、ready或vault写入准入。所有活动操作仍须原 `deletionControlContextV4` 的current SQL门。原protocol required API和普通业务退休门保持不变。独立Session coordinator只取原 `_authority-account` mutex，时间从原Session clock取得，不进行网络、业务mutation或新建facade。
+
+
+## 2026-10-22 Core 独立审阅修复
+
+`50463f4` 的317/0是修复前单轮证据，不能代表以下三项已关闭。新增四项实际回归在该产品源码上4 tests/6 failures，修复后同命令4/0。
+
+- 原ready响应整段TTL内丢失时，固定trust验证的首次knownExpired/knownRevoked可直接作为原attempt第一条closing历史记录；不构造ready、不安装credential、不修改binding/generation。若已有ready，则closing仍另存resolution，原first bytes不覆盖。首次knownAbandoned仍仅为原attempt关闭事实，不等于从未commit。
+- 新attempt的auth/challenge语义ID在同SQL内检查原Watch attempt及所有auth/watch receipt/admission控制键；写完parent+attempt后、COMMIT前再跑完整严格validator。碰撞零新控制行，原Watch bytes保留，不能提交后才把完整inventory/erase读坏。
+- 原attempt一旦已有可信closing或resolution，活动ready接受在同一SQL门拒绝，即使相同ready签名/TTL仍有效；历史读取保持原ready+closing，不能借幂等重放刷新vault。
+
+本批Core验证脚本的207项保守输入包含未提交的AccountKit两个占位/测试文件，它们不被Core package命令消费；精确Core Git输入以checkpoint逐项限定。AccountKit仍在独立TDD阶段，不能将本批Core结果声称为whole052。

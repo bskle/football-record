@@ -68,12 +68,13 @@ extension MatchStore {
                 guard try loadDeletionControlAuthorizationV1(parentID:prior.parentRequestID,authRequestID:prior.authentication.requestID) != nil else {throw DeletionControlIssueV1.unresolved}
             }
             for id in [attempt.authentication.requestID,attempt.challengeRequestID] {
-                guard try controlV4(id)==nil,try authAttemptV4(requestID:id)==nil else {throw AuthorityError.conflict}
+                guard try controlV4(id)==nil,try authAttemptV4(requestID:id)==nil,try watchRegistrationAttemptV4(requestID:id)==nil else {throw AuthorityError.conflict}
+                for prefix in ["auth-resolved:","auth-receipt:","auth-admission:","watch-attempt:","watch-receipt:","watch-admission:"] {guard try db.rows("SELECT 1 FROM lifecycle_steps_v4 WHERE id=?",[.text(prefix+id)]).isEmpty else {throw AuthorityError.conflict}}
                 for prior in all {guard prior.authentication.requestID != id,prior.challengeRequestID != id else {throw AuthorityError.conflict}}
             }
             let parents=try db.rows("SELECT id FROM lifecycle_steps_v4 WHERE id LIKE 'delete-control-v1:parent:%'")
             if try readDeletionControlV1(StoredDeletionControlParentV1.self,deletionControlKeyV1("parent",attempt.parentRequestID))==nil {guard parents.count<64 else {throw DeletionControlIssueV1.capacity};try insertDeletionControlV1(header,key:deletionControlKeyV1("parent",attempt.parentRequestID))}
-            try insertDeletionControlV1(attempt,key:deletionControlKeyV1("attempt",attempt.authentication.requestID));try fail(.beforeCommit)
+            try insertDeletionControlV1(attempt,key:deletionControlKeyV1("attempt",attempt.authentication.requestID));try validateDeletionControlRowsLockedV4();try fail(.beforeCommit)
         };if fault == .afterCommit {throw StoreError.responseLost}
     }
 }
@@ -113,7 +114,7 @@ extension MatchStore {
         let parent=try deletionControlParentV1(saved.parentRequestID),saga=try deletionControlSagaHistoryV1(parent)
         guard saved.parentDigest==saga.intent.digest,saved.referenceID==a.authentication.requestID,saved.query==nil,saved.acceptedAt==nil else {throw AuthorityError.intentMismatch}
         let verified=try VerifiedDeletionControlAuthorizationV1.verify(saved.raw,expectedParent:saga,expectedAttempt:a,trust:trust)
-        if saved.kind=="authorization" {guard [.ready,.knownAbandoned].contains(verified.body.result) else {throw AuthorityError.intentMismatch}}
+        if saved.kind=="authorization" {guard [.ready,.knownAbandoned,.knownExpired,.knownRevoked].contains(verified.body.result) else {throw AuthorityError.intentMismatch}}
         else {guard saved.kind=="resolution",[.knownExpired,.knownRevoked].contains(verified.body.result),saved.originalAcquire==nil else {throw AuthorityError.intentMismatch}}
         try verifyDeletionControlAcquireV1(saved.originalAcquire,authorization:verified,parent:parent)
         return verified
@@ -167,7 +168,7 @@ extension MatchStore {
         for c in confirmations {guard let p=parents[c.parentRequestID],c.parentDigest==p.parentDigest else {throw AuthorityError.intentMismatch};try claim(c.confirmationID);try claim(c.intent.requestID);try validateDeletionControlConfirmationV1(c)}
         for id in ids {
             guard try controlV4(id)==nil,try authAttemptV4(requestID:id)==nil,try watchRegistrationAttemptV4(requestID:id)==nil else {throw AuthorityError.conflict}
-            for prefix in ["auth-resolved:","auth-receipt:","auth-admission:","watch-receipt:"] {guard try db.rows("SELECT 1 FROM lifecycle_steps_v4 WHERE id=?",[.text(prefix+id)]).isEmpty else {throw AuthorityError.conflict}}
+            for prefix in ["auth-resolved:","auth-receipt:","auth-admission:","watch-attempt:","watch-receipt:","watch-admission:"] {guard try db.rows("SELECT 1 FROM lifecycle_steps_v4 WHERE id=?",[.text(prefix+id)]).isEmpty else {throw AuthorityError.conflict}}
         }
         for p in proofs {
             guard let parent=parents[p.parentRequestID],parent.parentDigest==p.parentDigest,let attempt=attempts[p.authRequestID],attempt.parentRequestID==p.parentRequestID else {throw AuthorityError.intentMismatch}
@@ -183,6 +184,9 @@ extension MatchStore {
         try db.transaction {
             try validateDeletionControlRowsLockedV4();let (c,_)=try sourceDeletionControlV1(parentID:parentID,expectedIdentityGeneration:expectedIdentityGeneration)
             guard let attempt=try loadDeletionControlAttemptV1(parentID:parentID,authRequestID:authorization.body.requestID),attempt.identityGeneration==expectedIdentityGeneration,try Canonical.data(attempt.binding)==Canonical.data(c.binding),let trust=authorityTrust else {throw AuthorityError.identityChanged}
+            if let previous=try loadDeletionControlAuthorizationV1(parentID:parentID,authRequestID:attempt.authentication.requestID) {
+                guard previous.authorization.body.result == .ready,previous.resolution==nil else {throw DeletionControlIssueV1.needsFreshAuthorization}
+            }
             let proof=try VerifiedDeletionControlAuthorizationV1.verify(authorization.raw,expectedParent:c.saga,expectedAttempt:attempt,trust:trust),now=try DeletionControlWireV1.seconds(at)
             guard proof.body.result == .ready,proof.body.issuedAt<=now+60,proof.body.expiresAt>now else {throw AuthorityError.staleAttestation}
             let saved=StoredDeletionControlProofV1(parentRequestID:parentID,parentDigest:c.saga.intent.digest,authRequestID:attempt.authentication.requestID,referenceID:attempt.authentication.requestID,kind:"authorization",raw:proof.raw,originalAcquire:originalAcquire,query:nil,acceptedAt:nil)
@@ -196,8 +200,18 @@ extension MatchStore {
             let proof=try VerifiedDeletionControlAuthorizationV1.verify(authorization.raw,expectedParent:c.saga,expectedAttempt:attempt,trust:trust)
             guard [.knownAbandoned,.knownExpired,.knownRevoked].contains(proof.body.result) else {throw AuthorityError.intentMismatch}
             let first=try loadDeletionControlAuthorizationV1(parentID:parentID,authRequestID:attempt.authentication.requestID),kind:String
-            if proof.body.result == .knownAbandoned {guard first==nil || first?.authorization.body.result == .knownAbandoned else {throw AuthorityError.conflict};kind="authorization"}
-            else {guard first?.authorization.body.result == .ready else {throw DeletionControlIssueV1.unresolved};kind="resolution"}
+            if let first {
+                if first.authorization.body.result == proof.body.result {
+                    guard first.authorization.raw==proof.raw,first.resolution==nil else {throw AuthorityError.conflict};kind="authorization"
+                }else{
+                    guard first.authorization.body.result == .ready,[.knownExpired,.knownRevoked].contains(proof.body.result) else {throw AuthorityError.conflict};kind="resolution"
+                }
+            }else{
+                // The original ready response can be lost through its entire TTL.
+                // A fixed-trust closing proof closes only this original attempt;
+                // it never invents ready, installs credentials or advances identity.
+                kind="authorization"
+            }
             let saved=StoredDeletionControlProofV1(parentRequestID:parentID,parentDigest:c.saga.intent.digest,authRequestID:attempt.authentication.requestID,referenceID:attempt.authentication.requestID,kind:kind,raw:proof.raw,originalAcquire:nil,query:nil,acceptedAt:nil)
             try insertDeletionControlV1(saved,key:deletionControlProofKeyV1(kind,parentID:parentID,digest:c.saga.intent.digest,referenceID:saved.referenceID));try validateDeletionControlRowsLockedV4();try fail(.afterReceipt);try fail(.beforeCommit)
         };if fault == .afterCommit {throw StoreError.responseLost}

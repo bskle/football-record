@@ -139,4 +139,54 @@ final class DeletionControlAuthenticationTests:XCTestCase,@unchecked Sendable {
         try await reopened.close()
     }
 
+    func closing(_ f: Fixture, _ attempt: DeletionControlAttemptV1, result: String) throws -> VerifiedDeletionControlAuthorizationV1 {
+        let raw = try authorization(f, attempt, changes: ["result": result, "sessionID": NSNull(), "reauthenticationID": NSNull(), "reauthenticationExpiresAt": NSNull(), "expiresAt": Int64(h.h.t.timeIntervalSince1970)])
+        return try VerifiedDeletionControlAuthorizationV1.verify(raw, expectedParent: f.saga, expectedAttempt: attempt, trust: f.context.trust)
+    }
+    func acceptFirstClosingAfterLostReady(_ result: String) async throws {
+        let f = try await fixture(), s = try h.store(f.context), c = try await s.deletionControlContextV4(parentID: f.saga.intent.requestID, expectedIdentityGeneration: 0), a = try attempt(c)
+        try await s.saveDeletionControlAttemptV4(a)
+        let proof = try closing(f, a, result: result)
+        try await s.resolveDeletionControlAttemptV4(parentID: f.saga.intent.requestID, authorization: proof, expectedIdentityGeneration: 0)
+        try await s.close()
+        let reopened = try h.store(f.context), saved = try await reopened.deletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authRequestID: a.authentication.requestID)
+        XCTAssertEqual(saved?.authorization.raw, proof.raw); XCTAssertNil(saved?.resolution)
+        try await reopened.saveDeletionControlAttemptV4(attempt(c, id: "explicit-fresh-after-closing"))
+        let generation = try await reopened.identityGenerationV4(), binding = try await reopened.accountBindingV4()
+        XCTAssertEqual(generation, 0); XCTAssertEqual(binding, f.context.binding)
+        let inventory = try await reopened.captureInventoryV4(); XCTAssertTrue(inventory.isEmpty)
+        try await reopened.close()
+    }
+    func testFirstTrustedExpiryClosesOriginalAttemptWhenReadyResponseWasLost() async throws { try await acceptFirstClosingAfterLostReady("knownExpired") }
+    func testFirstTrustedRevocationClosesOriginalAttemptWhenReadyResponseWasLost() async throws { try await acceptFirstClosingAfterLostReady("knownRevoked") }
+    func testOriginalWatchAttemptIDCollisionCannotCommitAnyDeletionControlRow() async throws {
+        for collisionWithChallenge in [false, true] {
+            let f = try await fixture(), s = try h.store(f.context), c = try await s.deletionControlContextV4(parentID: f.saga.intent.requestID, expectedIdentityGeneration: 0)
+            let watch = try WatchRegistrationStateTests().attempt(f.context, key: Curve25519.Signing.PrivateKey())
+            try await s.saveWatchRegistrationAttemptV4(watch, expectedIdentityGeneration: 0)
+            let ordinary = try attempt(c, id: collisionWithChallenge ? "fresh-control-id" : watch.requestID)
+            let colliding = try DeletionControlAttemptV1(context: c, challengeRequestID: collisionWithChallenge ? watch.requestID : ordinary.challengeRequestID, authentication: ordinary.authentication)
+            do { try await s.saveDeletionControlAttemptV4(colliding); XCTFail("original Watch request ID must reject before any control commit") } catch {}
+            try await s.close()
+            let db = try SQLite(url: f.context.url, fault: nil)
+            XCTAssertEqual(try db.rows("SELECT id FROM lifecycle_steps_v4 WHERE id LIKE 'delete-control-%'").count, 0)
+            let original = try db.scalar("SELECT payload FROM lifecycle_steps_v4 WHERE id=?", [.text("watch-attempt:" + watch.requestID)]).data
+            XCTAssertEqual(original, try Canonical.data(watch)); try db.close()
+            let reopened = try h.store(f.context), inventory = try await reopened.captureInventoryV4()
+            XCTAssertTrue(inventory.isEmpty); try await reopened.close()
+        }
+    }
+    func testTrustedRevocationPermanentlyRejectsLateUnexpiredReadyAdmission() async throws {
+        let f = try await fixture(), s = try h.store(f.context), c = try await s.deletionControlContextV4(parentID: f.saga.intent.requestID, expectedIdentityGeneration: 0), a = try attempt(c), raw = try authorization(f, a)
+        let ready = try VerifiedDeletionControlAuthorizationV1.verify(raw, expectedParent: f.saga, expectedAttempt: a, trust: f.context.trust)
+        try await s.saveDeletionControlAttemptV4(a)
+        try await s.acceptDeletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authorization: ready, originalAcquire: nil, expectedIdentityGeneration: 0, at: h.h.t)
+        let revoked = try closing(f, a, result: "knownRevoked")
+        try await s.resolveDeletionControlAttemptV4(parentID: f.saga.intent.requestID, authorization: revoked, expectedIdentityGeneration: 0)
+        do { try await s.acceptDeletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authorization: ready, originalAcquire: nil, expectedIdentityGeneration: 0, at: h.h.t); XCTFail("closed attempt cannot admit cached ready or refresh a vault") } catch {}
+        let saved = try await s.deletionControlAuthorizationV4(parentID: f.saga.intent.requestID, authRequestID: a.authentication.requestID)
+        XCTAssertEqual(saved?.authorization.raw, raw); XCTAssertEqual(saved?.resolution?.raw, revoked.raw)
+        try await s.close()
+    }
+
 }
