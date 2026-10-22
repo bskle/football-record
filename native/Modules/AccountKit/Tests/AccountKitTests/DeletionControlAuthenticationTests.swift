@@ -88,14 +88,16 @@ actor DeletionControlScopeSource {
 }
 actor DeletionControlHeldSQL: DeletionControlAuthenticationCoordinator {
     let base: MatchSession
+    let before: Bool
     var entered = false
     var gate: CheckedContinuation<Void, Never>?
-    init(_ base: MatchSession) { self.base = base }
+    init(_ base: MatchSession, before: Bool = false) { self.base = base; self.before = before }
     func syncRepositoryIdentity() async -> SyncRepositoryIdentity { await base.syncRepositoryIdentity() }
     func saveDeletionControlAttempt(_ attempt: DeletionControlAttemptV1) async throws { try await base.saveDeletionControlAttempt(attempt) }
     func acceptDeletionControlAuthorization(parentID: String, authorization: VerifiedDeletionControlAuthorizationV1, originalAcquire: Data?, expectedIdentityGeneration: Int64) async throws {
+        if before { entered = true; await withCheckedContinuation { gate = $0 } }
         try await base.acceptDeletionControlAuthorization(parentID: parentID, authorization: authorization, originalAcquire: originalAcquire, expectedIdentityGeneration: expectedIdentityGeneration)
-        entered = true; await withCheckedContinuation { gate = $0 }
+        if !before { entered = true; await withCheckedContinuation { gate = $0 } }
     }
     func resolveDeletionControlAttempt(parentID: String, authorization: VerifiedDeletionControlAuthorizationV1, expectedIdentityGeneration: Int64) async throws { try await base.resolveDeletionControlAttempt(parentID: parentID, authorization: authorization, expectedIdentityGeneration: expectedIdentityGeneration) }
     func saveDeletionControlLockConfirmation(parentID: String, confirmation: DeletionControlLockConfirmationV1, expectedIdentityGeneration: Int64) async throws { try await base.saveDeletionControlLockConfirmation(parentID: parentID, confirmation: confirmation, expectedIdentityGeneration: expectedIdentityGeneration) }
@@ -116,6 +118,20 @@ actor DeletionControlHeldVault: DeviceCredentialVault {
     }
     func release() { gate?.resume(); gate = nil }
 }
+final class DeletionControlClock: SessionClock, @unchecked Sendable {
+    private let lock = NSLock()
+    private var date: Date
+    init(_ date: Date) { self.date = date }
+    func now() -> Date { lock.lock(); defer { lock.unlock() }; return date }
+    func set(_ date: Date) { lock.lock(); defer { lock.unlock() }; self.date = date }
+}
+actor DeletionControlCountingSigner: DeviceProofSigner {
+    nonisolated let publicKey: String
+    let inner: any DeviceProofSigner
+    var calls = 0
+    init(_ inner: any DeviceProofSigner) { self.inner = inner; publicKey = inner.publicKey }
+    func sign(_ bytes: Data) async throws -> Data { calls += 1; return try await inner.sign(bytes) }
+}
 final class DeletionControlAuthenticationTests: XCTestCase, @unchecked Sendable {
     struct Fixture {
         let h: AuthenticationRecoveryTests.Harness
@@ -124,9 +140,19 @@ final class DeletionControlAuthenticationTests: XCTestCase, @unchecked Sendable 
         let scope: CloudScopeV1
         let relay: DeletionControlRelay
     }
-    func fixture(_ f: NodeAuthorityFixture, pinned: Bool = false) async throws -> Fixture {
+    func fixture(_ f: NodeAuthorityFixture, pinned: Bool = false, clock: DeletionControlClock? = nil) async throws -> Fixture {
         let relay = DeletionControlRelay(try URLSessionAuthorityRelay(baseURL: URL(string: f.metadata.baseURL)!, environment: .development))
-        let h = try await AuthenticationRecoveryTests().harness(f, relay: relay)
+        let h: AuthenticationRecoveryTests.Harness
+        if let clock {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString), signer = try DevelopmentDeviceSigner(namespace: "deletion-clock-tests"), vault = MemoryDeviceCredentialVault(), apple = FixtureAppleSignIn(f)
+            let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: [f.metadata.keyID: f.metadata.publicKey])
+            let repository = try SQLiteSessionRepository(rootDirectory: root, databaseNamespace: "auth-session", authorityTrust: trust, cloudSavePolicy: .development(databaseNamespace: "auth-session"))
+            let client = AuthorityClient(relay: relay, vault: vault, signer: signer, trust: trust, now: { clock.now() })
+            let session = MatchSession(store: repository, deviceIdentity: FixedIdentity(value: "new-client"), clock: clock, ids: UUIDSessionIDFactory(), permits: UnavailableStartPermitProvider(), workout: UnavailableWorkoutGateway(), environment: .development(databaseNamespace: "auth-session"))
+            let account = AccountService(client: client, repository: repository, coordinator: session, deviceID: "new-client", cloudSpaceID: "fixture-cloud", apple: apple)
+            try await account.admitCurrentIdentity()
+            h = AuthenticationRecoveryTests.Harness(repo: repository, service: account, vault: vault, signer: signer, session: session, apple: apple, root: root, client: client)
+        } else { h = try await AuthenticationRecoveryTests().harness(f, relay: relay) }
         let authentication = try await h.service.signIn(requestID: "control-original-login", challengeRequestID: "control-original-login-challenge")
         if pinned {
             var fields = AuthorityFields(); fields.matchID = "remote-held-match"; fields.recordingDeviceID = authentication.binding.deviceID; fields.activationEpoch = authentication.binding.activationEpoch
@@ -456,6 +482,89 @@ final class DeletionControlAuthenticationTests: XCTestCase, @unchecked Sendable 
             XCTAssertTrue(attempts.isEmpty); XCTAssertFalse(paths.contains("/v1/accounts/delete/reauth/apple"))
             await s.stopAndJoin(); try await x.h.repo.close()
         }
+    }
+
+    func testPositiveSQLCallbackCrossingControlExpiryCannotInstallExpiredVaultOrReturnReady() async throws {
+        let f = try NodeAuthorityFixture(); defer { f.close() }
+        let x = try await fixture(f), held = DeletionControlHeldSQL(x.h.session), scope = x.scope, clock = DeletionControlClock(x.h.client.now()), old = try await x.h.vault.credential()
+        let client = AuthorityClient(relay: x.relay, vault: x.h.vault, signer: x.h.signer, trust: x.h.client.trust, now: { clock.now() })
+        let s = DeletionControlAuthenticationService(client: client, repository: x.h.repo, coordinator: held, scope: scope, apple: x.h.apple, currentScope: { scope })
+        let call = Task { try await s.renew(parentID: x.saga.intent.requestID, authRequestID: "expired-sql-callback", challengeRequestID: "expired-sql-challenge", expectedIdentityGeneration: 0) }
+        let until = ContinuousClock.now.advanced(by: .seconds(3))
+        while !(await held.entered), ContinuousClock.now < until { try await Task.sleep(for: .milliseconds(2)) }
+        let entered = await held.entered; XCTAssertTrue(entered)
+        let proof = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "expired-sql-callback")
+        let expiry = try XCTUnwrap(proof?.authorization.body.expiresAt)
+        clock.set(Date(timeIntervalSince1970: Double(expiry + 1))); _ = try f.command(["op": "clock", "now": expiry + 1])
+        await held.release()
+        do { let outcome = try await call.value; if case .ready = outcome { XCTFail("elapsed signed TTL cannot become ready after positive SQL") } } catch {}
+        let credential = try await x.h.vault.credential(), retained = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "expired-sql-callback")
+        XCTAssertEqual(credential.sessionID, old.sessionID); XCTAssertEqual(retained?.authorization.raw, proof?.authorization.raw)
+        await s.stopAndJoin(); try await x.h.repo.close()
+    }
+    func testOldAttemptCannotSignOrSendRecoverAfterSameScopeGenerationAdvanced() async throws {
+        let f = try NodeAuthorityFixture(); defer { f.close() }
+        let x = try await fixture(f), signer = DeletionControlCountingSigner(x.h.signer), scope = x.scope
+        let client = AuthorityClient(relay: x.relay, vault: x.h.vault, signer: signer, trust: x.h.client.trust, now: x.h.client.now)
+        let s = DeletionControlAuthenticationService(client: client, repository: x.h.repo, coordinator: x.h.session, scope: scope, apple: x.h.apple, currentScope: { scope })
+        assertReady(try await s.renew(parentID: x.saga.intent.requestID, authRequestID: "old-generation-auth", challengeRequestID: "old-generation-challenge", expectedIdentityGeneration: 0))
+        try await x.h.session.suspendAccount(); let generation = try await x.h.repo.identityGenerationV4()
+        try await x.h.vault.advanceIdentityFence(to: generation)
+        let before = await x.relay.paths, signaturesBefore = await signer.calls
+        for renew in [false, true] {
+            do {
+                if renew { _ = try await s.renew(parentID: x.saga.intent.requestID, authRequestID: "old-generation-auth", challengeRequestID: "must-not-sign-another-challenge", expectedIdentityGeneration: generation) }
+                else { _ = try await s.recover(parentID: x.saga.intent.requestID, authRequestID: "old-generation-auth", expectedIdentityGeneration: generation) }
+                XCTFail("historical attempt cannot borrow current generation")
+            } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+        }
+        let after = await x.relay.paths
+        XCTAssertEqual(after.count, before.count, "old generation must reject before signer/HTTP")
+        let signaturesAfter = await signer.calls; XCTAssertEqual(signaturesAfter, signaturesBefore)
+        let retained = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "old-generation-auth")
+        XCTAssertEqual(retained?.authorization.body.result, .ready)
+        await s.stopAndJoin(); try await x.h.repo.close()
+    }
+
+    func testCurrentStoreStaleAttestationCannotBeBypassedByOldReadyReadback() async throws {
+        let f = try NodeAuthorityFixture(); defer { f.close() }
+        let clock = DeletionControlClock(Date(timeIntervalSince1970: Double(f.metadata.now))), x = try await fixture(f, clock: clock), initial = service(x)
+        assertReady(try await initial.renew(parentID: x.saga.intent.requestID, authRequestID: "stale-readback-auth", challengeRequestID: "stale-readback-challenge", expectedIdentityGeneration: 0))
+        await initial.stopAndJoin()
+        let old = try await x.h.vault.credential(), held = DeletionControlHeldSQL(x.h.session, before: true), scope = x.scope
+        let s = DeletionControlAuthenticationService(client: x.h.client, repository: x.h.repo, coordinator: held, scope: scope, apple: x.h.apple, currentScope: { scope })
+        let call = Task { try await s.recover(parentID: x.saga.intent.requestID, authRequestID: "stale-readback-auth", expectedIdentityGeneration: 0) }
+        let until = ContinuousClock.now.advanced(by: .seconds(3))
+        while !(await held.entered), ContinuousClock.now < until { try await Task.sleep(for: .milliseconds(2)) }
+        let entered = await held.entered; XCTAssertTrue(entered)
+        clock.set(Date(timeIntervalSince1970: Double(old.expiresAt + 1))); _ = try f.command(["op": "clock", "now": old.expiresAt + 1])
+        await held.release()
+        do { let outcome = try await call.value; if case .ready = outcome { XCTFail("old readback cannot bypass real current Store staleAttestation") } } catch {}
+        let retained = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "stale-readback-auth")
+        XCTAssertEqual(retained?.authorization.body.result, .ready)
+        await s.stopAndJoin(); try await x.h.repo.close()
+    }
+
+    func testVaultAwaitCrossingExpiryCannotReturnReadyOrAuthorizeAnyLaterRequest() async throws {
+        let f = try NodeAuthorityFixture(); defer { f.close() }
+        let clock = DeletionControlClock(Date(timeIntervalSince1970: Double(f.metadata.now))), x = try await fixture(f, clock: clock), held = DeletionControlHeldVault(x.h.vault), scope = x.scope
+        let client = AuthorityClient(relay: x.relay, vault: held, signer: x.h.signer, trust: x.h.client.trust, now: { clock.now() })
+        let s = DeletionControlAuthenticationService(client: client, repository: x.h.repo, coordinator: x.h.session, scope: scope, apple: x.h.apple, currentScope: { scope })
+        let call = Task { try await s.renew(parentID: x.saga.intent.requestID, authRequestID: "vault-expiry-auth", challengeRequestID: "vault-expiry-challenge", expectedIdentityGeneration: 0) }
+        let until = ContinuousClock.now.advanced(by: .seconds(3))
+        while !(await held.entered), ContinuousClock.now < until { try await Task.sleep(for: .milliseconds(2)) }
+        let entered = await held.entered; XCTAssertTrue(entered)
+        let proof = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "vault-expiry-auth"), expiry = try XCTUnwrap(proof?.authorization.body.expiresAt)
+        clock.set(Date(timeIntervalSince1970: Double(expiry + 1))); _ = try f.command(["op": "clock", "now": expiry + 1])
+        await held.release()
+        do { let outcome = try await call.value; if case .ready = outcome { XCTFail("post-vault signed expiry gate must reject") } } catch {}
+        // A borrowed vault callback is joined as a positive fact, never called atomic
+        // with SQL/time. The expired value cannot sign even one later HTTP request.
+        let credential = try await x.h.vault.credential(); XCTAssertEqual(credential.expiresAt, expiry)
+        do { _ = try await client.signedRequest(path: "/v1/accounts/delete", body: x.saga.intent.canonicalRequest, requestID: x.saga.intent.requestID); XCTFail("expired credential has no request authority") } catch {}
+        let retained = try await x.h.repo.deletionControlAuthorizationV4(parentID: x.saga.intent.requestID, authRequestID: "vault-expiry-auth")
+        XCTAssertEqual(retained?.authorization.raw, proof?.authorization.raw)
+        await s.stopAndJoin(); try await x.h.repo.close()
     }
 
 }

@@ -74,6 +74,20 @@ public actor DeletionControlAuthenticationService {
               context.keyID == (try AuthorityWire.deviceKeyID(publicKey: client.signer.publicKey)) else { throw AuthorityError.identityChanged }
         return context
     }
+    private func requireAttempt(_ attempt: DeletionControlAttemptV1, context: DeletionControlContextV1, generation: Int64) throws {
+        guard attempt.identityGeneration == generation, context.identityGeneration == generation,
+              attempt.parentRequestID == context.saga.intent.requestID, attempt.parentDigest == context.saga.intent.digest,
+              same(attempt.originalScope, context.originalScope),
+              try AuthorityWire.encode(attempt.binding) == AuthorityWire.encode(context.binding),
+              attempt.publicKey == context.publicKey, attempt.keyID == context.keyID,
+              attempt.authentication.publicKey == context.publicKey, attempt.authentication.keyID == context.keyID,
+              same(attempt.authentication.deviceID, context.binding.deviceID), same(attempt.authentication.cloudSpaceID, context.originalScope.cloudSpaceID), attempt.authentication.environment == context.binding.environment else { throw AuthorityError.identityChanged }
+    }
+    private func requireFresh(_ credential: DeviceCredential, proof: VerifiedDeletionControlAuthorizationV1) throws {
+        let now = try seconds(client.now())
+        guard proof.body.result == .ready, proof.body.issuedAt <= now + 60,
+              proof.body.expiresAt > now, credential.expiresAt == proof.body.expiresAt else { throw AuthorityError.staleAttestation }
+    }
     private func bytes(_ value: [String: Any]) throws -> Data { try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) }
     private func object(_ raw: Data) throws -> [String: Any] {
         guard raw.count <= 65536, let value = try JSONSerialization.jsonObject(with: raw) as? [String: Any], try bytes(value) == raw else { throw AuthorityError.invalidWire }
@@ -102,7 +116,10 @@ public actor DeletionControlAuthenticationService {
         var context = try await checked(parentID, generation, token)
         let previous = try await repository.deletionControlAttemptV4(parentID: parentID, authRequestID: authID)
         context = try await checked(parentID, generation, token)
-        if previous != nil { return try await recoverOwned(parentID, authID, generation, token) }
+        if let previous {
+            try requireAttempt(previous, context: context, generation: generation)
+            return try await recoverOwned(parentID, authID, generation, token)
+        }
         let attempts = try await repository.deletionControlAttemptsV4(parentID: parentID)
         context = try await checked(parentID, generation, token)
         for attempt in attempts {
@@ -162,11 +179,13 @@ public actor DeletionControlAuthenticationService {
         var context = try await checked(parentID, generation, token)
         guard let attempt = try await repository.deletionControlAttemptV4(parentID: parentID, authRequestID: authID) else { throw DeletionControlIssueV1.unresolved }
         context = try await checked(parentID, generation, token)
+        try requireAttempt(attempt, context: context, generation: generation)
         var request = try common(context, requestID: client.nonce())
         request["authRequestID"] = authID; request["authRequestDigest"] = attempt.authentication.requestDigest
         request["issuedAt"] = try seconds(client.now()); request["nonce"] = client.nonce()
         let signature = try await client.signer.sign(AuthorityWire.signedInput("football-record.deletion-control.recover.v1", body: bytes(request)))
-        _ = try await checked(parentID, generation, token)
+        context = try await checked(parentID, generation, token)
+        try requireAttempt(attempt, context: context, generation: generation)
         request["deviceProof"] = AuthorityWire.base64URL(signature)
         let response: Data
         do { response = try await unsigned("/v1/accounts/delete/reauth/recover", body: bytes(request)) }
@@ -184,6 +203,7 @@ public actor DeletionControlAuthenticationService {
         return .parentCompleted(proof)
     }
     private func accept(_ raw: Data, context: DeletionControlContextV1, attempt: DeletionControlAttemptV1, generation: Int64, token: UInt64) async throws -> DeletionControlOutcomeV1 {
+        try requireAttempt(attempt, context: context, generation: generation)
         if let completed = try parentResult(raw, context: context) { return completed }
         let value = try object(raw)
         guard Set(value.keys) == ["authorization", "originalAcquire", "credential"], let signed = value["authorization"] as? [String: Any] else { throw AuthorityError.invalidWire }
@@ -207,6 +227,7 @@ public actor DeletionControlAuthenticationService {
         let credential = try JSONDecoder().decode(DeviceCredential.self, from: bytes(credentialObject)), b = proof.body
         guard same(credential.accountID, b.accountID), same(credential.deviceID, b.deviceID), credential.keyID == b.deviceKeyID, credential.activationEpoch == b.activationEpoch, credential.sessionID == b.sessionID, credential.expiresAt == b.expiresAt, credential.expiresAt > (try seconds(client.now())) else { throw AuthorityError.identityChanged }
         _ = try AuthorityWire.decodeBase64URL(credential.token, count: 32)
+        try requireFresh(credential, proof: proof)
         let acquire: Data?
         if value["originalAcquire"] is NSNull { acquire = nil }
         else if let original = value["originalAcquire"] as? [String: Any] { acquire = try bytes(original) }
@@ -217,14 +238,17 @@ public actor DeletionControlAuthenticationService {
             let original = error
             let readback = try await repository.deletionControlAuthorizationV4(parentID: parentID, authRequestID: attempt.authentication.requestID)
             _ = try await checked(parentID, generation, token)
+            try requireFresh(credential, proof: proof)
             guard readback?.authorization.raw == proof.raw, readback?.resolution == nil else { throw original }
         }
         _ = try await checked(parentID, generation, token)
         let accepted = try await repository.deletionControlAuthorizationV4(parentID: parentID, authRequestID: attempt.authentication.requestID)
         _ = try await checked(parentID, generation, token)
         guard accepted?.authorization.raw == proof.raw, accepted?.resolution == nil else { throw DeletionControlIssueV1.needsFreshAuthorization }
+        try requireFresh(credential, proof: proof)
         try await client.vault.replace(credential, expectedIdentityGeneration: generation)
         _ = try await checked(parentID, generation, token)
+        try requireFresh(credential, proof: proof)
         return .ready(reauthenticationID: b.reauthenticationID, lockState: b.lockState)
     }
     private func currentAuthorization(_ parentID: String, _ generation: Int64, _ token: UInt64) async throws -> (DeletionControlContextV1, DeletionControlAuthorizationRecordV1) {
