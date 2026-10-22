@@ -1,3 +1,4 @@
+import {assertDeletionControlPurpose} from './deletion-reauth.mjs';
 import {assertAppleRevoker} from './apple-revoker.mjs';
 import {validatePayload} from './codec.mjs';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
@@ -91,13 +92,13 @@ export function installLifecycle(api,state){
    validatePayload('deleteAccount',r);state.pruneReauthMaterial();
    const saga=transaction(db,config,()=>{
      const {a,d}=validate(ctx);if(d.role!=='phone'||a.active_phone_id!==ctx.deviceID)fail('activationMismatch',403);
-     stored(ctx,r,'deleteAccount');if(a.migration_id)fail('migrationBlocked');
+     assertDeletionControlPurpose(state,ctx,'deleteAccount',r);stored(ctx,r,'deleteAccount');if(a.migration_id)fail('migrationBlocked');
      let s=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID),digest=sha256(canonicalJSON(r));
      if(s&&(s.delete_request_id!==r.requestID||s.request_digest!==digest))fail('idempotencyConflict');
      if(!s){reauth(ctx,r.reauthenticationID);db.prepare('INSERT INTO deletions VALUES(?,?,?,?,?,?,?,?)').run(ctx.accountID,ctx.deviceID,r.requestID,digest,r.recoveryCapabilityDigest,'requested',r.reauthenticationID,config.clock.now());s=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);}
      return s;
    });
-   if(saga.state==='requested')transaction(db,config,()=>{validate(ctx);if(activeLock(ctx.accountID))fail('activeMatchExists');if(config.faults?.lifecycleStep==='lockReconciled')fail('unavailable',503,true);db.prepare("UPDATE deletions SET state='lockReconciled' WHERE account_id=?").run(ctx.accountID);});
+   if(saga.state==='requested')transaction(db,config,()=>{validate(ctx);assertDeletionControlPurpose(state,ctx,'deleteAccount',r);if(activeLock(ctx.accountID))fail('activeMatchExists');if(config.faults?.lifecycleStep==='lockReconciled')fail('unavailable',503,true);db.prepare("UPDATE deletions SET state='lockReconciled' WHERE account_id=?").run(ctx.accountID);});
    let stage=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);
    if(stage.state==='lockReconciled'){
      const id=stage.reauthentication_id;
@@ -105,16 +106,16 @@ export function installLifecycle(api,state){
      try{assertAppleRevoker(config.appleRevoker,config.environment);}catch{fail('unavailable',503,true);}
      let material;
      try {
-       transaction(db,config,()=>{validate(ctx);reauth(ctx,id);material=state.takeReauthMaterial(id,ctx);consume(id);});
+       transaction(db,config,()=>{validate(ctx);assertDeletionControlPurpose(state,ctx,'deleteAccount',r);reauth(ctx,id);material=state.takeReauthMaterial(id,ctx);consume(id);});
        try {
          const answer=await config.appleRevoker({authorizationCode:material.authorizationCode,expectedApple:material.expectedApple,reauthenticationID:id});
          if(answer?.revoked!==true)throw Error();
        }catch{fail('reauthenticationRequired',403);}
-       transaction(db,config,()=>{validate(ctx);const pending=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);if(!pending||pending.delete_request_id!==r.requestID||pending.request_digest!==sha256(canonicalJSON(r))||pending.state!=='lockReconciled'||pending.reauthentication_id!==id)fail('reauthenticationRequired',403);if(config.faults?.lifecycleStep==='appleRevocation')fail('unavailable',503,true);db.prepare("UPDATE deletions SET state='appleRevocation' WHERE account_id=?").run(ctx.accountID);});
+       transaction(db,config,()=>{validate(ctx);assertDeletionControlPurpose(state,ctx,'deleteAccount',r);const pending=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);if(!pending||pending.delete_request_id!==r.requestID||pending.request_digest!==sha256(canonicalJSON(r))||pending.state!=='lockReconciled'||pending.reauthentication_id!==id)fail('reauthenticationRequired',403);if(config.faults?.lifecycleStep==='appleRevocation')fail('unavailable',503,true);db.prepare("UPDATE deletions SET state='appleRevocation' WHERE account_id=?").run(ctx.accountID);});
      } finally {state.disposeReauthMaterial(material);}
    }
    return transaction(db,config,()=>{
-     validate(ctx);if(activeLock(ctx.accountID))fail('activeMatchExists');const s=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);if(s.state!=='appleRevocation')fail('reauthenticationRequired',403);
+     validate(ctx);assertDeletionControlPurpose(state,ctx,'deleteAccount',r);if(activeLock(ctx.accountID))fail('activeMatchExists');const s=db.prepare('SELECT * FROM deletions WHERE account_id=?').get(ctx.accountID);if(s.state!=='appleRevocation')fail('reauthenticationRequired',403);
      if(config.faults?.lifecycleStep==='backendDeleted')fail('unavailable',503,true);
      const result=makeReceipt(config,ctx,r,'deleteAccount','deleted',{}, {deletion:{backend:'backendDeleted',apple:'revoked',cloud:'clientManaged',local:'clientManaged',health:'separateConfirmation'}});
      db.prepare('INSERT INTO deletion_receipts VALUES(?,?,?,?)').run(r.requestID,s.recovery_hash,Buffer.from(canonicalJSON(result)),config.clock.now()+2592000);
