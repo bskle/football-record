@@ -44,7 +44,7 @@ extension MatchStore: CurrentAuthenticationEvidenceReadingV4 {
         }
     }
 
-    private func authenticationEvidenceBudgetV4(table: String, id: String) throws {
+    func authenticationEvidenceBudgetV4(table: String, id: String) throws {
         let rows = try db.rows("SELECT length(payload),length(checksum) FROM " + table + " WHERE id=?", [.text(id)])
         guard let row = rows.first else { return }
         guard rows.count == 1, let size = row[0].number, (0...32_768).contains(size), row[1].number == 64 else { throw AuthorityError.invalidWire }
@@ -55,7 +55,7 @@ extension MatchStore: CurrentAuthenticationEvidenceReadingV4 {
         return try readLifecycleV4(type, id)
     }
 
-    private func currentAuthenticationEvidenceLockedV4(generation: Int64) throws -> VerifiedLocalAuthenticationEvidenceV4? {
+    func currentAuthenticationEvidenceLockedV4(generation: Int64) throws -> VerifiedLocalAuthenticationEvidenceV4? {
         try authenticationEvidenceBudgetV4(table: "account_binding_v4", id: "current")
         let binding = try currentBindingV4()
         let currentID = try authenticationEvidenceValueV4(String.self, id: "auth-current")

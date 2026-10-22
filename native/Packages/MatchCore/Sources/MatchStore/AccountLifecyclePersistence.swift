@@ -5,6 +5,10 @@ extension MatchStore {
     public func currentAuthRequestIDV4()throws->String? {try readLifecycleV4(String.self,"auth-current")}
 
     public func pendingAuthAttemptsV4()throws->[AuthAttemptV4] {
+        try pendingOrdinaryAuthAttemptsLockedV4()
+    }
+    // No transaction and no purpose validator callback: initial source absence uses this body.
+    func pendingOrdinaryAuthAttemptsLockedV4()throws->[AuthAttemptV4] {
         try authAttemptsV4().filter {attempt in
             if let raw=try readLifecycleV4(Data.self,"auth-receipt:"+attempt.requestID) {
                 struct Envelope:Codable {let body:AuthorityReceiptBodyV1;let signature:String}
