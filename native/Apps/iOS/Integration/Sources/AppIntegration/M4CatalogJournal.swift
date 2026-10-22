@@ -52,13 +52,23 @@ final class M4CatalogJournal: @unchecked Sendable {
   private var closed = false
   private var fault: M4CatalogFault?
   private var synchronizationFault: M4CatalogSyncBoundary?
-  init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws {
+  private enum OpeningPolicy { case initializeIfAbsent, existingOnly }
+  convenience init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws {
+    try self.init(directory: directory, opening: .initializeIfAbsent, crashHook: crashHook, synchronizationFault: synchronizationFault)
+  }
+  convenience init(existingDirectory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws {
+    try self.init(directory: existingDirectory, opening: .existingOnly, crashHook: crashHook, synchronizationFault: synchronizationFault)
+  }
+  private init(directory: URL, opening: OpeningPolicy, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)?, synchronizationFault: M4CatalogSyncBoundary?) throws {
     self.synchronizationFault = synchronizationFault
     guard directory.isFileURL else { throw M4CatalogError.storageBlocked }
     self.directory = M4CatalogIO.canonical(directory); self.crashHook = crashHook
     ownerURL = self.directory.appendingPathComponent("catalog.owner")
     journalURL = self.directory.appendingPathComponent("catalog.json")
-    try Self.initializeIfAbsent(self.directory, crashHook: crashHook)
+    switch opening {
+    case .initializeIfAbsent: try Self.initializeIfAbsent(self.directory, crashHook: crashHook)
+    case .existingOnly: break
+    }
     let bytes = try M4CatalogIO.read(ownerURL, limit: Self.ownerLimit)
     guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any], object["version"] as? Int == 2 else { throw M4CatalogError.unsupportedSchema }
     owner = try M4CatalogIO.decode(bytes); ownerBytes = bytes

@@ -540,11 +540,32 @@ struct M4CatalogState: Codable {
     }
   }
 }
+/// A provisional storage projection only. This grants no resource-owner,
+/// lineage, lease, parent, business or deletion authority. A future physical
+/// owner must retain the same catalog object and apply its original admission gates.
+struct M4CatalogOpeningSnapshot: Sendable {
+  let journalRevision: UInt64
+  let index: M4CatalogIndex
+  let physical: M4PhysicalBootstrapState?
+  let creation: M4DeletionCreationMetadata?
+  let plan: M4FrozenDeletionPlan?
+}
 /// All operations are synchronous bounded journal transactions. An outer
 /// composition barrier must quiesce actors before reserve/seal/resume admission.
 final class M4OwnedDataCatalog: @unchecked Sendable {
   private let journal: M4CatalogJournal
   init(directory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws { journal = try M4CatalogJournal(directory: directory, crashHook: crashHook, synchronizationFault: synchronizationFault) }
+  init(existingDirectory: URL, crashHook: (@Sendable (M4CatalogCrashPoint) -> Void)? = nil, synchronizationFault: M4CatalogSyncBoundary? = nil) throws {
+    journal = try M4CatalogJournal(existingDirectory: existingDirectory, crashHook: crashHook, synchronizationFault: synchronizationFault)
+  }
+  /// One validated journal read, including original fsync/pending stabilization.
+  /// This neither creates a state/revision nor authorizes a consumer action.
+  func openingSnapshot() throws -> M4CatalogOpeningSnapshot {
+    let state = try journal.read()
+    return M4CatalogOpeningSnapshot(journalRevision: state.revision,
+      index: M4CatalogIndex(revision: state.ownedRevision, entries: state.entries),
+      physical: state.physicalBootstrap, creation: state.deletionCreation, plan: state.plans.first)
+  }
   func physicalBootstrap() throws -> M4PhysicalBootstrapState? { try journal.read().physicalBootstrap }
   func reservePhysicalBootstrap(_ reservation: M4PhysicalResourceReservation) throws {
     try reservation.validate()
