@@ -450,6 +450,99 @@ final class InitialDeletionAuthenticationTests: XCTestCase, @unchecked Sendable 
         await rejected({ _ = try await self.prepare(existing) }, issue: .parentExists)
         try await existing.store.close()
     }
+    private func signedDeletion(_ f: Fixture, _ original: DeletionSagaV4) throws -> VerifiedAuthorityReceiptV1 {
+        try h.receipt(f.context, requestID: "delete", digest: original.intent.digest, operation: .deleteAccount, result: .deleted,
+            extra: ["deletion": ["backend": "backendDeleted", "apple": "revoked", "cloud": "clientManaged", "local": "clientManaged", "health": "separateConfirmation"]])
+    }
+    private func deletedPurpose(_ f: Fixture) async throws -> DeletionSagaV4 {
+        _ = try await associated(f); let original = try saga(f); try await f.store.createDeletionSagaV4(original)
+        return try await f.store.acceptDeletionV4(requestID: "delete", receipt: signedDeletion(f, original), expectedRevision: 0)
+    }
+    private func witness(_ store: MatchStore, _ f: Fixture, _ original: DeletionSagaV4) async throws -> LocalBusinessErasureWitnessV4 {
+        try await store.validateLocalBusinessErasedV4(requestID: "delete", requestDigest: original.intent.digest, scope: f.request.originalScope)
+    }
+    func testErasureCompactsOnlyAfterSignedBackendDeletion() async throws {
+        // S16: before signed backend proof the consumed rows and real local business remain intact.
+        let f = try await fixture()
+        _ = try await f.store.commit(StoreCommit(commandID: "local-data", expectedGeneration: 0, descriptor: h.h.descriptor(), events: [], packets: []))
+        _ = try await associated(f); let original = try saga(f); try await f.store.createDeletionSagaV4(original)
+        let before = try rawRows(f)
+        await rejected { _ = try await f.store.eraseLocalBusinessV4(requestID: "delete", expectedRevision: 0) }
+        XCTAssertEqual(try rawRows(f), before)
+        let wrong = try h.receipt(f.context, requestID: "delete", digest: original.intent.digest, operation: .authApple, result: .registered)
+        await rejected { _ = try await f.store.acceptDeletionV4(requestID: "delete", receipt: wrong, expectedRevision: 0) }
+        let backendProof = try signedDeletion(f, original)
+        let backend = try await f.store.acceptDeletionV4(requestID: "delete", receipt: backendProof, expectedRevision: 0)
+        let beforeErase = try sql(f) { try $0.rows("SELECT id FROM lifecycle_steps_v4 WHERE id GLOB 'initial-delete-auth*'").count }
+        XCTAssertEqual(beforeErase, 3)
+        let erased = try await f.store.eraseLocalBusinessV4(requestID: "delete", expectedRevision: backend.revision)
+        XCTAssertEqual(erased.localProgress, .completed)
+        let remaining = try sql(f) { try $0.rows("SELECT id,payload FROM lifecycle_steps_v4 WHERE id GLOB 'initial-delete-auth*'") }
+        XCTAssertEqual(remaining.count, 1); XCTAssertEqual(remaining.first?[0].string, "initial-delete-auth-v1:terminal")
+        guard remaining.count == 1, remaining.first?[0].string == "initial-delete-auth-v1:terminal" else { try await f.store.close(); return }
+        let raw = try XCTUnwrap(remaining.first?[1].data), terminal = try JSONDecoder().decode(StoredInitialDeletionTerminalV1.self, from: raw)
+        XCTAssertEqual(terminal.request, f.request); XCTAssertEqual(terminal.sourceAuthRequestID, "original-auth")
+        XCTAssertEqual(terminal.sourceReceiptDigest, AuthorityWire.hash(f.source.receipt.raw)); XCTAssertEqual(terminal.selectedAuthRequestID, "fresh-auth")
+        XCTAssertEqual(terminal.parentIntentDigest, original.intent.digest); XCTAssertEqual(terminal.backendReceiptDigest, AuthorityWire.hash(backendProof.raw))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: raw) as? [String: Any])
+        XCTAssertNil(object["receiptRaw"]); XCTAssertNil(object["opaqueReauthenticationID"])
+        let retained = try await f.store.deletionSagaV4(requestID: "delete"), control = try await f.store.controlV4("delete")
+        XCTAssertEqual(retained?.recoveryCapability, original.recoveryCapability); XCTAssertEqual(retained?.backendReceipt, backendProof.raw)
+        XCTAssertEqual(control, original.intent); _ = try await witness(f.store, f, original)
+        await rejected({ _ = try await self.prepare(f) }, issue: .parentExists)
+        try await f.store.close()
+    }
+    func testTerminalCurrentZeroAndCommitLoss() async throws {
+        // S17: empty business tables never mask malformed terminal or retained parent/source controls.
+        for kind in ["coexisting", "restored-consumed", "checksum", "digest", "parent", "backend", "progress", "prefix", "generation", "source"] {
+            let f = try await fixture(), backend = try await deletedPurpose(f), original = try saga(f)
+            let oldPurpose = try sql(f) { try $0.rows("SELECT id,payload,checksum FROM lifecycle_steps_v4 WHERE id GLOB 'initial-delete-auth*'") }
+            let oldHead = try sql(f) { try XCTUnwrap($0.scalar("SELECT payload FROM lifecycle_steps_v4 WHERE id='initial-delete-auth-v1:head'").data) }
+            _ = try await f.store.eraseLocalBusinessV4(requestID: "delete", expectedRevision: backend.revision)
+            let terminalCount = try sql(f) { try $0.scalar("SELECT count(*) FROM lifecycle_steps_v4 WHERE id='initial-delete-auth-v1:terminal'").number }
+            guard terminalCount == 1 else { XCTFail("erase must produce terminal before residual/corruption matrix"); try await f.store.close(); return }
+            switch kind {
+            case "coexisting": try insert(f, key: .text("initial-delete-auth-v1:head"), payload: oldHead)
+            case "restored-consumed": try sql(f) { db in
+                try db.execute("DELETE FROM lifecycle_steps_v4 WHERE id GLOB 'initial-delete-auth*'")
+                for row in oldPurpose { try db.execute("INSERT INTO lifecycle_steps_v4 VALUES (?,?,?)", row) }
+            }
+            case "checksum": try sql(f) { try $0.execute("UPDATE lifecycle_steps_v4 SET checksum=? WHERE id='initial-delete-auth-v1:terminal'", [.text(String(repeating: "0", count: 64))]) }
+            case "digest": try update(f, key: "initial-delete-auth-v1:terminal") { $0["selectedReceiptDigest"] = "bad-digest" }
+            case "parent": try update(f, key: "initial-delete-auth-v1:terminal") { $0["parentIntentDigest"] = String(repeating: "0", count: 64) }
+            case "backend": try update(f, key: "initial-delete-auth-v1:terminal") { $0["backendReceiptDigest"] = String(repeating: "0", count: 64) }
+            case "progress": try update(f, key: "deletion:delete") { $0["localProgress"] = "pending" }
+            case "prefix": try insert(f, key: .blob(Data("initial-delete-auth-v2:unknown".utf8)), payload: Data([0xff]))
+            case "generation": let raw = try Canonical.data(Int64(2)); try sql(f) { try $0.execute("UPDATE lifecycle_steps_v4 SET payload=?,checksum=? WHERE id='identity-generation'", [.blob(raw), .text(Canonical.hash(raw))]) }
+            default: let raw = try Canonical.data(Data([0xff])); try sql(f) { try $0.execute("UPDATE lifecycle_steps_v4 SET payload=?,checksum=? WHERE id='auth-receipt:original-auth'", [.blob(raw), .text(Canonical.hash(raw))]) }
+            }
+            let before = try LocalBusinessErasureValidationTests().controls(f.context.url)
+            await rejected { _ = try await self.witness(f.store, f, original) }
+            let currentSaga = try await f.store.deletionSagaV4(requestID: "delete")
+            if let currentSaga { await rejected { _ = try await f.store.eraseLocalBusinessV4(requestID: "delete", expectedRevision: currentSaga.revision) } }
+            XCTAssertEqual(try LocalBusinessErasureValidationTests().controls(f.context.url), before)
+            try await f.store.close()
+        }
+        // S18: compression and business erasure roll back or commit together on the original connection.
+        for fault in [StoreFault.beforeCommit, .afterCommit] {
+            let f = try await fixture(), backend = try await deletedPurpose(f), original = try saga(f)
+            let before = try LocalBusinessErasureValidationTests().controls(f.context.url); try await f.store.close()
+            let failing = try h.store(f.context, fault: fault)
+            await rejected { _ = try await failing.eraseLocalBusinessV4(requestID: "delete", expectedRevision: backend.revision) }
+            try await failing.close(); let reopened = try h.store(f.context)
+            if fault == .beforeCommit {
+                XCTAssertEqual(try LocalBusinessErasureValidationTests().controls(f.context.url), before)
+                _ = try await reopened.eraseLocalBusinessV4(requestID: "delete", expectedRevision: backend.revision)
+            }
+            let saved = try await reopened.deletionSagaV4(requestID: "delete")
+            XCTAssertEqual(saved?.recoveryCapability, original.recoveryCapability); XCTAssertEqual(saved?.backendReceipt, backend.backendReceipt)
+            let rows = try LocalBusinessErasureValidationTests().controls(f.context.url), changes = try await reopened.initialDeletionTestChanges()
+            _ = try await witness(reopened, f, original); _ = try await witness(reopened, f, original)
+            let afterChanges = try await reopened.initialDeletionTestChanges(); XCTAssertEqual(afterChanges, changes)
+            XCTAssertEqual(try LocalBusinessErasureValidationTests().controls(f.context.url), rows); try await reopened.close()
+        }
+    }
+
 }
 private extension MatchStore {
     func initialDeletionTestChanges() throws -> Int64 { try db.scalar("SELECT total_changes()").number ?? -1 }

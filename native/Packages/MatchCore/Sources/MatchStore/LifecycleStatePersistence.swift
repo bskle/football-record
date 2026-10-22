@@ -142,6 +142,7 @@ extension MatchStore {
     }
     public func eraseLocalBusinessV4(requestID:String,expectedRevision:Int64)throws->DeletionSagaV4 {
         let result=try db.transaction {
+            let initialRows = try validateInitialDeletionRowsLockedV1()
             guard var saga=try deletionSagaV4(requestID:requestID),saga.revision==expectedRevision,saga.backendDeleted,saga.backendReceipt != nil,saga.localChoice == .delete,expectedRevision<Int64.max else {throw AuthorityError.intentMismatch}
             try validateDeletionScopeLockedV4(saga)
             for id in try matchIDs() {if let descriptor=try descriptorAndGeneration(id)?.0 {guard try loadOperations(matchID:id,descriptor:descriptor).allSatisfy({$0.state != .pending && $0.state != .needsReconciliation}) else {throw AuthorityError.unavailable}}}
@@ -152,7 +153,9 @@ extension MatchStore {
             try db.execute("DELETE FROM lifecycle_steps_v4 WHERE "+localBusinessWitnessPredicateV4)
             try assertLocalBusinessZeroLockedV4()
             saga.localProgress = .completed;saga.revision += 1
-            try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+requestID);try fail(.beforeCommit);return saga
+            try writeV4(saga,table:"lifecycle_steps_v4",id:"deletion:"+requestID)
+            try compactInitialDeletionAfterEraseLockedV1(saga, rows: initialRows)
+            try fail(.beforeCommit);return saga
         };if fault == .afterCommit {throw StoreError.responseLost};return result
     }
     func analyticsStateV4()throws->StoredAnalyticsV4 {try readLifecycleV4(StoredAnalyticsV4.self,"analytics-state") ?? StoredAnalyticsV4()}
@@ -225,6 +228,7 @@ extension MatchStore {
     /// Read on the original facade after writers have drained. The witness is not cached authority.
     public func validateLocalBusinessErasedV4(requestID: String, requestDigest: String, scope: CloudScopeV1) throws -> LocalBusinessErasureWitnessV4 {
         do { return try db.transaction {
+            try validateInitialDeletionRowsLockedV1()
             try db.validateLocalErasureLayoutV4()
             try validateDeletionControlRowsLockedV4()
             try validateCurrentWatchRegistrationRowsLockedV4()

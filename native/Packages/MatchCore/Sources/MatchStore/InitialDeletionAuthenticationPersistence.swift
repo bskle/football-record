@@ -158,6 +158,7 @@ extension MatchStore {
                 _ = try initialDeletionSignedAuthV1(result.receiptRaw, attempt: attempt, source: head.source)
             }
             if head.phase == .consumed {
+                guard let saga = try deletionSagaV4(requestID: head.request.creationID), saga.localProgress != .completed else { throw AuthorityError.intentMismatch }
                 try validateInitialDeletionParentLockedV1(head, rows: rows)
             } else {
                 guard try deletionSagasV4().isEmpty else { throw InitialDeletionIssueV1.parentExists }
@@ -472,6 +473,24 @@ extension MatchStore {
         try validateInitialDeletionSagaContractLockedV1(saga, request: head.request)
         if saga.backendDeleted { try validateInitialDeletionRetiredSourceLockedV1(head.source) }
         else { _ = try initialDeletionCurrentSourceLockedV1(generation: head.source.identityGeneration, expected: head.source) }
+    }
+    /// Called only after the original erase has written completed progress, inside that same transaction.
+    func compactInitialDeletionAfterEraseLockedV1(_ saga: DeletionSagaV4, rows: InitialDeletionRowsV1) throws {
+        guard let head = rows.head else { return }
+        guard head.phase == .consumed, head.request.creationID == saga.intent.requestID, saga.localProgress == .completed,
+            let selected = head.selectedAuthRequestID, let result = rows.results[selected],
+            let backend = saga.backendReceipt else { throw AuthorityError.intentMismatch }
+        _ = try initialDeletionBackendReceiptLockedV1(saga)
+        try validateInitialDeletionParentLockedV1(head, rows: rows)
+        let terminal = StoredInitialDeletionTerminalV1(request: head.request, sourceAuthRequestID: head.source.currentAuthRequestID,
+            sourceReceiptDigest: AuthorityWire.hash(head.source.receiptRaw), sourceGeneration: head.source.identityGeneration,
+            selectedAuthRequestID: selected, selectedRequestDigest: result.requestDigest,
+            selectedReceiptDigest: AuthorityWire.hash(result.receiptRaw), parentIntentDigest: saga.intent.digest,
+            backendReceiptDigest: AuthorityWire.hash(backend))
+        // The earlier reservation budgets this record; rollback preserves every original raw row on any failure.
+        try db.execute("DELETE FROM lifecycle_steps_v4 WHERE " + initialDeletionPredicateV1, initialDeletionPrefixV1)
+        try insertInitialDeletionLockedV1(terminal, key: InitialDeletionWireV1.namespace + "terminal")
+        try validateInitialDeletionRowsLockedV1()
     }
     private func validateInitialDeletionTerminalLockedV1(_ terminal: StoredInitialDeletionTerminalV1) throws {
         guard let saga = try deletionSagaV4(requestID: terminal.request.creationID), saga.localProgress == .completed,
