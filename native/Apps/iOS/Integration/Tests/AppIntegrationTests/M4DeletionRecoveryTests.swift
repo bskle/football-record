@@ -460,6 +460,135 @@ import MatchPresentation
     XCTAssertTrue(try f.catalog.receipts(requestID: f.saga.intent.requestID).isEmpty)
     try await f.close(); try await other.close()
   }
+  private func finishReturnTailFixture(_ f: GateFixture, controller: M4DeletionResumeController, probe: M4ReturnTailProbe,
+    joins: [@MainActor () async -> Void]) async throws {
+    probe.releaseAll(); controller.queueObservation = nil; controller.returnTailObservation = nil
+    for join in joins { await join() }
+    await probe.joinChildren()
+    try await f.close()
+  }
+  func testFIFOBlocksSuccessorUntilSuccessfulCallerReturnTailDrains() async throws {
+    let relay = GateMultiHeldAuthorityRelay(); await relay.releaseAll()
+    let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false, authorityRelay: relay, hasCredential: true)
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger))
+    let probe = M4ReturnTailProbe(holding: [.resume])
+    controller.queueObservation = { probe.recordQueue($0) }; controller.returnTailObservation = { await probe.hold($0) }
+    var joins: [@MainActor () async -> Void] = []
+    do {
+      let first = Task { try await controller.resume(requestID: f.saga.intent.requestID) }; joins.append { _ = await first.result }
+      let held = try await probe.held(.resume)
+      XCTAssertEqual(held.result, .success)
+      let calls = await relay.calls; XCTAssertEqual(calls, 1)
+      let successor = Task { try await controller.reconcile(f.saga.intent) }; joins.append { _ = await successor.result }
+      let transition = try await probe.queue {
+        ($0.phase == .predecessorParked && $0.predecessorID == held.operationID) || ($0.phase == .bodyEntered && $0.kind == .reconcile)
+      }
+      XCTAssertEqual(transition.phase, .predecessorParked, "successor body must wait for the actual held caller return tail")
+      if transition.phase == .predecessorParked {
+        XCTAssertGreaterThan(transition.predecessorBorrowerCount ?? 0, 0)
+        XCTAssertFalse(probe.bodyEntered(.reconcile))
+      }
+      probe.release(held.borrowerID)
+      if transition.phase == .predecessorParked { _ = try await probe.queue { $0.phase == .bodyEntered && $0.kind == .reconcile } }
+      _ = try await first.value; _ = await successor.result
+      let original = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+      XCTAssertTrue(original?.intent.canonicalRequest == f.saga.intent.canonicalRequest)
+      XCTAssertTrue(original?.recoveryCapability == f.saga.recoveryCapability)
+    } catch {
+      try await finishReturnTailFixture(f, controller: controller, probe: probe, joins: joins); throw error
+    }
+    try await finishReturnTailFixture(f, controller: controller, probe: probe, joins: joins)
+  }
+  func testFIFOFailedSharedOperationDrainsAllBorrowersDespiteCancellation() async throws {
+    let relay = GateMultiHeldAuthorityRelay(); await relay.releaseAll()
+    let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false, authorityRelay: relay, hasCredential: true)
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger))
+    let probe = M4ReturnTailProbe(holding: [.reconcile])
+    controller.queueObservation = { probe.recordQueue($0) }; controller.returnTailObservation = { await probe.hold($0) }
+    var joins: [@MainActor () async -> Void] = []
+    do {
+      let first = Task { try await controller.reconcile(f.saga.intent) }; joins.append { _ = await first.result }
+      let held1 = try await probe.held(.reconcile)
+      let duplicate = Task { try await controller.reconcile(f.saga.intent) }; joins.append { _ = await duplicate.result }
+      let held2 = try await probe.held(.reconcile, excluding: held1.borrowerID)
+      XCTAssertEqual(held1.result, .failure); XCTAssertEqual(held2.result, .failure)
+      XCTAssertEqual(held1.operationID, held2.operationID); XCTAssertNotEqual(held1.borrowerID, held2.borrowerID)
+      XCTAssertEqual(held2.borrowerCount, 2)
+      let before = probe.registrations(held1.operationID)
+      var fields = f.saga.intent.fields; fields.reauthenticationID = "conflicting-tail-input"
+      let conflict = try ControlIntentV1(requestID: f.saga.intent.requestID, operation: .deleteAccount, fields: fields)
+      do { _ = try await controller.reconcile(conflict); XCTFail("conflict cannot register another borrower") }
+      catch { XCTAssertEqual(error as? AuthorityError, .conflict) }
+      XCTAssertEqual(probe.registrations(held1.operationID), before)
+      let calls = await relay.calls; XCTAssertEqual(calls, 1)
+      let successor = Task { try await controller.recover() }; joins.append { _ = await successor.result }
+      let parked = try await probe.queue { $0.phase == .predecessorParked && $0.kind == .recover && $0.predecessorID == held1.operationID }
+      XCTAssertEqual(parked.predecessorBorrowerCount, 2)
+      first.cancel()
+      XCTAssertEqual(probe.borrowerCount(held1.operationID), 2)
+      probe.release(held1.borrowerID)
+      let released = try await probe.queue { $0.phase == .released && $0.borrowerID == held1.borrowerID }
+      XCTAssertEqual(released.borrowerCount, 1); XCTAssertFalse(probe.bodyEntered(.recover))
+      probe.release(held2.borrowerID)
+      _ = try await probe.queue { $0.phase == .bodyEntered && $0.kind == .recover }
+      _ = await first.result; _ = await duplicate.result; _ = try await successor.value
+      probe.holding.remove(.reconcile)
+      let later = Task { try await controller.reconcile(f.saga.intent) }; joins.append { _ = await later.result }
+      let newOperation = try await probe.queue { $0.phase == .registered && $0.kind == .reconcile && $0.operationID != held1.operationID }
+      XCTAssertNotEqual(newOperation.operationID, held1.operationID)
+      _ = await later.result
+      let actual = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+      XCTAssertTrue(actual?.intent.canonicalRequest == f.saga.intent.canonicalRequest)
+      XCTAssertTrue(actual?.recoveryCapability == f.saga.recoveryCapability)
+    } catch {
+      try await finishReturnTailFixture(f, controller: controller, probe: probe, joins: joins); throw error
+    }
+    try await finishReturnTailFixture(f, controller: controller, probe: probe, joins: joins)
+  }
+  func testFinalCloseWaitsReturnTailAndRejectsInheritedSelfJoin() async throws {
+    let relay = GateMultiHeldAuthorityRelay(); await relay.releaseAll()
+    let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false, authorityRelay: relay, hasCredential: true)
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger))
+    let probe = M4ReturnTailProbe(holding: [.resume])
+    controller.queueObservation = { probe.recordQueue($0) }; controller.returnTailObservation = { await probe.hold($0) }
+    probe.selfJoinLaunch = {
+      [Task {
+        await probe.waitForSelfJoinTrigger()
+        do { try await f.composition.close(); probe.recordSelfClose(false) }
+        catch { probe.recordSelfClose(error as? AuthorityError == .conflict) }
+      }, Task {
+        await probe.waitForSelfJoinTrigger()
+        do { try await controller.stopAndJoin(); probe.recordSelfStop(false) }
+        catch { probe.recordSelfStop(error as? AuthorityError == .conflict) }
+      }]
+    }
+    var joins: [@MainActor () async -> Void] = []
+    do {
+      let operation = Task { try await controller.resume(requestID: f.saga.intent.requestID) }; joins.append { _ = await operation.result }
+      let held = try await probe.held(.resume)
+      let closing = Task { try await f.composition.close(); probe.closeCompleted = true }; joins.append { _ = await closing.result }
+      _ = try await probe.queue { $0.phase == .admissionClosed }
+      XCTAssertEqual(probe.borrowerCount(held.operationID), 1); XCTAssertFalse(probe.closeCompleted)
+      let original = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+      XCTAssertTrue(original?.intent.canonicalRequest == f.saga.intent.canonicalRequest)
+      do {
+        let unexpected = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }
+        try await unexpected.close(); XCTFail("original identity lease must remain held during its caller tail")
+      } catch { XCTAssertEqual(error as? M4BootstrapError, .leaseInUse) }
+      do { _ = try await controller.recover(); XCTFail("closed control admission cannot accept new work") }
+      catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+      probe.triggerSelfJoin()
+      let selfClose = try await probe.selfCloseResult(), selfStop = try await probe.selfStopResult()
+      XCTAssertTrue(selfClose); XCTAssertTrue(selfStop); XCTAssertFalse(probe.closeCompleted)
+      probe.release(held.borrowerID)
+      _ = await operation.result; try await closing.value
+      XCTAssertTrue(probe.closeCompleted); XCTAssertNil(f.composition.lastCloseFailure)
+      do { _ = try await f.composition.repository.deletionSagasV4(); XCTFail("original DB must close after the last tail") } catch {}
+    } catch {
+      try await finishReturnTailFixture(f, controller: controller, probe: probe, joins: joins); throw error
+    }
+    try await finishReturnTailFixture(f, controller: controller, probe: probe, joins: joins)
+  }
   func testResumeAndReconcileDoNotOverlapOriginalHTTP() async throws {
     let relay = GateMultiHeldAuthorityRelay()
     let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false, authorityRelay: relay, hasCredential: true)
@@ -984,6 +1113,98 @@ private actor GateHeldCloud: CloudAccountDeletionDriver {
     await withCheckedContinuation { held = $0; waiter?.resume(); waiter = nil }
   }
   func release() { held?.resume(); held = nil }
+}
+@MainActor private final class M4ReturnTailProbe {
+  private enum Failure: Error { case timeout, closed }
+  private enum Signal {
+    case queue(M4DeletionResumeController.QueueEvent)
+    case held(M4DeletionResumeController.ReturnTailSnapshot)
+    case selfClose(Bool), selfStop(Bool)
+  }
+  private struct Waiter {
+    let matches: (Signal) -> Bool
+    let continuation: CheckedContinuation<Signal, any Error>
+    let timeout: Task<Void, Never>
+  }
+  var holding: Set<M4DeletionResumeController.OperationKind>
+  var selfJoinLaunch: (@MainActor () -> [Task<Void, Never>])?
+  var closeCompleted = false
+  private var signals: [Signal] = []
+  private var history: [M4DeletionResumeController.QueueEvent] = []
+  private var waiters: [UUID: Waiter] = [:]
+  private var waiterOrder: [UUID] = []
+  private var holds: [UUID: CheckedContinuation<Void, Never>] = [:]
+  private var children: [Task<Void, Never>] = []
+  private var triggered = false
+  private var triggerWaiters: [CheckedContinuation<Void, Never>] = []
+  init(holding: Set<M4DeletionResumeController.OperationKind>) { self.holding = holding }
+  func recordQueue(_ event: M4DeletionResumeController.QueueEvent) { history.append(event); record(.queue(event)) }
+  func recordSelfClose(_ conflict: Bool) { record(.selfClose(conflict)) }
+  func recordSelfStop(_ conflict: Bool) { record(.selfStop(conflict)) }
+  private func record(_ signal: Signal) {
+    for id in waiterOrder {
+      guard let waiter = waiters[id], waiter.matches(signal) else { continue }
+      waiters[id] = nil; waiterOrder.removeAll { $0 == id }
+      waiter.timeout.cancel(); waiter.continuation.resume(returning: signal); return
+    }
+    signals.append(signal)
+  }
+  private func next(_ matches: @escaping (Signal) -> Bool) async throws -> Signal {
+    if let index = signals.firstIndex(where: matches) { return signals.remove(at: index) }
+    let id = UUID()
+    return try await withCheckedThrowingContinuation { continuation in
+      let timeout = Task<Void, Never> {
+        do { try await Task.sleep(for: .seconds(2)) } catch { return }
+        guard let waiter = self.waiters.removeValue(forKey: id) else { return }
+        self.waiterOrder.removeAll { $0 == id }; waiter.continuation.resume(throwing: Failure.timeout)
+      }
+      waiters[id] = Waiter(matches: matches, continuation: continuation, timeout: timeout); waiterOrder.append(id)
+    }
+  }
+  func queue(_ matches: @escaping (M4DeletionResumeController.QueueEvent) -> Bool) async throws -> M4DeletionResumeController.QueueEvent {
+    let signal = try await next { if case .queue(let event) = $0 { return matches(event) }; return false }
+    guard case .queue(let event) = signal else { throw Failure.closed }; return event
+  }
+  func held(_ kind: M4DeletionResumeController.OperationKind, excluding: UUID? = nil) async throws -> M4DeletionResumeController.ReturnTailSnapshot {
+    let signal = try await next {
+      if case .held(let snapshot) = $0 { return snapshot.kind == kind && snapshot.borrowerID != excluding }; return false
+    }
+    guard case .held(let snapshot) = signal else { throw Failure.closed }; return snapshot
+  }
+  func selfCloseResult() async throws -> Bool {
+    let signal = try await next { if case .selfClose = $0 { return true }; return false }
+    guard case .selfClose(let conflict) = signal else { throw Failure.closed }; return conflict
+  }
+  func selfStopResult() async throws -> Bool {
+    let signal = try await next { if case .selfStop = $0 { return true }; return false }
+    guard case .selfStop(let conflict) = signal else { throw Failure.closed }; return conflict
+  }
+  func hold(_ snapshot: M4DeletionResumeController.ReturnTailSnapshot) async {
+    guard holding.contains(snapshot.kind) else { return }
+    if let launch = selfJoinLaunch { selfJoinLaunch = nil; children += launch() }
+    await withCheckedContinuation { continuation in
+      precondition(holds[snapshot.borrowerID] == nil)
+      holds[snapshot.borrowerID] = continuation; record(.held(snapshot))
+    }
+  }
+  func release(_ borrower: UUID) { holds.removeValue(forKey: borrower)?.resume() }
+  func releaseAll() {
+    holding.removeAll(); selfJoinLaunch = nil; triggerSelfJoin()
+    let pending = holds; holds.removeAll(); pending.values.forEach { $0.resume() }
+    let pendingWaiters = waiters; waiters.removeAll(); waiterOrder.removeAll()
+    for waiter in pendingWaiters.values { waiter.timeout.cancel(); waiter.continuation.resume(throwing: Failure.closed) }
+  }
+  func waitForSelfJoinTrigger() async {
+    if triggered { return }
+    await withCheckedContinuation { triggerWaiters.append($0) }
+  }
+  func triggerSelfJoin() {
+    triggered = true; let pending = triggerWaiters; triggerWaiters.removeAll(); pending.forEach { $0.resume() }
+  }
+  func joinChildren() async { for child in children { await child.value }; children.removeAll() }
+  func bodyEntered(_ kind: M4DeletionResumeController.OperationKind) -> Bool { history.contains { $0.phase == .bodyEntered && $0.kind == kind } }
+  func registrations(_ id: UUID) -> Int { history.filter { $0.phase == .registered && $0.operationID == id }.count }
+  func borrowerCount(_ id: UUID) -> Int { history.last { $0.operationID == id }?.borrowerCount ?? 0 }
 }
 private enum GateControllerVeto: Error { case stage }
 private actor GateControllerStage {

@@ -416,26 +416,82 @@ private enum M4DeletionOperationResult: Sendable {
     #endif
   }
   private let operationOwnerID = UUID()
+  enum OperationKind: Hashable, Sendable { case create, resume, recover, reconcile }
+  enum QueuePhase: Equatable, Sendable { case registered, released, predecessorParked, bodyEntered, bodyJoined, admissionClosed }
+  enum ResultCategory: Equatable, Sendable { case success, failure }
+  struct QueueEvent: Sendable {
+    let phase: QueuePhase
+    let operationID: UUID?
+    let borrowerID: UUID?
+    let kind: OperationKind?
+    let borrowerCount: Int
+    let predecessorID: UUID?
+    let predecessorBorrowerCount: Int?
+  }
+  struct ReturnTailSnapshot: Sendable {
+    let operationID, borrowerID: UUID
+    let kind: OperationKind
+    let borrowerCount: Int
+    let result: ResultCategory
+  }
+  #if DEBUG
+  var queueObservation: (@MainActor (QueueEvent) -> Void)?
+  var returnTailObservation: (@MainActor (ReturnTailSnapshot) async -> Void)?
+  #endif
+  private func emit(_ phase: QueuePhase, gate: DrainGate?, borrowerID: UUID? = nil, kind: OperationKind? = nil,
+                    predecessor: DrainGate? = nil) {
+    #if DEBUG
+    queueObservation?(QueueEvent(phase: phase, operationID: gate?.id, borrowerID: borrowerID, kind: kind,
+      borrowerCount: gate?.borrowerCount ?? 0, predecessorID: predecessor?.id, predecessorBorrowerCount: predecessor?.borrowerCount))
+    #endif
+  }
+  @MainActor private final class DrainGate {
+    let id = UUID()
+    private(set) var bodyFinished = false
+    private var borrowers: Set<UUID> = []
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    var borrowerCount: Int { borrowers.count }
+    var isDrained: Bool { bodyFinished && borrowers.isEmpty }
+    func registerBorrower() -> UUID {
+      precondition(!isDrained)
+      let id = UUID(); borrowers.insert(id); return id
+    }
+    func finishBody() {
+      precondition(!bodyFinished); bodyFinished = true; wakeIfDrained()
+    }
+    func releaseBorrower(_ id: UUID) {
+      precondition(borrowers.remove(id) != nil); wakeIfDrained()
+    }
+    func waitUntilDrained(onPark: @MainActor () -> Void = {}) async {
+      if isDrained { return }
+      await withCheckedContinuation { continuation in
+        waiters.append(continuation); onPark()
+      }
+    }
+    private func wakeIfDrained() {
+      guard isDrained else { return }
+      let ready = waiters; waiters.removeAll(); ready.forEach { $0.resume() }
+    }
+  }
   private struct Key: Hashable {
-    enum Kind: Hashable { case create, resume, recover, reconcile }
-    let kind: Kind
+    let kind: OperationKind
     let parent: Data
   }
   private final class Operation {
+    let id: UUID
+    let kind: OperationKind
     let fingerprint: Data
     let task: Task<M4DeletionOperationResult, any Error>
     let join: Task<Void, Never>
-    var returns = 0
-    var finished = false
-    init(fingerprint: Data, task: Task<M4DeletionOperationResult, any Error>, join: Task<Void, Never>) {
-      self.fingerprint = fingerprint; self.task = task; self.join = join
+    let gate: DrainGate
+    init(kind: OperationKind, fingerprint: Data, task: Task<M4DeletionOperationResult, any Error>, join: Task<Void, Never>, gate: DrainGate) {
+      id = gate.id; self.kind = kind; self.fingerprint = fingerprint; self.task = task; self.join = join; self.gate = gate
     }
   }
   private var operations: [Key: Operation] = [:]
-  private var fifoTail: Task<Void, Never>?
+  private var fifoTail: DrainGate?
   private var stopped = false
   private var stopping: Task<Void, any Error>?
-  private var returnWaiters: [CheckedContinuation<Void, Never>] = []
   init(admission: M4DeletionAdmission, cloudDeletion: any CloudAccountDeletionDriver = UnavailableCloudAccountDeletionDriver(), healthDeletion: any AppWorkoutDeletionDriver = UnavailableAppWorkoutDeletionDriver()) {
     composition = admission.composition; controlLifetime = nil
     let service = LifecycleService(client: admission.composition.client, repository: admission.composition.repository,
@@ -488,45 +544,65 @@ private enum M4DeletionOperationResult: Sendable {
     }
     return saga
   }
-  private func enqueue(kind: Key.Kind, parent: String, fingerprint: Data = Data(), body: @escaping @MainActor @Sendable () async throws -> M4DeletionOperationResult) async throws -> M4DeletionOperationResult {
+  private func enqueue(kind: OperationKind, parent: String, fingerprint: Data = Data(), body: @escaping @MainActor @Sendable () async throws -> M4DeletionOperationResult) async throws -> M4DeletionOperationResult {
     guard !stopped else { throw AuthorityError.identityChanged }
     try requireExternalCloseCaller()
-    let key = Key(kind: kind, parent: Data(parent.utf8)), operation: Operation
+    let key = Key(kind: kind, parent: Data(parent.utf8)), operation: Operation, borrowerID: UUID
     // Deduplicate overlapping borrowers only. A sequential invocation must
     // revalidate current Store/leaf truth even if join cleanup is still queued.
-    if let prior = operations[key], prior.returns > 0 {
+    if let prior = operations[key], prior.gate.borrowerCount > 0 {
       guard prior.fingerprint == fingerprint else { throw AuthorityError.conflict }
       operation = prior
+      borrowerID = prior.gate.registerBorrower()
     } else {
       let predecessor = fifoTail, ownerID = operationOwnerID
+      let gate = DrainGate()
+      borrowerID = gate.registerBorrower()
       let task = Task<M4DeletionOperationResult, any Error> {
-        await predecessor?.value
+        if let predecessor {
+          await predecessor.waitUntilDrained {
+            self.emit(.predecessorParked, gate: gate, kind: kind, predecessor: predecessor)
+          }
+        }
         try Task.checkCancellation()
-        return try await M4DeletionOperationContext.$ownerID.withValue(ownerID) { try await body() }
+        return try await M4DeletionOperationContext.$ownerID.withValue(ownerID) {
+          self.emit(.bodyEntered, gate: gate, kind: kind)
+          return try await body()
+        }
       }
-      let join = Task<Void, Never> { _ = await task.result }
-      operation = Operation(fingerprint: fingerprint, task: task, join: join)
-      operations[key] = operation; fifoTail = join
+      let join = Task<Void, Never> {
+        _ = await task.result; gate.finishBody(); self.emit(.bodyJoined, gate: gate, kind: kind)
+      }
+      operation = Operation(kind: kind, fingerprint: fingerprint, task: task, join: join, gate: gate)
+      operations[key] = operation; fifoTail = gate
       Task { [weak self, weak operation] in
-        await join.value
+        await gate.waitUntilDrained()
         guard let self, let operation else { return }
-        operation.finished = true; self.removeFinished(key, operation)
+        self.removeFinished(key, operation)
       }
     }
-    operation.returns += 1
+    emit(.registered, gate: operation.gate, borrowerID: borrowerID, kind: kind)
     defer {
-      operation.returns -= 1; removeFinished(key, operation)
-      if operations.values.allSatisfy({ $0.returns == 0 }) {
-        let waiters = returnWaiters; returnWaiters.removeAll(); waiters.forEach { $0.resume() }
-      }
+      operation.gate.releaseBorrower(borrowerID)
+      emit(.released, gate: operation.gate, borrowerID: borrowerID, kind: kind)
+      removeFinished(key, operation)
     }
     let task = operation.task
-    let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-    try Task.checkCancellation()
-    return result
+    return try await M4DeletionOperationContext.$ownerID.withValue(operationOwnerID) {
+      let outcome = await withTaskCancellationHandler { await task.result } onCancel: { task.cancel() }
+      #if DEBUG
+      let category: ResultCategory = switch outcome { case .success: .success; case .failure: .failure }
+      await returnTailObservation?(ReturnTailSnapshot(operationID: operation.id, borrowerID: borrowerID, kind: kind,
+        borrowerCount: operation.gate.borrowerCount, result: category))
+      #endif
+      switch outcome {
+      case .success(let result): try Task.checkCancellation(); return result
+      case .failure(let error): throw error
+      }
+    }
   }
   private func removeFinished(_ key: Key, _ operation: Operation) {
-    if operation.finished, operation.returns == 0, operations[key] === operation { operations[key] = nil }
+    if operation.gate.isDrained, operations[key] === operation { operations[key] = nil }
   }
   private func resumeNow(requestID: String) async throws -> DeletionSagaV4 {
     if controlLifetime != nil { _ = try await checkedParent(requestID) }
@@ -567,12 +643,13 @@ private enum M4DeletionOperationResult: Sendable {
     try requireExternalCloseCaller()
     if let stopping { return try await stopping.value }
     stopped = true
+    emit(.admissionClosed, gate: nil)
     let pending = Array(operations.values)
     pending.forEach { $0.task.cancel() }
     let join = Task<Void, any Error> {
-      for operation in pending { await operation.join.value }
-      if self.operations.values.contains(where: { $0.returns > 0 }) {
-        await withCheckedContinuation { self.returnWaiters.append($0) }
+      for operation in pending {
+        await operation.join.value
+        await operation.gate.waitUntilDrained()
       }
       self.operations.removeAll(); self.fifoTail = nil
     }
