@@ -67,10 +67,12 @@ import CloudSync
     let query = "SELECT id, hex(payload), checksum FROM lifecycle_steps_v4 WHERE id LIKE 'initial-delete-auth-v1:%' ORDER BY id"
     guard sqlite3_prepare_v2(db, query, -1, &statement, nil) == SQLITE_OK else { throw M4CatalogError.storageBlocked }
     defer { sqlite3_finalize(statement) }
-    var rows: [String] = []
-    while sqlite3_step(statement) == SQLITE_ROW {
+    var rows: [String] = [], result = sqlite3_step(statement)
+    while result == SQLITE_ROW {
       rows.append((0..<3).map { String(cString: sqlite3_column_text(statement, Int32($0))) }.joined(separator: "|"))
+      result = sqlite3_step(statement)
     }
+    guard result == SQLITE_DONE else { throw M4CatalogError.storageBlocked }
     return rows
   }
   private func sourceBytes(_ source: VerifiedLocalAuthenticationEvidenceV4) throws -> Data {
