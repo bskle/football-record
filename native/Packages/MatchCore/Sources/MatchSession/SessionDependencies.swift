@@ -1,6 +1,8 @@
 import Foundation
 import MatchCore
 import MatchStore
+import Darwin
+import SQLite3
 
 public protocol SessionRepository: SyncRepository {
   func matchIDs() async throws -> [String]
@@ -84,6 +86,26 @@ public actor SQLiteSessionRepository: SessionRepository {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     databaseURL = directory.appendingPathComponent("matches.sqlite")
     store = try MatchStore(url: databaseURL, syncEnvironment: databaseNamespace == Self.productionNamespace ? .production : .development(databaseNamespace: databaseNamespace), authorityTrust: authorityTrust, cloudSavePolicy: cloudSavePolicy)
+  }
+  /// Reopens existing current-v4 storage without creating directories or migrating a database.
+  /// The owning adapter still supplies namespace leasing, catalog lineage and domain authorization.
+  public init(existingCurrentV4RootDirectory: URL, databaseNamespace: String, authorityTrust: AuthorityTrustConfiguration? = nil, cloudSavePolicy: CloudSaveProofPolicy = .unavailable) throws {
+    guard Self.isCanonicalNamespace(databaseNamespace) else { throw SessionError.invalidRequest }
+    try Self.validateExistingPrivateDirectory(existingCurrentV4RootDirectory)
+    let directory = existingCurrentV4RootDirectory.appendingPathComponent(databaseNamespace, isDirectory: true)
+    try Self.validateExistingPrivateDirectory(directory)
+    namespace = databaseNamespace
+    syncIdentity = try SyncRepositoryIdentity(instanceID: UUID().uuidString, databaseNamespace: databaseNamespace)
+    databaseURL = directory.appendingPathComponent("matches.sqlite")
+    store = try MatchStore(existingCurrentV4URL: databaseURL, syncEnvironment: databaseNamespace == Self.productionNamespace ? .production : .development(databaseNamespace: databaseNamespace), authorityTrust: authorityTrust, cloudSavePolicy: cloudSavePolicy)
+  }
+  private static func validateExistingPrivateDirectory(_ url: URL) throws {
+    guard url.isFileURL, url.host == nil || url.host == "", url.path.hasPrefix("/"),
+          !url.path.utf8.contains(0), !url.path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }),
+          url.query == nil, url.fragment == nil else { throw StoreError.invalidRequest }
+    var info = stat()
+    guard lstat(url.path, &info) == 0 else { throw StoreError.sqlite(code: SQLITE_CANTOPEN, message: "existing repository directory unavailable") }
+    guard info.st_mode & S_IFMT == S_IFDIR, info.st_uid == geteuid(), info.st_mode & 0o7777 == 0o700 else { throw StoreError.invalidRequest }
   }
   public func databaseNamespace() async -> String { namespace }
   public func matchIDs() async throws -> [String] { try await store.matchIDs() }

@@ -1,6 +1,8 @@
 import Foundation
 import MatchCore
 import SQLite3
+import Darwin
+import CryptoKit
 
 enum SQLValue {
     case text(String), blob(Data), integer(Int64), null
@@ -9,9 +11,230 @@ enum SQLValue {
     var number: Int64? { if case .integer(let value) = self { value } else { nil } }
 }
 
+private enum ExistingStoreAccess { case readOnlyExisting, readWriteExisting, immutableReadOnlyExisting }
+private struct ExistingStoreSQLiteFailure { let code: Int32; let system: Int32 }
+enum ExistingStoreOpenStage: Equatable {
+    case afterReadOnlyValidation, afterStaticValidation, beforeReadWriteOpen, afterReadWriteOpenBeforeValidation
+}
+private struct ExistingStoreIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+    init(_ info: stat) { device = info.st_dev; inode = info.st_ino }
+}
+private func existingStoreFileError() -> StoreError {
+    .sqlite(code: SQLITE_CANTOPEN, message: "existing storage unavailable: " + String(cString: strerror(errno)))
+}
+private func existingStoreStat(_ path: String, directory: Bool, privateMode: Bool = true) throws -> stat {
+    var info = stat()
+    guard lstat(path, &info) == 0 else { throw existingStoreFileError() }
+    let expected = directory ? S_IFDIR : S_IFREG
+    guard info.st_mode & S_IFMT == expected else { throw StoreError.invalidRequest }
+    if privateMode {
+        guard info.st_uid == geteuid(), info.st_mode & 0o7777 == (directory ? 0o700 : 0o600),
+              directory || info.st_nlink == 1 else { throw StoreError.invalidRequest }
+    }
+    return info
+}
+// Anchors protect this opening interval. Historical catalog ownership and namespace leasing
+// remain the caller's responsibility; this is not an interprocess filesystem lease.
+private final class ExistingStoreAdmission {
+    let url: URL
+    private(set) var fd: Int32
+    let original: ExistingStoreIdentity
+    let ancestors: [(String, ExistingStoreIdentity)]
+    let sidecars: [String: ExistingStoreIdentity]
+    init(_ url: URL) throws {
+        guard url.isFileURL, url.host == nil || url.host == "", url.path.hasPrefix("/"),
+              !url.path.utf8.contains(0), !url.path.split(separator: "/").contains(where: { $0 == "." || $0 == ".." }),
+              url.query == nil, url.fragment == nil else { throw StoreError.invalidRequest }
+        let parent = url.deletingLastPathComponent().path
+        _ = try existingStoreStat(parent, directory: true)
+        var anchors: [(String, ExistingStoreIdentity)] = [], path = parent
+        while true {
+            anchors.append((path, ExistingStoreIdentity(try existingStoreStat(path, directory: true, privateMode: false))))
+            if path == "/" { break }
+            path = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        }
+        let main = try existingStoreStat(url.path, directory: false)
+        var known: [String: ExistingStoreIdentity] = [:]
+        for suffix in ["-wal", "-shm", "-journal"] {
+            var info = stat()
+            if lstat(url.path + suffix, &info) == 0 {
+                known[suffix] = ExistingStoreIdentity(try existingStoreStat(url.path + suffix, directory: false))
+            } else if errno != ENOENT { throw existingStoreFileError() }
+        }
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { throw existingStoreFileError() }
+        self.url = url; fd = descriptor; original = ExistingStoreIdentity(main); ancestors = anchors; sidecars = known
+        do { try verify(); _ = try header() }
+        catch { Darwin.close(descriptor); fd = -1; throw error }
+    }
+    deinit { if fd >= 0 { Darwin.close(fd) } }
+    func verify() throws {
+        let main = try existingStoreStat(url.path, directory: false)
+        var retained = stat()
+        guard fstat(fd, &retained) == 0 else { throw existingStoreFileError() }
+        guard retained.st_mode & S_IFMT == S_IFREG, retained.st_nlink == 1, retained.st_uid == geteuid(),
+              retained.st_mode & 0o7777 == 0o600, ExistingStoreIdentity(main) == original,
+              ExistingStoreIdentity(retained) == original else { throw StoreError.invalidRequest }
+        _ = try existingStoreStat(url.deletingLastPathComponent().path, directory: true)
+        for (path, expected) in ancestors {
+            guard ExistingStoreIdentity(try existingStoreStat(path, directory: true, privateMode: false)) == expected else { throw StoreError.invalidRequest }
+        }
+        for suffix in ["-wal", "-shm", "-journal"] {
+            var info = stat()
+            if lstat(url.path + suffix, &info) == 0 {
+                let current = ExistingStoreIdentity(try existingStoreStat(url.path + suffix, directory: false))
+                if let expected = sidecars[suffix], current != expected { throw StoreError.invalidRequest }
+            } else {
+                guard errno == ENOENT else { throw existingStoreFileError() }
+                guard sidecars[suffix] == nil else { throw StoreError.invalidRequest }
+            }
+        }
+    }
+    func header() throws -> Data {
+        try verify()
+        var info = stat(); guard fstat(fd, &info) == 0 else { throw existingStoreFileError() }
+        guard info.st_size >= 100 else { throw StoreError.unsupportedSchema(0) }
+        var data = Data(count: 100)
+        let count = data.withUnsafeMutableBytes { pread(fd, $0.baseAddress, 100, 0) }
+        guard count == 100 else { throw StoreError.sqlite(code: SQLITE_IOERR | (1 << 8), message: "existing header unavailable") }
+        guard data.prefix(16) == Data("SQLite format 3\0".utf8) else { throw StoreError.sqlite(code: SQLITE_NOTADB, message: "invalid existing SQLite header") }
+        try verify(); return data
+    }
+    func noSidecars() throws -> Bool {
+        try verify()
+        for suffix in ["-wal", "-shm", "-journal"] {
+            var info = stat()
+            if lstat(url.path + suffix, &info) == 0 { return false }
+            guard errno == ENOENT else { throw existingStoreFileError() }
+        }
+        return true
+    }
+}
+private struct ExistingStoreMainVersion: Equatable {
+    let device: dev_t, inode: ino_t, size: off_t
+    let modifiedSeconds: Int, modifiedNanos: Int, changedSeconds: Int, changedNanos: Int
+    let header: Data
+}
+// Immutable parsing is only provisional when an ordinary readonly SQL read fails
+// specifically because clean WAL sidecars are absent. A current SQLite lock follows it.
+private final class ExistingStoreStaticMain {
+    let admission: ExistingStoreAdmission
+    let version: ExistingStoreMainVersion
+    let fingerprint: Data
+    init?(_ admission: ExistingStoreAdmission) throws {
+        guard try admission.noSidecars() else { return nil }
+        let version = try Self.version(admission)
+        guard version.header[18] == 2, version.header[19] == 2 else { return nil }
+        let digest = try Self.fingerprint(admission.fd, size: version.size)
+        guard try Self.version(admission) == version, try admission.noSidecars() else { throw StoreError.invalidRequest }
+        self.admission = admission; self.version = version; fingerprint = digest
+    }
+    private static func version(_ admission: ExistingStoreAdmission) throws -> ExistingStoreMainVersion {
+        let header = try admission.header()
+        var info = stat(); guard fstat(admission.fd, &info) == 0 else { throw existingStoreFileError() }
+        return ExistingStoreMainVersion(device: info.st_dev, inode: info.st_ino, size: info.st_size,
+            modifiedSeconds: info.st_mtimespec.tv_sec, modifiedNanos: info.st_mtimespec.tv_nsec,
+            changedSeconds: info.st_ctimespec.tv_sec, changedNanos: info.st_ctimespec.tv_nsec, header: header)
+    }
+    private static func fingerprint(_ fd: Int32, size: off_t) throws -> Data {
+        var hasher = SHA256(), offset: off_t = 0, buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while offset < size {
+            let requested = Int(min(off_t(buffer.count), size - offset))
+            let count = buffer.withUnsafeMutableBytes { pread(fd, $0.baseAddress, requested, offset) }
+            if count < 0, errno == EINTR { continue }
+            guard count > 0 else { throw StoreError.sqlite(code: SQLITE_IOERR | (1 << 8), message: "existing main unavailable") }
+            hasher.update(data: Data(buffer.prefix(count))); offset += off_t(count)
+        }
+        return Data(hasher.finalize())
+    }
+    func verify(requireNoSidecars: Bool = true) throws {
+        guard try Self.version(admission) == version,
+              try Self.fingerprint(admission.fd, size: version.size) == fingerprint,
+              try Self.version(admission) == version else { throw StoreError.invalidRequest }
+        if requireNoSidecars { guard try admission.noSidecars() else { throw StoreError.invalidRequest } }
+    }
+}
+
 /// Access is exclusively owned by MatchStore's actor after initialization. No statement escapes.
 final class SQLite: @unchecked Sendable {
     private var handle: OpaquePointer?
+    private var lastSQLiteFailure: ExistingStoreSQLiteFailure?
+    private init(rawExistingURL: URL, access: ExistingStoreAccess) throws {
+        let flags: Int32
+        switch access {
+        case .readOnlyExisting: flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        case .readWriteExisting: flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        case .immutableReadOnlyExisting: flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_FULLMUTEX
+        }
+        let filename = access == .immutableReadOnlyExisting
+            ? URL(fileURLWithPath: rawExistingURL.path).absoluteString + "?mode=ro&immutable=1" : rawExistingURL.path
+        let result = sqlite3_open_v2(filename, &handle, flags, nil)
+        guard result == SQLITE_OK else {
+            let error = failure(result); if let handle { sqlite3_close_v2(handle) }; handle = nil; throw error
+        }
+        do { try check(sqlite3_busy_timeout(handle, 5_000)) }
+        catch { if let handle { sqlite3_close_v2(handle) }; handle = nil; throw error }
+    }
+    convenience init(existingCurrentV4URL: URL) throws {
+        try self.init(existingCurrentV4URL: existingCurrentV4URL, checkpoint: nil)
+    }
+    // The checkpoint can interrupt actual validation; it never supplies proof or bypasses it.
+    convenience init(existingCurrentV4URL: URL, checkpoint: ((ExistingStoreOpenStage) throws -> Void)?) throws {
+        let admission = try ExistingStoreAdmission(existingCurrentV4URL)
+        let provisional = try ExistingStoreStaticMain(admission)
+        let readonly = try SQLite(rawExistingURL: existingCurrentV4URL, access: .readOnlyExisting)
+        var usedStatic = false
+        do {
+            try readonly.validateExistingCurrentV4()
+            try readonly.close()
+            try admission.verify()
+            try checkpoint?(.afterReadOnlyValidation)
+        } catch {
+            let failure = readonly.lastSQLiteFailure
+            try? readonly.close()
+            guard failure?.code == SQLITE_CANTOPEN, failure?.system == ENOENT, let provisional else { throw error }
+            try provisional.verify()
+            let immutable = try SQLite(rawExistingURL: existingCurrentV4URL, access: .immutableReadOnlyExisting)
+            do {
+                try immutable.validateExistingCurrentV4(requireWAL: false)
+                try immutable.close()
+            } catch { try? immutable.close(); throw error }
+            try checkpoint?(.afterStaticValidation)
+            try provisional.verify()
+            usedStatic = true
+        }
+        try checkpoint?(.beforeReadWriteOpen)
+        try admission.verify()
+        if usedStatic { try provisional?.verify() }
+        try self.init(rawExistingURL: existingCurrentV4URL, access: .readWriteExisting)
+        do {
+            try admission.verify()
+            if usedStatic { try provisional?.verify() }
+            try checkpoint?(.afterReadWriteOpenBeforeValidation)
+            try admission.verify()
+            // After the no-sidecar RW handoff, lawful SQLite coordination may create WAL/SHM.
+            // The original main fingerprint still holds; the current lock decides contention.
+            if usedStatic { try provisional?.verify(requireNoSidecars: false) }
+            // Current SQLite locking and WAL view, not the immutable parser, admit this facade.
+            try transaction { try validateExistingCurrentV4() }
+            try admission.verify()
+            if usedStatic { try provisional?.verify(requireNoSidecars: false) }
+            try execute("PRAGMA synchronous=FULL")
+            guard try scalar("PRAGMA synchronous").number == 2 else {
+                throw StoreError.sqlite(code: SQLITE_ERROR, message: "FULL durability unavailable")
+            }
+        } catch { try? close(); throw error }
+    }
+    private func validateExistingCurrentV4(requireWAL: Bool = true) throws {
+        try validateLocalErasureLayoutV4()
+        if requireWAL {
+            guard try scalar("PRAGMA journal_mode").string?.lowercased() == "wal" else {
+                throw StoreError.sqlite(code: SQLITE_ERROR, message: "existing WAL required")
+            }
+        }
+    }
     init(url: URL, fault: StoreFault?) throws {
         guard url.isFileURL else { throw StoreError.invalidRequest }
         let result = sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
@@ -97,8 +320,14 @@ final class SQLite: @unchecked Sendable {
     }
     func rows(_ sql: String, _ values: [SQLValue] = []) throws -> [[SQLValue]] {
         guard let handle else { throw StoreError.closed }
+        lastSQLiteFailure = nil
         var statement: OpaquePointer?
-        try check(sqlite3_prepare_v2(handle, sql, -1, &statement, nil))
+        let prepared = sqlite3_prepare_v2(handle, sql, -1, &statement, nil)
+        guard prepared == SQLITE_OK else {
+            let error = failure(prepared) // Capture extended code and errno before finalize changes them.
+            if let statement { sqlite3_finalize(statement) }
+            throw error
+        }
         guard let statement else { throw StoreError.sqlite(code: SQLITE_ERROR, message: "missing SQL statement") }
         var finalized = false
         defer { if !finalized { sqlite3_finalize(statement) } }
@@ -185,7 +414,10 @@ final class SQLite: @unchecked Sendable {
         }
     }
     private func failure(_ code: Int32) -> StoreError {
-        .sqlite(code: code, message: handle.map { String(cString: sqlite3_errmsg($0)) } ?? "database unavailable")
+        if let handle {
+            lastSQLiteFailure = ExistingStoreSQLiteFailure(code: sqlite3_extended_errcode(handle), system: sqlite3_system_errno(handle))
+        }
+        return .sqlite(code: code, message: handle.map { String(cString: sqlite3_errmsg($0)) } ?? "database unavailable")
     }
     private func check(_ code: Int32) throws { if code != SQLITE_OK { throw failure(code) } }
     private static let schema = [

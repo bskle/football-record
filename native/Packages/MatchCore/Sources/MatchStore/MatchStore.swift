@@ -13,6 +13,15 @@ public actor MatchStore {
         self.authorityTrust = authorityTrust
         try syncEnvironment.validate(); db = try SQLite(url: url, fault: nil); fault = nil; self.syncEnvironment = syncEnvironment
     }
+    /// Opens only an original private, current-v4 store. Domain and owner authorization remain separate.
+    public init(existingCurrentV4URL: URL, syncEnvironment: PeerEnvironment = .production, authorityTrust: AuthorityTrustConfiguration? = nil, cloudSavePolicy: CloudSaveProofPolicy = .unavailable) throws {
+        self.cloudSavePolicy = cloudSavePolicy
+        self.authorityTrust = authorityTrust
+        try syncEnvironment.validate()
+        db = try SQLite(existingCurrentV4URL: existingCurrentV4URL)
+        fault = nil
+        self.syncEnvironment = syncEnvironment
+    }
     init(url: URL, fault: StoreFault, syncEnvironment: PeerEnvironment = .production, authorityTrust: AuthorityTrustConfiguration? = nil, cloudSavePolicy: CloudSaveProofPolicy = .unavailable) throws {
         self.cloudSavePolicy = cloudSavePolicy
         self.authorityTrust = authorityTrust
