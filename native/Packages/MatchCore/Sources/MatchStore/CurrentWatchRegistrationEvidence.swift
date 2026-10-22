@@ -44,7 +44,7 @@ extension MatchStore {
               marker.watchPublicKey.utf8.elementsEqual(attempt.payload.watchPublicKey.utf8),
               marker.watchDeviceKeyID == (try AuthorityWire.deviceKeyID(publicKey: attempt.payload.watchPublicKey)) else { throw AuthorityError.intentMismatch }
         let receipt = try verifyWatchRegistrationV4(attempt, raw: raw)
-        guard receipt.body.result == .registered else { throw AuthorityError.intentMismatch }
+        guard receipt.body.result == .registered, receipt.body.environment == binding.environment else { throw AuthorityError.intentMismatch }
         return (marker, attempt, receipt)
     }
     /// Historical integrity only: later generation/admission/binding changes must not poison retained facts.

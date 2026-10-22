@@ -360,6 +360,71 @@ final class CurrentWatchRegistrationEvidenceTests: XCTestCase, @unchecked Sendab
         try db.close(); try await s.close()
     }
 
+    // The signed receipt stays development. Only unsigned local associations move together.
+    func corruptRetainedEnvironment(_ db: SQLite) throws {
+        var attempt = try object(db, id: "watch-attempt:watch-original")
+        var context = try XCTUnwrap(attempt["context"] as? [String: Any])
+        context["environment"] = "production"; attempt["context"] = context
+        try writeObject(db, id: "watch-attempt:watch-original", object: attempt)
+        var marker = try object(db)
+        var admitted = try XCTUnwrap(marker["admittedContext"] as? [String: Any])
+        admitted["environment"] = "production"; marker["admittedContext"] = admitted
+        var binding = try XCTUnwrap(marker["acceptedBinding"] as? [String: Any])
+        binding["environment"] = "production"; marker["acceptedBinding"] = binding
+        try writeObject(db, id: "watch-current-v1", object: marker)
+    }
+    func assertOriginalSignedReceiptRetained(_ s: MatchStore, fixture f: Fixture, file: StaticString = #filePath, line: UInt = #line) async throws {
+        let raw = try await s.watchRegistrationReceiptV4(requestID: f.attempt.requestID)
+        XCTAssertEqual(raw, f.receipt.raw, file: file, line: line)
+        XCTAssertEqual(f.receipt.body.environment, .development, file: file, line: line)
+    }
+    func testRetainedSignedEnvironmentMismatchBlocksInventory() async throws {
+        let f = try await fixture(), s = try await mutate(f) { try corruptRetainedEnvironment($0) }
+        try await assertOriginalSignedReceiptRetained(s, fixture: f)
+        let before = try await s.watchEvidenceTestState()
+        do { _ = try await s.captureInventoryV4(); XCTFail("inventory must reject local association contradicting the signed environment") }
+        catch { XCTAssertEqual(error as? AuthorityError, .intentMismatch) }
+        let after = try await s.watchEvidenceTestState()
+        XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+        try await s.close()
+    }
+    func testRetainedSignedEnvironmentMismatchBlocksEraseBeforeBusinessDeletion() async throws {
+        let (f, seed, saga) = try await deletionFixture(); try await seed.close()
+        let db = try SQLite(url: f.context.url, fault: nil); try corruptRetainedEnvironment(db); try db.close()
+        let s = try h.store(f.context); try await assertOriginalSignedReceiptRetained(s, fixture: f)
+        let before = try await s.watchEvidenceTestState()
+        do { _ = try await s.eraseLocalBusinessV4(requestID: saga.intent.requestID, expectedRevision: saga.revision); XCTFail("erase must reject the signed environment contradiction before any DELETE") }
+        catch { XCTAssertEqual(error as? AuthorityError, .intentMismatch) }
+        let after = try await s.watchEvidenceTestState()
+        XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+        try await s.close()
+    }
+    func testRetainedSignedEnvironmentMismatchBlocksCurrentZeroProof() async throws {
+        let (f, seed, saga) = try await deletionFixture()
+        _ = try await seed.eraseLocalBusinessV4(requestID: saga.intent.requestID, expectedRevision: saga.revision); try await seed.close()
+        let db = try SQLite(url: f.context.url, fault: nil); try corruptRetainedEnvironment(db); try db.close()
+        let s = try h.store(f.context); try await assertOriginalSignedReceiptRetained(s, fixture: f)
+        let before = try await s.watchEvidenceTestState()
+        do { _ = try await s.validateLocalBusinessErasedV4(requestID: saga.intent.requestID, requestDigest: saga.intent.digest, scope: XCTUnwrap(saga.originalScope)); XCTFail("zero proof must reject retained signed environment contradiction") }
+        catch { XCTAssertEqual(error as? AuthorityError, .intentMismatch) }
+        let after = try await s.watchEvidenceTestState()
+        XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+        try await s.close()
+    }
+    func testRetainedSignedEnvironmentMismatchBlocksNewAcceptanceFromOverwritingMarker() async throws {
+        let f = try await fixture(), next = try attempt(f.context, key: f.deviceKey, requestID: "legitimate-next-watch")
+        let receipt = try signed(f.context, attempt: next)
+        try await f.store.saveWatchRegistrationAttemptV4(next, expectedIdentityGeneration: 0)
+        let s = try await mutate(f) { try corruptRetainedEnvironment($0) }
+        try await assertOriginalSignedReceiptRetained(s, fixture: f)
+        let before = try await s.watchEvidenceTestState()
+        do { try await s.acceptWatchRegistrationV4(next, receipt: receipt, watchBinding: f.binding, expectedIdentityGeneration: 0); XCTFail("a new valid acceptance must not overwrite a detectable signed environment contradiction") }
+        catch { XCTAssertEqual(error as? AuthorityError, .intentMismatch) }
+        let after = try await s.watchEvidenceTestState()
+        XCTAssertEqual(before.rows, after.rows); XCTAssertEqual(before.changes, after.changes)
+        try await s.close()
+    }
+
 }
 
 extension MatchStore {
