@@ -545,10 +545,10 @@ private actor CompositionServiceVault: DeviceCredentialVault {
   private let hold: Bool
   private var held: CheckedContinuation<Void, Never>?
   private(set) var entered = false
-  private(set) var replacements = 0, fenceMovements = 0
+  private(set) var replacements = 0, fenceMovements = 0, credentialReads = 0
   private var fence: Int64 = 0
   init(hold: Bool) { self.hold = hold }
-  func credential() async throws -> DeviceCredential { try await original.credential() }
+  func credential() async throws -> DeviceCredential { credentialReads += 1; return try await original.credential() }
   func advanceIdentityFence(to generation: Int64) async throws { try await original.advanceIdentityFence(to: generation); if generation > fence { fenceMovements += 1; fence = generation } }
   func replace(_ credential: DeviceCredential?, expectedIdentityGeneration: Int64) async throws {
     entered = true; replacements += 1
@@ -611,16 +611,20 @@ extension M4AccountCompositionTests {
     let reads = await f.observer.reads, calls = await f.relay.calls; XCTAssertGreaterThanOrEqual(reads, 3); XCTAssertEqual(calls, 2)
     try await f.composition.close()
   }
-  func testOriginalUnboundWatchProtocolRetainsFactsWithoutBusinessAdmission() async throws {
+  func testOriginalWatchRegistrationRetainsFactsAndManagedBusinessAdmission() async throws {
     try await freshWatchService(holdVault: false)
   }
   func testOriginalWatchVaultTailCannotOutliveBusinessDrain() async throws {
     try await freshWatchService(holdVault: true)
   }
+  func testWatchScopeManagedSignedRegistrationOwnsLedgerAndStoreBeforeReady() async throws {
+    try await freshWatchService(holdVault: false)
+  }
   private func freshWatchService(holdVault: Bool) async throws {
     let f = try await freshServiceFixture(watch: true, holdVault: holdVault), c = f.composition
     let context = try WatchRegistrationContextV4(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", phoneID: "independent-original-phone", activationEpoch: 1, environment: .development)
-    let action = Task { await c.context.account.perform(.registerWatch) }
+    var actionDone = false
+    let action = Task { await c.context.account.perform(.registerWatch); actionDone = true }
     let first = try await serviceMailboxRequest(f.protocolRoot, operation: "phone-context")
     try serviceMailboxReply(first, payload: AuthorityWire.encode(context))
     let registration = try await serviceMailboxRequest(f.protocolRoot, operation: "phone-register")
@@ -642,24 +646,34 @@ extension M4AccountCompositionTests {
       await f.vault.release(); await action.value; try await drain.value
       XCTAssertFalse(c.context.account.canEnterRecording)
     } else {
+      try await watchContextReplies(f.protocolRoot, context: context, finished: { actionDone })
       await action.value
-      XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
-      do { try await c.admitCurrentIdentity(); XCTFail("Watch protocol completion is not supported Phone resource admission") }
-      catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
-      XCTAssertEqual(c.context.account.phase, .suspended)
-      let before = await f.relay.calls
-      for action in [AccountUserAction.signIn, .registerWatch, .recover] {
-        do { try await c.performAccount(action); XCTFail("bound Watch stays unsupported without new generic protocol calls") }
-        catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
-      }
-      let after = await f.relay.calls; XCTAssertEqual(after, before)
-      let reads = await f.observer.reads; XCTAssertGreaterThanOrEqual(reads, 1)
+      let generation = try await c.repository.identityGenerationV4(), proof = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: generation)
+      XCTAssertEqual(proof?.binding.role, .watch); XCTAssertEqual(proof?.currentWatchRequestID, forward.attempt.requestID)
+      let catalog = try M4OwnedDataCatalog(directory: f.prepared.seed.controlDirectory.deletingLastPathComponent().appendingPathComponent("catalog"))
+      XCTAssertEqual(try catalog.index().entries.filter { $0.capsule.kind == .cloudLedger }.count, 1)
+      XCTAssertEqual(try catalog.index().entries.filter { $0.capsule.kind == .businessStore }.count, 1)
+      XCTAssertTrue(c.context.account.canEnterRecording, "only an original Watch proof and real full resource seal can admit recording")
+      try catalog.close()
     }
     let actual = try await c.repository.watchRegistrationAttemptV4(requestID: forward.attempt.requestID), raw = try await c.repository.watchRegistrationReceiptV4(requestID: forward.attempt.requestID)
     XCTAssertEqual(actual, forward.attempt); XCTAssertEqual(raw, try JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys, .withoutEscapingSlashes]))
     let credential = try await f.vault.credential(); XCTAssertEqual(credential.deviceID, f.prepared.seed.installationID)
     let repoID = await c.repository.syncRepositoryIdentity(), sessionID = await c.session.syncRepositoryIdentity(); XCTAssertEqual(repoID, sessionID)
     try await c.close()
+  }
+  private func watchContextReplies(_ root: URL, context: WatchRegistrationContextV4, finished: @MainActor () -> Bool) async throws {
+    let directory = root.appendingPathComponent("development/mailbox/outgoing"), deadline = ContinuousClock.now.advanced(by: .seconds(4))
+    var seen: Set<String> = []
+    while !finished(), ContinuousClock.now < deadline {
+      for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+        let bytes: Data; do { bytes = try Data(contentsOf: file) } catch { continue }
+        guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any], object["operation"] as? String == "phone-context", let id = object["id"] as? String, seen.insert(id).inserted else { continue }
+        try serviceMailboxReply(ServiceMailboxRequest(response: root.appendingPathComponent("development/mailbox/responses/" + id + ".json"), payload: Data()), payload: AuthorityWire.encode(context))
+      }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+    guard finished() else { throw AuthorityError.unavailable }
   }
   private struct FreshServiceFixture {
     let composition: M4AccountComposition
@@ -670,14 +684,14 @@ extension M4AccountCompositionTests {
     let protocolRoot: URL
     let key: Curve25519.Signing.PrivateKey
   }
-  private func freshServiceFixture(watch: Bool = false, holdVault: Bool = false, resourceReplyGate: (@MainActor () async -> Void)? = nil) async throws -> FreshServiceFixture {
+  private func freshServiceFixture(watch: Bool = false, holdVault: Bool = false, resourceReplyGate: (@MainActor () async -> Void)? = nil, crashHook: ((M4ResourceCrashPoint) throws -> Void)? = nil) async throws -> FreshServiceFixture {
     let root = location(), protocolRoot = root.appendingPathComponent("protocol"), key = Curve25519.Signing.PrivateKey(), observer = CompositionIdentityFixture(), vault = CompositionServiceVault(hold: holdVault)
     let namespace = watch ? "m4-ui-fresh-watch" : "m4-ui-fresh-phone", publicKey = AuthorityWire.base64URL(key.publicKey.rawRepresentation)
     let trust = try AuthorityTrustConfiguration(environment: .development, publicKeys: ["service-key": publicKey])
     let prepared = try await M4IdentityBootstrap.prepare(root: root.appendingPathComponent("business"), namespace: namespace, controlDirectory: root.appendingPathComponent("retained")) { _ in
       M4IdentityMaterial(signer: try DevelopmentDeviceSigner(namespace: namespace, rawRepresentation: Data(repeating: watch ? 42 : 41, count: 32)), vault: vault)
     }
-    try prepared.prepareManagedResources(resourceReplyGate: resourceReplyGate)
+    try prepared.prepareManagedResources(crashHook: crashHook, resourceReplyGate: resourceReplyGate)
     let config = DevelopmentAuthorityConfiguration(dataset: "fresh", namespace: namespace, baseURL: "http://127.0.0.1:1", keyID: "service-key", publicKey: publicKey, cloudSpaceID: "cloud-fixture", subject: "configuration-does-not-admit-current-identity", role: watch ? "watch" : "phone")
     let adapters = try M4ControlledAdapters.make(configuration: config, rootDirectory: protocolRoot)
     let relay = CompositionFreshAuthenticationRelay(key: key, deviceID: prepared.seed.installationID, publicKey: prepared.material.signer.publicKey)
@@ -1148,10 +1162,10 @@ extension M4AccountCompositionTests {
     let protocolRoot: URL
   }
   private func durablePhoneFixture(root: URL, createObservation: Bool, exitBeforeCredentialWrite: Bool = false,
-                                   crashHook: ((M4ResourceCrashPoint) throws -> Void)? = nil) async throws -> DurablePhoneFixture {
-    let namespace = "m4-ui-durable-phone", key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 77, count: 32))
+                                   crashHook: ((M4ResourceCrashPoint) throws -> Void)? = nil, watch: Bool = false) async throws -> DurablePhoneFixture {
+    let namespace = watch ? "m4-ui-durable-watch" : "m4-ui-durable-phone", key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 77, count: 32))
     let publicKey = AuthorityWire.base64URL(key.publicKey.rawRepresentation)
-    let configuration = DevelopmentAuthorityConfiguration(dataset: "durable", namespace: namespace, baseURL: "http://127.0.0.1:1", keyID: "service-key", publicKey: publicKey, cloudSpaceID: "cloud-fixture", subject: "separate-configured-subject", role: "phone")
+    let configuration = DevelopmentAuthorityConfiguration(dataset: "durable", namespace: namespace, baseURL: "http://127.0.0.1:1", keyID: "service-key", publicKey: publicKey, cloudSpaceID: "cloud-fixture", subject: "separate-configured-subject", role: watch ? "watch" : "phone")
     let protocolRoot = root.appendingPathComponent("protocol"), observations = root.appendingPathComponent("observations")
     if createObservation {
       try FileManager.default.createDirectory(at: observations, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -1599,3 +1613,582 @@ extension M4AccountCompositionTests {
     try catalog.close(); try await c.close()
   }
 }
+
+
+#if DEBUG
+@MainActor private final class WatchScopeBroker {
+  let root: URL
+  let key: Curve25519.Signing.PrivateKey
+  let deviceID, publicKey: String
+  let archive: URL?
+  var context: WatchRegistrationContextV4
+  var expiresIn: Int64 = 3600
+  var unavailable = false, abandoned = false, unsignedAbandonment = false
+  var nextContextGate: PhoneScopeBarrier?, nextAuthorizationGate: PhoneScopeBarrier?
+  private var replies: [String: Data] = [:], seen: Set<String> = []
+  private var task: Task<Void, Never>?
+  private(set) var contexts = 0, appleCalls = 0
+  private(set) var authorizationIDs: [String] = []
+  private(set) var actions: [WatchRegistrationAction] = []
+  private(set) var failure: (any Error)?
+  init(root: URL, key: Curve25519.Signing.PrivateKey, deviceID: String, publicKey: String, archive: URL? = nil) throws {
+    self.root = root; self.key = key; self.deviceID = deviceID; self.publicKey = publicKey; self.archive = archive
+    context = try WatchRegistrationContextV4(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", phoneID: "independent-original-phone", activationEpoch: 1, environment: .development)
+  }
+  func start() {
+    task = Task {
+      do {
+        while !Task.isCancelled {
+          for file in try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("development/mailbox/outgoing"), includingPropertiesForKeys: nil) {
+            let bytes: Data; do { bytes = try Data(contentsOf: file) } catch { continue }
+            guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any], let id = object["id"] as? String,
+                  let operation = object["operation"] as? String, let encoded = object["payload"] as? String, let payload = Data(base64Encoded: encoded), seen.insert(id).inserted else { continue }
+            let response = root.appendingPathComponent("development/mailbox/responses/" + id + ".json")
+            if operation == "phone-context" {
+              contexts += 1
+              if let gate = nextContextGate { nextContextGate = nil; await gate.hold() }
+              try reply(response, bytes: AuthorityWire.encode(context))
+            } else if operation == "phone-register" {
+              let forward = try JSONDecoder().decode(CompositionWatchForward.self, from: payload); try forward.attempt.validate()
+              guard Data(forward.attempt.payload.watchID.utf8) == Data(deviceID.utf8), Data(forward.attempt.payload.watchPublicKey.utf8) == Data(publicKey.utf8) else { throw AuthorityError.identityChanged }
+              authorizationIDs.append(forward.attempt.requestID); actions.append(forward.action)
+              if let gate = nextAuthorizationGate { nextAuthorizationGate = nil; await gate.hold() }
+              if unavailable { try refuse(response); continue }
+              let bytes = try registrationResponse(forward.attempt)
+              try reply(response, bytes: bytes)
+            } else {
+              if operation == "apple" { appleCalls += 1 }
+              try refuse(response)
+            }
+          }
+          try await Task.sleep(for: .milliseconds(2))
+        }
+      } catch is CancellationError {} catch { failure = error }
+    }
+  }
+  private func registrationResponse(_ attempt: WatchRegistrationAttemptV4) throws -> Data {
+    if unsignedAbandonment { return try JSONSerialization.data(withJSONObject: ["status": "knownAbandoned"], options: [.sortedKeys]) }
+    if let saved = replies[attempt.requestID] { return saved }
+    if let archive, FileManager.default.fileExists(atPath: archive.path) {
+      let bytes = try Data(contentsOf: archive)
+      let object = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any]), receipt = try XCTUnwrap(object["receipt"] as? [String: Any]), body = try XCTUnwrap(receipt["body"] as? [String: Any])
+      guard body["requestID"] as? String == attempt.requestID, body["requestDigest"] as? String == attempt.requestDigest else { throw AuthorityError.intentMismatch }
+      replies[attempt.requestID] = bytes; return bytes
+    }
+    var receipt = try serviceFixtureReceipt(key: key, requestID: attempt.requestID, digest: attempt.requestDigest, operation: "registerWatch", registration: ["watchID": deviceID, "watchPublicKey": publicKey])
+    let bytes: Data
+    if abandoned {
+      var body = try XCTUnwrap(receipt["body"] as? [String: Any]); body["result"] = "knownAbandoned"
+      let canonical = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .withoutEscapingSlashes])
+      receipt = ["body": body, "signature": AuthorityWire.base64URL(try key.signature(for: AuthorityWire.signedInput("football-record.authority.receipt.v1", body: canonical)))]
+      bytes = try JSONSerialization.data(withJSONObject: ["status": "knownAbandoned", "receipt": receipt], options: [.sortedKeys, .withoutEscapingSlashes])
+    } else {
+      let expires = Int64(Date().timeIntervalSince1970) + expiresIn
+      let response: [String: Any] = ["receipt": receipt, "sessionClaims": ["sessionID": "watch-original-session", "expiresAt": expires], "credential": ["token": AuthorityWire.base64URL(Data(repeating: 25, count: 32)), "sessionID": "watch-original-session", "accountID": attempt.context.accountID, "deviceID": deviceID, "keyID": try AuthorityWire.deviceKeyID(publicKey: publicKey), "activationEpoch": attempt.context.activationEpoch, "expiresAt": expires]]
+      bytes = try JSONSerialization.data(withJSONObject: response, options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+    if let archive { try bytes.write(to: archive, options: .withoutOverwriting) }
+    replies[attempt.requestID] = bytes; return bytes
+  }
+  private func reply(_ url: URL, bytes: Data) throws { try JSONSerialization.data(withJSONObject: ["payload": bytes.base64EncodedString()], options: [.sortedKeys]).write(to: url, options: .atomic) }
+  private func refuse(_ url: URL) throws { try JSONSerialization.data(withJSONObject: ["issue": "unavailable"], options: [.sortedKeys]).write(to: url, options: .atomic) }
+  func stop() async { task?.cancel(); await task?.value; task = nil }
+}
+extension M4AccountCompositionTests {
+  private func watchScopeFixture(holdVault: Bool = false, resourceReplyGate: (@MainActor () async -> Void)? = nil,
+                                 crashHook: ((M4ResourceCrashPoint) throws -> Void)? = nil) async throws -> (FreshServiceFixture, WatchScopeBroker) {
+    let f = try await freshServiceFixture(watch: true, holdVault: holdVault, resourceReplyGate: resourceReplyGate, crashHook: crashHook)
+    let broker = try WatchScopeBroker(root: f.protocolRoot, key: f.key, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey)
+    broker.start(); return (f, broker)
+  }
+  func testWatchScopeRegisteredReceiptWithoutCurrentMarkerNeverChoosesFreshProtocol() async throws {
+    let (f, broker) = try await watchScopeFixture(), c = f.composition
+    broker.expiresIn = -1
+    await c.context.account.perform(.registerWatch)
+    let binding = try await c.repository.accountBindingV4(), pending = try await c.repository.pendingWatchRegistrationAttemptsV4()
+    XCTAssertNil(binding); XCTAssertTrue(pending.isEmpty)
+    let originalID = try XCTUnwrap(broker.authorizationIDs.first), originalAttempt = try await c.repository.watchRegistrationAttemptV4(requestID: originalID), raw = try await c.repository.watchRegistrationReceiptV4(requestID: originalID)
+    XCTAssertNotNil(raw)
+    do { _ = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: c.repository.identityGenerationV4()); XCTFail("a registered receipt accepted without a binding has no055 current grant") } catch {}
+    let contexts = broker.contexts, challenges = await f.relay.calls
+    await watchScopeRefuseEveryEntry(f, broker: broker)
+    let nextChallenges = await f.relay.calls
+    XCTAssertEqual(nextChallenges, challenges, "registered history with nil binding/pending is not a new challenge")
+    XCTAssertEqual(broker.contexts, contexts, "no new protocol may be dispatched from a missing current marker")
+    XCTAssertEqual(broker.authorizationIDs, [originalID]); XCTAssertEqual(broker.appleCalls, 0)
+    let afterAttempt = try await c.repository.watchRegistrationAttemptV4(requestID: originalID), afterRaw = try await c.repository.watchRegistrationReceiptV4(requestID: originalID)
+    XCTAssertEqual(afterAttempt, originalAttempt); XCTAssertEqual(afterRaw, raw)
+    let phones = try await c.repository.authAttemptsV4(); XCTAssertTrue(phones.isEmpty)
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+}
+#endif
+
+
+#if DEBUG && os(macOS)
+extension M4AccountCompositionTests {
+  func testWatchScopeDurableProcessRecoveryUsesOriginalCurrentIDAndOwnWAL() async throws {
+    let environment = ProcessInfo.processInfo.environment, variable = "NATIVE026_WATCH_PROCESS_ROOT"
+    if let path = environment[variable], let mode = environment["NATIVE026_WATCH_PROCESS_MODE"] {
+      let root = URL(fileURLWithPath: path)
+      let points: [String: M4ResourceCrashPoint] = ["reserved": .afterLedgerReservation, "renamed": .afterLedgerRename, "initialized": .afterLedgerInitialization, "sealed": .afterPairSeal]
+      let f = try await durablePhoneFixture(root: root, createObservation: true, exitBeforeCredentialWrite: mode == "registration-commit", crashHook: { if $0 == points[mode] { _exit(86) } }, watch: true)
+      let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 77, count: 32))
+      let broker = try WatchScopeBroker(root: f.protocolRoot, key: key, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey, archive: root.appendingPathComponent("authority-watch-response.json")); broker.start()
+      await f.composition.context.account.perform(.registerWatch)
+      guard mode == "own-wal", f.composition.context.account.canEnterRecording else { return XCTFail("actual child did not reach original Watch boundary") }
+      let handle = try await f.prepared.prepareCurrentWatchResources(expectedIdentityGeneration: f.composition.repository.identityGenerationV4(), observed: f.observer.currentIdentity(), phoneContext: broker.context)
+      try await handle.ledger.recordScopeIssue(scope: handle.scope, issue: .networkUnavailable, at: Date(timeIntervalSince1970: 2345), nextAttemptAt: nil)
+      _exit(86)
+    }
+    for mode in ["registration-commit", "reserved", "renamed", "initialized", "sealed", "own-wal"] {
+      let root = location(); try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+      let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+      process.arguments = ["xctest", "-XCTest", "AppIntegrationTests.M4AccountCompositionTests/testWatchScopeDurableProcessRecoveryUsesOriginalCurrentIDAndOwnWAL", Bundle(for: Self.self).bundleURL.path]
+      var childEnvironment = environment; childEnvironment[variable] = root.path; childEnvironment["NATIVE026_WATCH_PROCESS_MODE"] = mode; process.environment = childEnvironment
+      let log = root.appendingPathComponent("watch-child.log"); XCTAssertTrue(FileManager.default.createFile(atPath: log.path, contents: nil))
+      let output = try FileHandle(forWritingTo: log); process.standardOutput = output; process.standardError = output
+      try process.run(); process.waitUntilExit(); try output.close()
+      guard process.terminationReason == .exit, process.terminationStatus == 86 else { return XCTFail("Watch child \(mode) did not exit86: \(try String(contentsOf: log, encoding: .utf8))") }
+      let directory = root.appendingPathComponent("business/m4-ui-durable-watch")
+      let originals = try ["device.identity", "development.key", "authority.fixture"].map { name -> (URL, M4CatalogPath, Data) in
+        let file = directory.appendingPathComponent(name); return (file, try M4CatalogIO.anchor(file), try Data(contentsOf: file))
+      }
+      let catalogURL = root.appendingPathComponent("retained/catalog"), before = try M4OwnedDataCatalog(directory: catalogURL)
+      let physical = try XCTUnwrap(before.physicalBootstrap()), prior = try before.watchResources()
+      if mode == "registration-commit" { XCTAssertNil(prior) }
+      if mode == "own-wal" { XCTAssertGreaterThan(try Data(contentsOf: URL(fileURLWithPath: try XCTUnwrap(prior).ledger.published.path + "-wal")).count, 0) }
+      try before.close()
+      let f = try await durablePhoneFixture(root: root, createObservation: false, watch: true), c = f.composition
+      let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(repeating: 77, count: 32))
+      let broker = try WatchScopeBroker(root: f.protocolRoot, key: key, deviceID: f.prepared.seed.installationID, publicKey: f.prepared.material.signer.publicKey, archive: root.appendingPathComponent("authority-watch-response.json")); broker.start()
+      let generation = try await c.repository.identityGenerationV4(), current = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: generation)
+      let proof = try XCTUnwrap(current), pending = try await c.repository.pendingWatchRegistrationAttemptsV4()
+      XCTAssertTrue(pending.isEmpty, "an accepted current marker is not a pending attempt")
+      XCTAssertFalse(c.context.account.canEnterRecording)
+      let catalog = try M4OwnedDataCatalog(directory: catalogURL)
+      XCTAssertEqual(try M4CatalogIO.encode(catalog.watchResources()), try M4CatalogIO.encode(prior)); XCTAssertNil(try catalog.phoneResources())
+      if mode == "registration-commit" {
+        do { try await c.admitCurrentIdentity(); XCTFail("actual missing original vault is not repaired by055 current proof") } catch {}
+        XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+        XCTAssertTrue(broker.authorizationIDs.isEmpty)
+        await c.context.account.perform(.recover)
+        XCTAssertEqual(broker.authorizationIDs, [proof.currentWatchRequestID]); XCTAssertEqual(broker.actions, [.recover])
+      } else { try await c.admitCurrentIdentity(); XCTAssertTrue(broker.authorizationIDs.isEmpty) }
+      XCTAssertTrue(c.context.account.canEnterRecording); _ = try catalog.requireWatchSeal()
+      let watch = try XCTUnwrap(catalog.watchResources())
+      XCTAssertEqual(watch.attachment.currentWatchRequestID, proof.currentWatchRequestID); XCTAssertEqual(watch.attachment.receiptRaw, proof.receipt.raw)
+      XCTAssertEqual(watch.ledger.source.inode, physical.reservation.ledgerSlot.inode)
+      if let prior { XCTAssertEqual(try M4CatalogIO.encode(watch.attachment), try M4CatalogIO.encode(prior.attachment)); XCTAssertEqual(try M4CatalogIO.encode(watch.ledger), try M4CatalogIO.encode(prior.ledger)) }
+      if mode == "own-wal" {
+        let handle = try await f.prepared.prepareCurrentWatchResources(expectedIdentityGeneration: generation, observed: f.observer.currentIdentity(), phoneContext: broker.context)
+        let state = try await handle.ledger.scopeState(scope: handle.scope); XCTAssertEqual(state.issue, .networkUnavailable)
+      }
+      let challenges = await f.relay.calls; XCTAssertEqual(challenges, 0); XCTAssertEqual(broker.appleCalls, 0)
+      for (file, anchor, bytes) in originals { XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(file)), try M4CatalogIO.encode(anchor)); XCTAssertEqual(try Data(contentsOf: file), bytes) }
+      print("durable-watch-child mode=\(mode) exit=86 root=\(root.path) originalWatchID=\(proof.currentWatchRequestID)")
+      try catalog.close(); try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+}
+#endif
+
+
+#if DEBUG
+extension M4AccountCompositionTests {
+  private func unattachedWatchScopeFixture() async throws -> (FreshServiceFixture, WatchScopeBroker) {
+    let (f, broker) = try await watchScopeFixture(holdVault: true)
+    let task = Task { await f.composition.context.account.perform(.registerWatch) }
+    guard await waitForVault(f.vault) else { throw AuthorityError.unavailable }
+    await f.observer.setZone("temporary-watch-zone"); await f.vault.release(); await task.value
+    await f.observer.setZone("zone-fixture")
+    guard try f.prepared.activeWatchAttachment() == nil else { throw AuthorityError.identityChanged }
+    return (f, broker)
+  }
+  private func actualWatchReservation(_ f: FreshServiceFixture, catalog: M4OwnedDataCatalog) async throws -> (M4WatchResourceState, M4OwnershipCapsule, M4OwnershipCapsule) {
+    let physical = try XCTUnwrap(catalog.physicalBootstrap()).reservation
+    let generation = try await f.composition.repository.identityGenerationV4(), witness = try await f.composition.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: generation)
+    let proof = try XCTUnwrap(witness), observed = try await f.observer.currentIdentity(), id = UUID().uuidString
+    let scope = try CloudScope(accountID: proof.binding.accountID, cloudSpaceID: proof.binding.cloudSpaceID, zoneID: observed.zoneID, activationEpoch: proof.binding.activationEpoch)
+    let attachment = M4WatchScopeAttachment(version: 1, attachmentID: UUID().uuidString, physicalReservationID: physical.reservationID, binding: proof.binding,
+      identityGeneration: generation, acceptedGeneration: proof.acceptedGeneration, currentWatchRequestID: proof.currentWatchRequestID, attempt: proof.attempt,
+      admittedContext: proof.admittedContext, watchDeviceKeyID: proof.watchDeviceKeyID, receiptRaw: proof.receipt.raw, latestMigration: proof.latestMigration, scope: scope)
+    let root = M4CatalogPath(path: physical.directory.path + "/ledger-" + id + ".sqlite", device: physical.ledgerSlot.device, inode: physical.ledgerSlot.inode, directory: false)
+    let controls = [physical.owner] + physical.identityControls + physical.catalogControls
+    let descriptor = M4WatchLedgerDescriptor(ledgerID: id, source: physical.ledgerSlot, published: root, ancestors: try M4CatalogIO.ancestors([root] + controls))
+    func capsule(_ root: M4CatalogPath, kind: M4OwnedLeafKind, id: String) throws -> M4OwnershipCapsule {
+      M4OwnershipCapsule(version: 1, namespaceID: physical.reservationID, componentID: id, revision: 1, kind: kind, scope: scope, root: root, retainedControls: controls, ancestors: try M4CatalogIO.ancestors([root] + controls))
+    }
+    return try (M4WatchResourceState(attachment: attachment, ledger: descriptor, published: false, seal: nil), capsule(physical.businessDatabase, kind: .businessStore, id: "m4-business-store"), capsule(root, kind: .cloudLedger, id: descriptor.componentID))
+  }
+  func testWatchScopeOriginalCatalogResponseLossReusesDescriptorCapsulesAndFullSeal() async throws {
+    for lostStage in 0...2 {
+      let (f, broker) = try await unattachedWatchScopeFixture(), c = f.composition
+      let catalog = try M4OwnedDataCatalog(directory: f.prepared.seed.controlDirectory.deletingLastPathComponent().appendingPathComponent("catalog"))
+      let (watch, store, ledger) = try await actualWatchReservation(f, catalog: catalog)
+      catalog.injectNextFailure(.beforeCommit)
+      XCTAssertThrowsError(try catalog.reserveWatchResources(watch, store: store, ledger: ledger))
+      XCTAssertNil(try catalog.watchResources()); XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: watch.ledger.source.path)), Data())
+      catalog.injectNextFailure(.afterCommitResponseLost); try catalog.reserveWatchResources(watch, store: store, ledger: ledger)
+      XCTAssertEqual(try M4CatalogIO.encode(catalog.watchResources()), try M4CatalogIO.encode(Optional(watch)))
+      XCTAssertEqual(renameatx_np(AT_FDCWD, watch.ledger.source.path, AT_FDCWD, watch.ledger.published.path, UInt32(RENAME_EXCL)), 0)
+      try M4CatalogIO.syncDirectory(URL(fileURLWithPath: watch.ledger.published.path).deletingLastPathComponent())
+      catalog.injectNextFailure(.afterCommitResponseLost); try catalog.publishWatchLedger(watch.ledger)
+      let actual = try SQLiteCloudLedger(url: URL(fileURLWithPath: watch.ledger.published.path)); try await actual.close()
+      catalog.injectNextFailure(.beforeCommit); XCTAssertThrowsError(try catalog.sealWatchResources(store: store, ledger: ledger))
+      XCTAssertTrue(try catalog.index().entries.isEmpty)
+      if lostStage > 0 { try catalog.record(ledger) }; if lostStage > 1 { try catalog.record(store) }
+      catalog.injectNextFailure(.afterCommitResponseLost)
+      let seal = try catalog.sealWatchResources(store: store, ledger: ledger), revision = try catalog.index().revision
+      XCTAssertEqual(try M4CatalogIO.encode(catalog.sealWatchResources(store: store, ledger: ledger)), try M4CatalogIO.encode(seal)); XCTAssertEqual(try catalog.index().revision, revision)
+      try await c.admitCurrentIdentity(); XCTAssertTrue(c.context.account.canEnterRecording); XCTAssertNil(try catalog.phoneResources())
+      XCTAssertEqual(broker.authorizationIDs.count, 1); let calls = await f.relay.calls; XCTAssertEqual(calls, 1)
+      try catalog.close(); try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+  func testWatchScopeLedgerZeroRefusesForeignSidecarsWithoutConsumingEvidence() async throws {
+    let foreign = try SQLiteSessionRepository(rootDirectory: location(), databaseNamespace: "watch-foreign-wal")
+    try await foreign.setAnalyticsEnabledV4(false); let url = await foreign.databaseURL
+    let wal = try Data(contentsOf: URL(fileURLWithPath: url.path + "-wal")), shm = try Data(contentsOf: URL(fileURLWithPath: url.path + "-shm")); try await foreign.close()
+    for suffixes in [["-wal"], ["-shm"], ["-wal", "-shm"], ["-journal"]] {
+      var fired = false
+      let (f, broker) = try await watchScopeFixture(crashHook: { if $0 == .afterLedgerRename && !fired { fired = true; throw M4CatalogError.injectedFailure } }), c = f.composition
+      await c.context.account.perform(.registerWatch); XCTAssertTrue(fired)
+      let catalog = try M4OwnedDataCatalog(directory: f.prepared.seed.controlDirectory.deletingLastPathComponent().appendingPathComponent("catalog"))
+      let watch = try XCTUnwrap(catalog.watchResources()), main = URL(fileURLWithPath: watch.ledger.published.path), original = try M4CatalogIO.anchor(main)
+      XCTAssertEqual(try Data(contentsOf: main), Data())
+      var sidecars: [(URL, M4CatalogPath, Data)] = []
+      for suffix in suffixes {
+        let file = URL(fileURLWithPath: main.path + suffix), bytes = suffix == "-shm" ? shm : wal
+        XCTAssertTrue(FileManager.default.createFile(atPath: file.path, contents: bytes, attributes: [.posixPermissions: 0o600])); sidecars.append((file, try M4CatalogIO.anchor(file), bytes))
+      }
+      do { try await c.admitCurrentIdentity(); XCTFail("original Watch ledger0 must reject unknown sidecars before SQLite") } catch {}
+      XCTAssertEqual(try Data(contentsOf: main), Data()); XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(main)), try M4CatalogIO.encode(original))
+      XCTAssertEqual(try M4CatalogIO.encode(catalog.watchResources()), try M4CatalogIO.encode(Optional(watch))); XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+      for (file, anchor, bytes) in sidecars { XCTAssertEqual(try M4CatalogIO.encode(M4CatalogIO.anchor(file)), try M4CatalogIO.encode(anchor)); XCTAssertEqual(try Data(contentsOf: file), bytes); try FileManager.default.removeItem(at: file) }
+      try catalog.close(); try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+  func testWatchScopePermanentFenceAndCloseFailureKeepOriginalOwners() async throws {
+    let (f, broker) = try await watchScopeFixture(), c = f.composition
+    await c.context.account.perform(.registerWatch); XCTAssertTrue(c.context.account.canEnterRecording)
+    let handle = try await f.prepared.prepareCurrentWatchResources(expectedIdentityGeneration: c.repository.identityGenerationV4(), observed: f.observer.currentIdentity(), phoneContext: broker.context)
+    let original = try M4CatalogIO.encode(handle.attachment)
+    try await handle.ledger.recordScopeIssue(scope: handle.scope, issue: .accountChanged, at: Date(), nextAttemptAt: nil)
+    do { try await c.admitCurrentIdentity(); XCTFail("permanent Watch ledger fence cannot be reset by a new observation") } catch {}
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    let unknown = URL(fileURLWithPath: handle.ledgerCapsule.root.path).deletingLastPathComponent().appendingPathComponent("unknown-watch-evidence"), bytes = Data([0, 255, 31])
+    try bytes.write(to: unknown, options: .withoutOverwriting)
+    do { try await c.close(); XCTFail("unknown control must retain original Watch owner for retry") } catch {}
+    XCTAssertEqual(try Data(contentsOf: unknown), bytes)
+    let state = try await handle.ledger.scopeState(scope: handle.scope), binding = try await c.repository.accountBindingV4(); XCTAssertEqual(state.issue, .accountChanged); XCTAssertEqual(binding?.role, .watch)
+    XCTAssertEqual(try M4CatalogIO.encode(f.prepared.activeWatchAttachment()), try M4CatalogIO.encode(Optional(handle.attachment))); XCTAssertEqual(try M4CatalogIO.encode(handle.attachment), original)
+    do { try await c.admitCurrentIdentity(); XCTFail("retired original owner cannot revive business") } catch {}
+    try FileManager.default.removeItem(at: unknown); try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+}
+#endif
+
+#if DEBUG
+extension M4AccountCompositionTests {
+  func testWatchScopeActualCapacityBlocksBeforeDescriptorOrSQLite() async throws {
+    let (f, broker) = try await unattachedWatchScopeFixture(), c = f.composition
+    let catalog = try M4OwnedDataCatalog(directory: f.prepared.seed.controlDirectory.deletingLastPathComponent().appendingPathComponent("catalog"))
+    let (watch, store, ledger) = try await actualWatchReservation(f, catalog: catalog)
+    let root = location(); var deep = root
+    while deep.path.utf8.count < 650 { deep.appendPathComponent(String(repeating: "d", count: 38)) }
+    try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+    var controls = store.retainedControls
+    for index in 0..<(256 - controls.count) {
+      let branch = deep.appendingPathComponent(String(format: "%03d", index) + String(repeating: "b", count: 65))
+      try FileManager.default.createDirectory(at: branch, withIntermediateDirectories: false)
+      let leaf = branch.appendingPathComponent(String(repeating: "l", count: 100))
+      try FileManager.default.createDirectory(at: leaf, withIntermediateDirectories: false)
+      let file = leaf.appendingPathComponent(String(repeating: "f", count: 70))
+      XCTAssertTrue(FileManager.default.createFile(atPath: file.path, contents: Data([1]), attributes: [.posixPermissions: 0o600]))
+      controls.append(try M4CatalogIO.anchor(file))
+    }
+    func expanded(_ original: M4OwnershipCapsule) throws -> M4OwnershipCapsule {
+      M4OwnershipCapsule(version: original.version, namespaceID: original.namespaceID, componentID: original.componentID, revision: original.revision, kind: original.kind, scope: original.scope, root: original.root, retainedControls: controls, ancestors: try M4CatalogIO.ancestors([original.root] + controls))
+    }
+    let largeStore = try expanded(store), largeLedger = try expanded(ledger)
+    XCTAssertThrowsError(try catalog.reserveWatchResources(watch, store: largeStore, ledger: largeLedger)) { XCTAssertEqual($0 as? M4CatalogError, .budgetExceeded) }
+    XCTAssertNil(try catalog.watchResources()); XCTAssertTrue(try catalog.index().entries.isEmpty)
+    XCTAssertEqual(try Data(contentsOf: URL(fileURLWithPath: watch.ledger.source.path)), Data()); XCTAssertFalse(FileManager.default.fileExists(atPath: watch.ledger.published.path))
+    try catalog.close(); try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+}
+#endif
+
+
+#if DEBUG
+extension M4AccountCompositionTests {
+  func testWatchScopeFinalPhoneContextChangesNeverAdvanceOrRetargetOriginalGrant() async throws {
+    for field in ["phoneID", "epoch", "account", "cloud", "environment"] {
+      let barrier = PhoneScopeBarrier(), (f, broker) = try await watchScopeFixture(resourceReplyGate: { await barrier.hold() }), c = f.composition
+      let task = Task { await c.context.account.perform(.registerWatch) }; await barrier.waitForEntry()
+      let generation = try await c.repository.identityGenerationV4(), before = try M4CatalogIO.encode(f.prepared.activeWatchAttachment())
+      let original = broker.context
+      broker.context = try WatchRegistrationContextV4(accountID: field == "account" ? "foreign-account" : original.accountID, cloudSpaceID: field == "cloud" ? "foreign-cloud" : original.cloudSpaceID,
+        phoneID: field == "phoneID" ? "different-current-phone" : original.phoneID, activationEpoch: field == "epoch" ? 2 : original.activationEpoch, environment: field == "environment" ? .production : original.environment)
+      barrier.release(); await task.value
+      let nextGeneration = try await c.repository.identityGenerationV4(), binding = try await c.repository.accountBindingV4()
+      XCTAssertEqual(nextGeneration, generation, "fresh changed Phone context must be rejected before service admission can advance generation")
+      XCTAssertEqual(binding?.suspended, false); XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+      XCTAssertEqual(try M4CatalogIO.encode(f.prepared.activeWatchAttachment()), before)
+      XCTAssertEqual(broker.authorizationIDs.count, 1)
+      try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+  func testWatchScopeChangedPhoneContextAcrossVaultTailRefusesBeforeLedgerSQL() async throws {
+    let (f, broker) = try await watchScopeFixture(holdVault: true), c = f.composition
+    let task = Task { await c.context.account.perform(.registerWatch) }
+    guard await waitForVault(f.vault) else { return XCTFail("actual original Watch credential tail required") }
+    let generation = try await c.repository.identityGenerationV4(), original = broker.context
+    broker.context = try WatchRegistrationContextV4(accountID: original.accountID, cloudSpaceID: original.cloudSpaceID, phoneID: original.phoneID, activationEpoch: 2, environment: original.environment)
+    await f.vault.release(); await task.value
+    let nextGeneration = try await c.repository.identityGenerationV4(), binding = try await c.repository.accountBindingV4()
+    XCTAssertEqual(nextGeneration, generation); XCTAssertEqual(binding?.suspended, false)
+    XCTAssertNil(try f.prepared.activeWatchAttachment()); XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+  func testWatchScopeLastIndependentIdentityRechecksAllFourFieldsAfterOwnerTail() async throws {
+    for field in ["account", "cloud", "zone", "environment"] {
+      let barrier = PhoneScopeBarrier(), (f, broker) = try await watchScopeFixture(resourceReplyGate: { await barrier.hold() }), c = f.composition
+      let task = Task { await c.context.account.perform(.registerWatch) }; await barrier.waitForEntry()
+      let generation = try await c.repository.identityGenerationV4(), original = try M4CatalogIO.encode(f.prepared.activeWatchAttachment())
+      switch field {
+      case "account": await f.observer.setAccount("different-current-account")
+      case "cloud": await f.observer.setCloud("different-current-cloud")
+      case "zone": await f.observer.setZone("different-current-zone")
+      default: await f.observer.setEnvironment(.production)
+      }
+      barrier.release(); await task.value
+      let nextGeneration = try await c.repository.identityGenerationV4(); XCTAssertEqual(nextGeneration, generation)
+      XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+      XCTAssertEqual(try M4CatalogIO.encode(f.prepared.activeWatchAttachment()), original)
+      try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+  func testWatchScopeActualVaultAndLastObserverTailsCannotCrossCredentialExpiry() async throws {
+    for tail in ["vault", "last-observer"] {
+      let barrier = PhoneScopeBarrier()
+      let gate: (@MainActor () async -> Void)?
+      if tail == "vault" { gate = nil } else { gate = { @MainActor in await barrier.hold() } }
+      let (f, broker) = try await watchScopeFixture(holdVault: tail == "vault", resourceReplyGate: gate), c = f.composition
+      broker.expiresIn = 2
+      let start = Date(), task = Task { await c.context.account.perform(.registerWatch) }
+      if tail == "vault" {
+        guard await waitForVault(f.vault) else { return XCTFail("original Watch write tail required") }
+        while Date().timeIntervalSince(start) < 2.1 { try await Task.sleep(for: .milliseconds(20)) }
+        await f.vault.release()
+      } else {
+        await barrier.waitForEntry(); let credential = try await f.vault.credential()
+        await f.observer.holdNext(); barrier.release(); await f.observer.waitForEntry()
+        let reads = await f.vault.credentialReads
+        while Date().timeIntervalSince1970 < Double(credential.expiresAt) { try await Task.sleep(for: .milliseconds(20)) }
+        await f.observer.release(); await task.value
+        let finalReads = await f.vault.credentialReads; XCTAssertEqual(finalReads, reads, "final ready guard uses retained credential, without another vault await")
+      }
+      await task.value
+      XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+      let generation = try await c.repository.identityGenerationV4(), proof = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: generation)
+      XCTAssertNotNil(proof); let writes = await f.vault.replacements; XCTAssertEqual(writes, 1)
+      try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+  func testWatchScopeActualModelReadAwaitCrossingTTLUsesSameProductionVeto() async throws {
+    let (f, broker) = try await watchScopeFixture(), c = f.composition; broker.expiresIn = 3
+    await c.context.account.perform(.registerWatch); XCTAssertTrue(c.context.account.canEnterRecording)
+    let handle = try await f.prepared.prepareCurrentWatchResources(expectedIdentityGeneration: c.repository.identityGenerationV4(), observed: f.observer.currentIdentity(), phoneContext: broker.context)
+    let credential = try await f.vault.credential(), generation = try await c.repository.identityGenerationV4()
+    do { try await c.performAccount(.renew) } catch {}
+    let veto = c.finalWatchAdmissionCheck(handle, credential: credential), barrier = PhoneScopeBarrier()
+    let task = Task { try await c.context.account.admitIdentity(handle.attachment.binding, expectedIdentityGeneration: generation, read: {
+      let value = try await PresentationAccountAdmissionRead.read(c.repository); await barrier.hold(); return value
+    }, finalCheck: veto) }
+    await barrier.waitForEntry(); XCTAssertFalse(c.context.account.canEnterRecording)
+    while Date().timeIntervalSince1970 < Double(credential.expiresAt) { try await Task.sleep(for: .milliseconds(20)) }
+    barrier.release(); do { try await task.value; XCTFail("real model cannot publish Watch ready after its SQL-read await crossed expiry") } catch { XCTAssertEqual(error as? AuthorityError, .staleAttestation) }
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+  func testWatchScopeCloseJoinsResourceAndIdentityTailsWithoutRevivingBusiness() async throws {
+    for tail in ["resource", "identity"] {
+      let barrier = PhoneScopeBarrier()
+      let gate: (@MainActor () async -> Void)?
+      if tail == "resource" { gate = { @MainActor in await barrier.hold() } } else { gate = nil }
+      let (f, broker) = try await watchScopeFixture(resourceReplyGate: gate), c = f.composition
+      let task: Task<Void, Never>
+      if tail == "resource" { task = Task { await c.context.account.perform(.registerWatch) }; await barrier.waitForEntry() }
+      else {
+        await c.context.account.perform(.registerWatch); await f.observer.holdNext()
+        task = Task { do { try await c.admitCurrentIdentity() } catch {} }; await f.observer.waitForEntry()
+      }
+      var done = false; let close = Task { try await c.close(); done = true }
+      let retired = await waitForOriginalRetirement(c.session); XCTAssertTrue(retired)
+      try await Task.sleep(for: .milliseconds(30)); XCTAssertFalse(done)
+      let binding = try await c.repository.accountBindingV4(); XCTAssertEqual(binding?.role, .watch)
+      if tail == "resource" { barrier.release() } else { await f.observer.release() }
+      await task.value; try await close.value
+      XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+      await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+}
+#endif
+
+
+#if DEBUG
+extension M4AccountCompositionTests {
+  private func watchScopeRefuseEveryEntry(_ f: FreshServiceFixture, broker: WatchScopeBroker) async {
+    let c = f.composition, contexts = broker.contexts, ids = broker.authorizationIDs, apples = broker.appleCalls
+    let challenges = await f.relay.calls, writes = await f.vault.replacements, fences = await f.vault.fenceMovements
+    for action in [AccountUserAction.registerWatch, .signIn, .recover] {
+      await c.context.account.perform(action)
+      let nextChallenges = await f.relay.calls, nextWrites = await f.vault.replacements, nextFences = await f.vault.fenceMovements
+      XCTAssertEqual(broker.contexts, contexts); XCTAssertEqual(broker.authorizationIDs, ids); XCTAssertEqual(broker.appleCalls, apples)
+      XCTAssertEqual(nextChallenges, challenges); XCTAssertEqual(nextWrites, writes); XCTAssertEqual(nextFences, fences)
+      XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    }
+    do { try await c.admitCurrentIdentity(); XCTFail("inconsistent Watch current evidence must block public observation") } catch {}
+    XCTAssertEqual(broker.contexts, contexts); XCTAssertEqual(broker.authorizationIDs, ids)
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+  }
+  func testWatchScopeSuspendedCurrentTupleRefusesAllFourEntrances() async throws {
+    let (f, broker) = try await watchScopeFixture(), c = f.composition
+    await c.context.account.perform(.registerWatch); XCTAssertTrue(c.context.account.canEnterRecording)
+    let original = try M4CatalogIO.encode(f.prepared.activeWatchAttachment())
+    try await c.session.suspendAccount()
+    await watchScopeRefuseEveryEntry(f, broker: broker)
+    XCTAssertEqual(try M4CatalogIO.encode(f.prepared.activeWatchAttachment()), original)
+    try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+  func testWatchScopeUnknownRecoveryKeepsOriginalIDAndRequiresSignedAbandonment() async throws {
+    let (f, broker) = try await watchScopeFixture(), c = f.composition
+    broker.unavailable = true; await c.context.account.perform(.registerWatch)
+    let first = try await c.repository.pendingWatchRegistrationAttemptsV4(), original = try XCTUnwrap(first.first)
+    await c.context.account.perform(.registerWatch); await c.context.account.perform(.recover)
+    XCTAssertEqual(broker.authorizationIDs, Array(repeating: original.requestID, count: 3)); XCTAssertEqual(broker.actions, [.submit, .recover, .recover])
+    broker.unavailable = false; broker.unsignedAbandonment = true; await c.context.account.perform(.recover)
+    let stillPending = try await c.repository.pendingWatchRegistrationAttemptsV4(); XCTAssertEqual(stillPending, [original])
+    broker.unsignedAbandonment = false; broker.abandoned = true; await c.context.account.perform(.recover)
+    let closed = try await c.repository.pendingWatchRegistrationAttemptsV4(), raw = try await c.repository.watchRegistrationReceiptV4(requestID: original.requestID)
+    XCTAssertTrue(closed.isEmpty)
+    let receipt = try VerifiedAuthorityReceiptV1.verify(XCTUnwrap(raw), expected: AuthorityExpectedIntent(requestID: original.requestID, digest: original.requestDigest, operation: .registerWatch, accountID: original.context.accountID, epoch: original.context.activationEpoch), trust: AuthorityTrustConfiguration(environment: .development, publicKeys: ["service-key": AuthorityWire.base64URL(f.key.publicKey.rawRepresentation)]))
+    XCTAssertEqual(receipt.body.result, .knownAbandoned)
+    let challenges = await f.relay.calls; XCTAssertEqual(challenges, 1); XCTAssertEqual(broker.appleCalls, 0)
+    await watchScopeRefuseEveryEntry(f, broker: broker)
+    let preserved = try await c.repository.watchRegistrationAttemptV4(requestID: original.requestID), afterRaw = try await c.repository.watchRegistrationReceiptV4(requestID: original.requestID)
+    XCTAssertEqual(preserved, original); XCTAssertEqual(afterRaw, raw); XCTAssertNil(try f.prepared.activeWatchAttachment())
+    try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+  func testWatchScopeSameGenerationNewRealSignedCurrentRequestCannotRetargetOldSeal() async throws {
+    let barrier = PhoneScopeBarrier(), (f, broker) = try await watchScopeFixture(resourceReplyGate: { await barrier.hold() }), c = f.composition
+    let task = Task { await c.context.account.perform(.registerWatch) }; await barrier.waitForEntry()
+    let generation = try await c.repository.identityGenerationV4(), original = try M4CatalogIO.encode(f.prepared.activeWatchAttachment())
+    _ = try await c.watchRegistration.register(requestID: "new-real-watch-current", challengeRequestID: "new-real-watch-challenge")
+    let nextGeneration = try await c.repository.identityGenerationV4(), current = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: nextGeneration)
+    XCTAssertEqual(nextGeneration, generation); XCTAssertEqual(current?.currentWatchRequestID, "new-real-watch-current")
+    barrier.release(); await task.value
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    XCTAssertEqual(try M4CatalogIO.encode(f.prepared.activeWatchAttachment()), original)
+    let ids = broker.authorizationIDs
+    await c.context.account.perform(.recover)
+    XCTAssertEqual(broker.authorizationIDs, ids, "new current proof cannot be silently selected for an already sealed original scope")
+    try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+  func testWatchScopePublicActionAndFormalActivationRequireCompleteOriginalPairSeal() async throws {
+    var fired = false
+    let (f, broker) = try await watchScopeFixture(crashHook: { if $0 == .afterLedgerInitialization && !fired { fired = true; throw M4CatalogError.injectedFailure } }), c = f.composition
+    await c.context.account.perform(.registerWatch); XCTAssertTrue(fired)
+    let catalog = try M4OwnedDataCatalog(directory: f.prepared.seed.controlDirectory.deletingLastPathComponent().appendingPathComponent("catalog"))
+    let watch = try XCTUnwrap(catalog.watchResources()); XCTAssertNil(watch.seal)
+    let unknown = URL(fileURLWithPath: watch.ledger.published.path).deletingLastPathComponent().appendingPathComponent("foreign-watch-pair-evidence"), bytes = Data([8, 0, 255])
+    try bytes.write(to: unknown, options: .withoutOverwriting)
+    let ids = broker.authorizationIDs, challenges = await f.relay.calls
+    for action in [AccountUserAction.signIn, .registerWatch] { do { try await c.performAccount(action); XCTFail("sealed Watch namespace cannot dispatch new generic protocols") } catch {} }
+    XCTAssertEqual(broker.authorizationIDs, ids)
+    do { try await c.admitCurrentIdentity(); XCTFail("public observation must require original full Watch seal") } catch {}
+    let app = M4ApplicationContext(original: c, developmentSimulation: true)
+    do { try await app.activateControlled(); XCTFail("formal activation must use the same Watch full-seal gate") } catch {}
+    await c.context.account.perform(.recover)
+    XCTAssertEqual(broker.authorizationIDs, [try XCTUnwrap(ids.first), try XCTUnwrap(ids.first)])
+    let afterChallenges = await f.relay.calls; XCTAssertEqual(afterChallenges, challenges)
+    XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    XCTAssertEqual(try Data(contentsOf: unknown), bytes); XCTAssertEqual(try M4CatalogIO.encode(catalog.watchResources()), try M4CatalogIO.encode(Optional(watch)))
+    try FileManager.default.removeItem(at: unknown)
+    try await c.admitCurrentIdentity(); XCTAssertTrue(c.context.account.canEnterRecording); _ = try catalog.requireWatchSeal()
+    try catalog.close(); try await app.shutdown(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+  func testWatchScopePhoneProofAndCanonicalOwnerCannotBeReusedAsWatchAuthority() async throws {
+    let f = try await serviceFixture(), c = f.composition
+    await c.context.account.perform(.recover); XCTAssertTrue(c.context.account.canEnterRecording)
+    let catalog = try M4OwnedDataCatalog(directory: f.prepared.seed.controlDirectory.deletingLastPathComponent().appendingPathComponent("catalog"))
+    let before = try M4CatalogIO.encode(catalog.physicalBootstrap()), object = try XCTUnwrap(JSONSerialization.jsonObject(with: before) as? [String: Any])
+    XCTAssertNil(object["watch"], "new nil Watch field must not alter accepted Phone canonical state")
+    let calls = await f.relay.calls
+    do { _ = try await f.prepared.prepareCurrentWatchResources(expectedIdentityGeneration: c.repository.identityGenerationV4(), observed: f.observer.currentIdentity(), phoneContext: WatchRegistrationContextV4(accountID: "account-fixture", cloudSpaceID: "cloud-fixture", phoneID: "different-phone", activationEpoch: 1, environment: .development)); XCTFail("Phone factory proof cannot become Watch proof") } catch {}
+    do { try await c.performAccount(.registerWatch); XCTFail("Phone scope cannot switch protocol or consume its Store/ledger for Watch") } catch {}
+    XCTAssertEqual(try M4CatalogIO.encode(catalog.physicalBootstrap()), before)
+    let next = await f.relay.calls; XCTAssertEqual(next, calls)
+    try catalog.close(); try await c.close()
+  }
+}
+#endif
+
+#if DEBUG && os(macOS)
+extension M4AccountCompositionTests {
+  private func watchScopeSQL(_ url: URL, _ sql: String) throws -> String {
+    let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3"); process.arguments = ["-separator", "|", url.path, sql]
+    let output = Pipe(); process.standardOutput = output; process.standardError = output
+    try process.run(); let bytes = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit()
+    guard process.terminationReason == .exit, process.terminationStatus == 0 else { throw AuthorityError.unavailable }
+    return String(decoding: bytes, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+  func testWatchScopeMissingOrPartialCurrentMarkerRefusesAllFourEntrancesWithoutRepair() async throws {
+    for mode in ["missing", "partial"] {
+      let (f, broker) = try await unattachedWatchScopeFixture(), c = f.composition
+      let generation = try await c.repository.identityGenerationV4(), proof = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: generation), original = try XCTUnwrap(proof)
+      let main = f.prepared.seed.businessDatabaseURL
+      let saved = try watchScopeSQL(main, "SELECT hex(payload),checksum FROM lifecycle_steps_v4 WHERE id='watch-current-v1';").split(separator: "|").map(String.init)
+      XCTAssertEqual(saved.count, 2)
+      if mode == "missing" { _ = try watchScopeSQL(main, "DELETE FROM lifecycle_steps_v4 WHERE id='watch-current-v1';") }
+      else { _ = try watchScopeSQL(main, "UPDATE lifecycle_steps_v4 SET payload=X'7b7d',checksum='" + AuthorityWire.hash(Data("{}".utf8)) + "' WHERE id='watch-current-v1';") }
+      let corrupt = try watchScopeSQL(main, "SELECT hex(payload),checksum FROM lifecycle_steps_v4 WHERE id='watch-current-v1';")
+      await watchScopeRefuseEveryEntry(f, broker: broker)
+      XCTAssertEqual(try watchScopeSQL(main, "SELECT hex(payload),checksum FROM lifecycle_steps_v4 WHERE id='watch-current-v1';"), corrupt, "negative reads never repair or invent a current marker")
+      XCTAssertNil(try f.prepared.activeWatchAttachment())
+      // Restore only the exact actual row this test deliberately corrupted,
+      // solely so the original live owner's normal close can validate its DB.
+      _ = try watchScopeSQL(main, "INSERT INTO lifecycle_steps_v4(id,payload,checksum) VALUES('watch-current-v1',X'" + saved[0] + "','" + saved[1] + "') ON CONFLICT(id) DO UPDATE SET payload=excluded.payload,checksum=excluded.checksum;")
+      let current = try await c.repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: generation)
+      XCTAssertEqual(current?.currentWatchRequestID, original.currentWatchRequestID); XCTAssertEqual(current?.receipt.raw, original.receipt.raw)
+      try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+    }
+  }
+}
+#endif
+
+
+#if DEBUG
+extension M4AccountCompositionTests {
+  func testWatchScopeRetiredPartialLedgerCapsuleCannotBeHealedByCurrentGrant() async throws {
+    let (f, broker) = try await unattachedWatchScopeFixture(), c = f.composition
+    let catalog = try M4OwnedDataCatalog(directory: f.prepared.seed.controlDirectory.deletingLastPathComponent().appendingPathComponent("catalog"))
+    let (watch, store, ledger) = try await actualWatchReservation(f, catalog: catalog)
+    try catalog.reserveWatchResources(watch, store: store, ledger: ledger)
+    XCTAssertEqual(renameatx_np(AT_FDCWD, watch.ledger.source.path, AT_FDCWD, watch.ledger.published.path, UInt32(RENAME_EXCL)), 0)
+    try M4CatalogIO.syncDirectory(URL(fileURLWithPath: watch.ledger.published.path).deletingLastPathComponent())
+    try catalog.publishWatchLedger(watch.ledger)
+    let sql = try SQLiteCloudLedger(url: URL(fileURLWithPath: watch.ledger.published.path)); try await sql.close()
+    try catalog.record(ledger); try catalog.retire(componentID: ledger.componentID)
+    do { try await c.admitCurrentIdentity(); XCTFail("original retired capsule cannot be silently made live or resealed") } catch {}
+    let entry = try XCTUnwrap(catalog.index().entries.first { $0.capsule.componentID == ledger.componentID })
+    XCTAssertTrue(entry.retired); XCTAssertEqual(try entry.capsule.digest(), try ledger.digest())
+    XCTAssertNil(try catalog.watchResources()?.seal); XCTAssertFalse(c.context.account.canEnterRecording); XCTAssertNil(c.admittedScope)
+    try catalog.close(); try await c.close(); await broker.stop(); XCTAssertNil(broker.failure)
+  }
+}
+#endif

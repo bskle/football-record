@@ -60,7 +60,7 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
   func requireUnboundResources() throws {
     guard !closed, !closing, let resources else { throw AuthorityError.unavailable }
     try lease.verifyIdentity(); try resources.verify()
-    guard try resources.catalog.phoneResources() == nil, try resources.catalog.index().entries.isEmpty else { throw AuthorityError.unavailable }
+    guard try resources.catalog.phoneResources() == nil, try resources.catalog.watchResources() == nil, try resources.catalog.index().entries.isEmpty else { throw AuthorityError.unavailable }
   }
   func activePhoneAttachment() throws -> M4PhoneScopeAttachment? {
     guard !closed, !closing, let resources else { throw AuthorityError.unavailable }
@@ -89,6 +89,30 @@ enum M4ResourceCrashPoint: Sendable { case afterReservation, afterResourceRename
     guard try M4CatalogIO.encode(resources.catalog.requirePhoneSeal()) == M4CatalogIO.encode(handle.seal),
           let original = try resources.catalog.phoneResources(), try original.attachment.digest() == handle.attachment.digest() else { throw AuthorityError.identityChanged }
   }
+  func activeWatchAttachment() throws -> M4WatchScopeAttachment? {
+    guard !closed, !closing, let resources else { throw AuthorityError.unavailable }
+    try lease.verifyIdentity(); return try resources.catalog.watchResources()?.attachment
+  }
+  func prepareCurrentWatchResources(expectedIdentityGeneration: Int64, observed: M4CurrentAccountIdentity, phoneContext: WatchRegistrationContextV4) async throws -> M4ManagedWatchResources {
+    guard !closed, !closing, let repository, let resources, let trust = authorityTrust else { throw AuthorityError.unavailable }
+    try lease.verifyIdentity()
+    guard let proof = try await repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: expectedIdentityGeneration), proof.binding.role == .watch else { throw AuthorityError.unavailable }
+    guard !closed, !closing, M4CatalogIO.raw(proof.attempt.payload.watchPublicKey, material.signer.publicKey),
+          M4CatalogIO.raw(proof.binding.deviceID, seed.installationID), M4CatalogIO.raw(proof.binding.accountID, observed.accountID),
+          M4CatalogIO.raw(proof.binding.cloudSpaceID, observed.cloudSpaceID), proof.binding.environment == observed.environment, observed.environment == trust.environment,
+          try M4CatalogIO.encode(proof.admittedContext) == M4CatalogIO.encode(phoneContext) else { throw AuthorityError.identityChanged }
+    let handle = try resources.prepareWatch(proof: proof, observed: observed, phoneContext: phoneContext, trust: trust)
+    await resourceReplyGate?()
+    guard !closed, !closing, let current = try await repository.currentWatchRegistrationEvidenceV4(expectedIdentityGeneration: expectedIdentityGeneration),
+          try handle.attachment.matches(current), !closed, !closing else { throw AuthorityError.identityChanged }
+    try requireWatchResources(handle); return handle
+  }
+  func requireWatchResources(_ handle: M4ManagedWatchResources) throws {
+    guard !closed, !closing, let resources else { throw AuthorityError.identityChanged }
+    try lease.verifyIdentity(); try resources.verify()
+    guard try M4CatalogIO.encode(resources.catalog.requireWatchSeal()) == M4CatalogIO.encode(handle.seal),
+          let original = try resources.catalog.watchResources(), try original.attachment.digest() == handle.attachment.digest() else { throw AuthorityError.identityChanged }
+  }
   func close() async throws {
     guard !closed else { return }
     guard !closing else { throw M4BootstrapError.alreadyOpened }; closing = true; defer { closing = false }
@@ -105,6 +129,16 @@ struct M4ManagedPhoneResources: Sendable {
   let seal: M4PhonePairSeal
   var scope: CloudScope { attachment.scope }
   fileprivate init(attachment: M4PhoneScopeAttachment, ledger: SQLiteCloudLedger, storeCapsule: M4OwnershipCapsule, ledgerCapsule: M4OwnershipCapsule, seal: M4PhonePairSeal) {
+    self.attachment = attachment; self.ledger = ledger; self.storeCapsule = storeCapsule; self.ledgerCapsule = ledgerCapsule; self.seal = seal
+  }
+}
+struct M4ManagedWatchResources: Sendable {
+  let attachment: M4WatchScopeAttachment
+  let ledger: SQLiteCloudLedger
+  let storeCapsule, ledgerCapsule: M4OwnershipCapsule
+  let seal: M4WatchPairSeal
+  var scope: CloudScope { attachment.scope }
+  fileprivate init(attachment: M4WatchScopeAttachment, ledger: SQLiteCloudLedger, storeCapsule: M4OwnershipCapsule, ledgerCapsule: M4OwnershipCapsule, seal: M4WatchPairSeal) {
     self.attachment = attachment; self.ledger = ledger; self.storeCapsule = storeCapsule; self.ledgerCapsule = ledgerCapsule; self.seal = seal
   }
 }
@@ -281,6 +315,19 @@ struct M4ManagedPhoneResources: Sendable {
         if M4CatalogIO.exists(sidecar) { _ = try M4CatalogIO.anchor(sidecar); try privateFile(sidecar); names.insert(sidecar.lastPathComponent) }
       }
       if hasSource { try requireEmpty(url, original: reservation.ledgerSlot) }
+    } else if let watch = current.watch {
+      let source = URL(fileURLWithPath: watch.ledger.source.path), target = URL(fileURLWithPath: watch.ledger.published.path)
+      let hasSource = M4CatalogIO.exists(source), hasTarget = M4CatalogIO.exists(target)
+      guard hasSource != hasTarget, !watch.published || hasTarget else { throw M4CatalogError.identityChanged }
+      let url = hasSource ? source : target
+      try original(reservation.ledgerSlot, at: url); try privateFile(url)
+      guard try M4CatalogIO.encode(watch.ledger.ancestors) == M4CatalogIO.encode(M4CatalogIO.ancestors([watch.ledger.published] + controls)) else { throw M4CatalogError.identityChanged }
+      names.insert(url.lastPathComponent); try rejectSidecarsForUninitializedBusiness(url)
+      for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = URL(fileURLWithPath: url.path + suffix)
+        if M4CatalogIO.exists(sidecar) { _ = try M4CatalogIO.anchor(sidecar); try privateFile(sidecar); names.insert(sidecar.lastPathComponent) }
+      }
+      if hasSource { try requireEmpty(url, original: reservation.ledgerSlot) }
     } else {
       try requireEmpty(directory.appendingPathComponent("ledger.slot"), original: reservation.ledgerSlot); names.insert("ledger.slot")
     }
@@ -297,6 +344,7 @@ struct M4ManagedPhoneResources: Sendable {
   }
   func preparePhone(proof: VerifiedLocalAuthenticationEvidenceV4, observed: M4CurrentAccountIdentity, trust: AuthorityTrustConfiguration) throws -> M4ManagedPhoneResources {
     try verify()
+    guard try catalog.watchResources() == nil else { throw AuthorityError.identityChanged }
     let scope = try CloudScope(accountID: proof.binding.accountID, cloudSpaceID: proof.binding.cloudSpaceID, zoneID: observed.zoneID, activationEpoch: proof.binding.activationEpoch)
     let phone: M4PhoneResourceState
     if let prior = try catalog.phoneResources() {
@@ -337,6 +385,53 @@ struct M4ManagedPhoneResources: Sendable {
     let seal = try catalog.sealPhoneResources(store: store, ledger: ledgerCapsule)
     try crashHook?(.afterPairSeal)
     return M4ManagedPhoneResources(attachment: phone.attachment, ledger: ledger, storeCapsule: store, ledgerCapsule: ledgerCapsule, seal: seal)
+  }
+  func prepareWatch(proof: VerifiedLocalWatchRegistrationEvidenceV4, observed: M4CurrentAccountIdentity, phoneContext: WatchRegistrationContextV4, trust: AuthorityTrustConfiguration) throws -> M4ManagedWatchResources {
+    try verify()
+    guard try catalog.phoneResources() == nil, try M4CatalogIO.encode(phoneContext) == M4CatalogIO.encode(proof.admittedContext) else { throw AuthorityError.identityChanged }
+    let scope = try CloudScope(accountID: proof.binding.accountID, cloudSpaceID: proof.binding.cloudSpaceID, zoneID: observed.zoneID, activationEpoch: proof.binding.activationEpoch)
+    let watch: M4WatchResourceState
+    if let prior = try catalog.watchResources() {
+      guard try prior.attachment.matches(proof), prior.attachment.scope == scope else { throw AuthorityError.identityChanged }; watch = prior
+    } else {
+      let id = UUID().uuidString
+      let attachment = M4WatchScopeAttachment(version: 1, attachmentID: UUID().uuidString, physicalReservationID: reservation.reservationID,
+        binding: proof.binding, identityGeneration: proof.identityGeneration, acceptedGeneration: proof.acceptedGeneration,
+        currentWatchRequestID: proof.currentWatchRequestID, attempt: proof.attempt, admittedContext: proof.admittedContext,
+        watchDeviceKeyID: proof.watchDeviceKeyID, receiptRaw: proof.receipt.raw, latestMigration: proof.latestMigration, scope: scope)
+      let target = M4CatalogPath(path: reservation.directory.path + "/ledger-" + id + ".sqlite", device: reservation.ledgerSlot.device, inode: reservation.ledgerSlot.inode, directory: false)
+      let descriptor = M4WatchLedgerDescriptor(ledgerID: id, source: reservation.ledgerSlot, published: target, ancestors: try M4CatalogIO.ancestors([target] + controls))
+      watch = M4WatchResourceState(attachment: attachment, ledger: descriptor, published: false, seal: nil)
+    }
+    try watch.validate(reservation)
+    let verified = try VerifiedAuthorityReceiptV1.verify(watch.attachment.receiptRaw,
+      expected: AuthorityExpectedIntent(requestID: watch.attachment.currentWatchRequestID, digest: watch.attachment.attempt.requestDigest, operation: .registerWatch, accountID: watch.attachment.binding.accountID, epoch: scope.activationEpoch), trust: trust)
+    guard verified.raw == proof.receipt.raw, verified.body.result == .registered, proof.binding.role == .watch,
+          M4CatalogIO.raw(verified.body.registration?.watchID ?? "", proof.attempt.payload.watchID),
+          M4CatalogIO.raw(verified.body.registration?.watchPublicKey ?? "", proof.attempt.payload.watchPublicKey) else { throw AuthorityError.unavailable }
+    let store = try capsule(reservation.businessDatabase, kind: .businessStore, id: "m4-business-store", scope: scope)
+    let ledgerCapsule = try capsule(watch.ledger.published, kind: .cloudLedger, id: watch.ledger.componentID, scope: scope)
+    try catalog.reserveWatchResources(watch, store: store, ledger: ledgerCapsule)
+    try crashHook?(.afterLedgerReservation)
+    let source = URL(fileURLWithPath: watch.ledger.source.path), target = URL(fileURLWithPath: watch.ledger.published.path)
+    let hasSource = M4CatalogIO.exists(source), hasTarget = M4CatalogIO.exists(target)
+    guard hasSource != hasTarget else { throw M4CatalogError.identityChanged }
+    if hasSource {
+      guard !watch.published else { throw M4CatalogError.identityChanged }
+      try requireEmpty(source, original: reservation.ledgerSlot); try rejectSidecarsForUninitializedBusiness(source)
+      guard renameatx_np(AT_FDCWD, source.path, AT_FDCWD, target.path, UInt32(RENAME_EXCL)) == 0 else { throw M4CatalogError.storageBlocked }
+      try crashHook?(.afterLedgerRename)
+    }
+    try original(reservation.ledgerSlot, at: target); try privateFile(target); try rejectSidecarsForUninitializedBusiness(target)
+    try M4CatalogIO.syncDirectory(target.deletingLastPathComponent())
+    try catalog.publishWatchLedger(watch.ledger); try verify()
+    if ledger == nil { ledger = try SQLiteCloudLedger(url: target) }
+    guard let ledger else { throw M4CatalogError.storageBlocked }
+    try crashHook?(.afterLedgerInitialization)
+    try store.verifyCurrent(); try ledgerCapsule.verifyCurrent()
+    let seal = try catalog.sealWatchResources(store: store, ledger: ledgerCapsule)
+    try crashHook?(.afterPairSeal)
+    return M4ManagedWatchResources(attachment: watch.attachment, ledger: ledger, storeCapsule: store, ledgerCapsule: ledgerCapsule, seal: seal)
   }
   func close() async throws {
     guard !closed else { return }
