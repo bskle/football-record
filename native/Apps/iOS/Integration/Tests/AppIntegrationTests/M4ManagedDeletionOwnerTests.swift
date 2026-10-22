@@ -49,6 +49,80 @@ import CloudSync
     XCTAssertNotNil(saved)
     return id
   }
+  func testFirstPhoneWithoutActualReauthenticationRefusesManagedCreationBeforeRetirement() async throws {
+    try await withFixture { f in
+      _ = try await f.cli.command("revoker")
+      let c = try await f.bootstrapStrict(workout: M4HTTPWorkoutGateway())
+      _ = try await f.signIn()
+      print("Task3 signed-in ready=\(c.context.account.canEnterRecording) reauthPresent=\(c.reauthenticationID != nil)")
+      _ = try await self.normalCompleted(c.context, fixture: f)
+      _ = try await f.refreshIdentity()
+      let controller = try c.managedDeletionController()
+      var stages = 0
+      controller.observation = { _ in stages += 1 }
+      XCTAssertTrue(try c.managedDeletionController() === controller)
+      let parent = "managed-original-parent", confirmedAt = Int64(Date().timeIntervalSince1970)
+      XCTAssertTrue(c.reauthenticationID == nil)
+      let binding = try await c.repository.accountBindingV4()
+      let auth = try await c.repository.currentAuthRequestIDV4()
+      let replies = f.replies
+      do { _ = try await controller.create(requestID: parent, confirmedAt: confirmedAt); XCTFail("missing actual auth value cannot become deletion authority") }
+      catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+      let sagas = try await c.repository.deletionSagasV4()
+      let afterBinding = try await c.repository.accountBindingV4()
+      let afterAuth = try await c.repository.currentAuthRequestIDV4()
+      XCTAssertTrue(sagas.isEmpty); XCTAssertEqual(stages, 0)
+      XCTAssertTrue(afterBinding == binding); XCTAssertTrue(afterAuth == auth)
+      XCTAssertEqual(f.replies, replies)
+      XCTAssertTrue(c.context.account.canEnterRecording)
+      do { _ = try controller.snapshot(); XCTFail("refusal must not reserve or bind a catalog") }
+      catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+    }
+  }
+  func testManagedFactoryStronglyRetainsSameControllerUntilSuccessfulOriginalClose() async throws {
+    try await withFixture { f in
+      let c = try await f.bootstrapStrict(workout: M4HTTPWorkoutGateway())
+      var borrowed: M4DeletionResumeController? = try c.managedDeletionController()
+      weak let probe = borrowed
+      borrowed = nil
+      XCTAssertNotNil(probe)
+      XCTAssertTrue(try c.managedDeletionController() === probe)
+      try await c.close()
+      XCTAssertNil(probe)
+    }
+  }
+  func testFailedFinalCloseRetainsSameStoppedManagedControllerForOriginalCloseRetry() async throws {
+    try await withFixture { f in
+      let c = try await f.bootstrapStrict(workout: M4HTTPWorkoutGateway())
+      var borrowed: M4DeletionResumeController? = try c.managedDeletionController()
+      weak let probe = borrowed
+      borrowed = nil
+      try await c.quiesceBusiness()
+      let file = f.nativeRoot.appendingPathComponent("development/mailbox/incoming/task3-owned-close-veto")
+      let bytes = Data([14, 2, 9]); try bytes.write(to: file)
+      do { try await c.close(); XCTFail("undrained original adapter must preserve the same owner") }
+      catch { XCTAssertEqual(error as? M4LocalErasureError, .pendingTransfer) }
+      XCTAssertNotNil(probe)
+      XCTAssertTrue(try c.managedDeletionController() === probe)
+      let retained = try await c.repository.deletionSagasV4(); XCTAssertTrue(retained.isEmpty)
+      do { _ = try await probe?.create(requestID: "after-failed-final-close", confirmedAt: 1); XCTFail("failed final close does not reopen stopped control") }
+      catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+      guard try Data(contentsOf: file) == bytes else { throw M4HTTPFixtureError.mailboxChanged }
+      try FileManager.default.removeItem(at: file)
+      try await c.close(); XCTAssertNil(probe)
+    }
+  }
+  func testManagedResumeWithoutOriginalSagaNeverBindsOrCreatesParent() async throws {
+    try await withFixture { f in
+      let c = try await f.bootstrapStrict(workout: M4HTTPWorkoutGateway())
+      let controller = try c.managedDeletionController()
+      do { _ = try await controller.resume(requestID: "unknown-original-parent"); XCTFail("unknown is not permission to create") }
+      catch { XCTAssertEqual(error as? LifecycleClientError, .unknownOriginal) }
+      let sagas = try await c.repository.deletionSagasV4(); XCTAssertTrue(sagas.isEmpty)
+      do { _ = try controller.snapshot(); XCTFail("unknown resume has no original borrow") }
+      catch { XCTAssertEqual(error as? AuthorityError, .unavailable) }
+    }
+  }
   func testFoundationPublicDeleteRemainsUnsupportedAndPreservesOriginalFacts() async throws {
   try await withFixture { f in
     _ = try await f.cli.command("revoker")

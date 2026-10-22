@@ -300,7 +300,7 @@ import MatchPresentation
       do { try await M4GuardedLocalTransportDeletion(admission: admission).purgeBusinessCopies(LocalTransportDeletionRequest(scope: f.scope, saga: result)); XCTFail("direct transport entrance must require the same real Health seal") }
       catch { XCTAssertEqual(error as? M4HealthBridgeError, expected) }
       let retained = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
-      XCTAssertEqual(retained?.recoveryCapability, f.saga.recoveryCapability); XCTAssertEqual(retained?.intent, f.saga.intent)
+      XCTAssertTrue(retained?.recoveryCapability == f.saga.recoveryCapability); XCTAssertEqual(retained?.intent, f.saga.intent)
       try await f.close()
     }
   }
@@ -347,13 +347,13 @@ import MatchPresentation
     let catalog = try M4OwnedDataCatalog(directory: original.root.appendingPathComponent("catalog")), ledger = try SQLiteCloudLedger(url: original.root.appendingPathComponent("cloud-ledger.sqlite"))
     let persisted = try await composition.repository.deletionSagaV4(requestID: original.saga.intent.requestID)
     let f = GateFixture(root: original.root, composition: composition, prepared: prepared, catalog: catalog, ledger: ledger, scope: original.scope, saga: try XCTUnwrap(persisted), database: seed.businessDatabaseURL)
-    XCTAssertEqual(f.saga.intent, original.saga.intent); XCTAssertEqual(f.saga.recoveryCapability, original.saga.recoveryCapability)
+    XCTAssertEqual(f.saga.intent, original.saga.intent); XCTAssertTrue(f.saga.recoveryCapability == original.saga.recoveryCapability)
     let before = try await f.composition.repository.analyticsEnabledV4(); XCTAssertTrue(before)
     let admission = M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger)
     let result = try await M4DeletionResumeController(admission: admission).resume(requestID: f.saga.intent.requestID)
     let enabled = try await f.composition.repository.analyticsEnabledV4(), state = try await f.ledger.scopeState(scope: f.scope)
     XCTAssertFalse(enabled); XCTAssertEqual(state.issue, .accountChanged)
-    XCTAssertEqual(result.intent, f.saga.intent); XCTAssertEqual(result.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(result.intent, f.saga.intent); XCTAssertTrue(result.recoveryCapability == f.saga.recoveryCapability)
     XCTAssertFalse(result.backendDeleted); XCTAssertEqual(try businessWitnessCount(f.database), 1)
     try await f.close()
   }
@@ -402,7 +402,7 @@ import MatchPresentation
     XCTAssertTrue(plan.entries.contains(where: { $0.retired && $0.capsule.kind == .cloudLedger }))
     let firstBytes = try M4CatalogIO.encode(receipts)
     let replay = try await controller.resume(requestID: result.intent.requestID)
-    XCTAssertTrue(replay.finished); XCTAssertEqual(replay.intent, f.saga.intent); XCTAssertEqual(replay.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertTrue(replay.finished); XCTAssertEqual(replay.intent, f.saga.intent); XCTAssertTrue(replay.recoveryCapability == f.saga.recoveryCapability)
     XCTAssertEqual(try M4CatalogIO.encode(f.catalog.receipts(requestID: result.intent.requestID)), firstBytes)
     try executeSQL(f.root.appendingPathComponent("retired-ledger.sqlite"), "CREATE TABLE future_business(value BLOB) STRICT; INSERT INTO future_business VALUES(X'040506')")
     do { _ = try await controller.resume(requestID: result.intent.requestID); XCTFail("historical transport completed cannot bypass every actual leaf replay") }
@@ -427,7 +427,7 @@ import MatchPresentation
     let firstReceipts = try f.catalog.receipts(requestID: first.intent.requestID)
     XCTAssertTrue(firstReceipts.contains(where: { $0.kind == .businessStore })); XCTAssertFalse(firstReceipts.contains(where: { $0.kind == .deviceSync }))
     let retry = try await M4DeletionResumeController(admission: controlledAggregateAdmission(f), cloudDeletion: cloud).resume(requestID: first.intent.requestID)
-    XCTAssertTrue(retry.finished); XCTAssertEqual(retry.intent, first.intent); XCTAssertEqual(retry.recoveryCapability, first.recoveryCapability)
+    XCTAssertTrue(retry.finished); XCTAssertEqual(retry.intent, first.intent); XCTAssertTrue(retry.recoveryCapability == first.recoveryCapability)
     for original in firstReceipts { XCTAssertTrue(try f.catalog.receipts(requestID: first.intent.requestID).contains(where: { try M4CatalogIO.encode($0) == M4CatalogIO.encode(original) })) }
     try await f.close()
   }
@@ -460,22 +460,115 @@ import MatchPresentation
     XCTAssertTrue(try f.catalog.receipts(requestID: f.saga.intent.requestID).isEmpty)
     try await f.close(); try await other.close()
   }
+  func testResumeAndReconcileDoNotOverlapOriginalHTTP() async throws {
+    let relay = GateMultiHeldAuthorityRelay()
+    let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false, authorityRelay: relay, hasCredential: true)
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger))
+    let resume = Task { try await controller.resume(requestID: f.saga.intent.requestID) }
+    var deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while await relay.calls == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    let entered = await relay.calls
+    XCTAssertEqual(entered, 1)
+    let reconcile = Task { try await controller.reconcile(f.saga.intent) }
+    deadline = .now.advanced(by: .seconds(2))
+    while await relay.calls < 2, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    let overlapping = await relay.calls
+    XCTAssertEqual(overlapping, 1, "a second operation must wait for the original HTTP task, including its return tail")
+    await relay.releaseAll()
+    _ = await resume.result; _ = await reconcile.result
+    try await f.close()
+  }
+  func testDuplicateResumeAndQueuedControlsJoinOneOriginalTaskOnConcurrentStop() async throws {
+    let relay = GateMultiHeldAuthorityRelay()
+    let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false, authorityRelay: relay, hasCredential: true)
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger))
+    let first = Task { try await controller.resume(requestID: f.saga.intent.requestID) }
+    var deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while await relay.calls == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    let duplicate = Task { try await controller.resume(requestID: f.saga.intent.requestID) }
+    let recovery = Task { try await controller.recover() }
+    let control = Task { try await controller.reconcile(f.saga.intent) }
+    try await Task.sleep(for: .milliseconds(20))
+    first.cancel()
+    var stopped = 0
+    let stop1 = Task { try await controller.stopAndJoin(); stopped += 1 }
+    let stop2 = Task { try await controller.stopAndJoin(); stopped += 1 }
+    try await Task.sleep(for: .milliseconds(20))
+    XCTAssertEqual(stopped, 0)
+    let calls = await relay.calls; XCTAssertEqual(calls, 1)
+    let current = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
+    XCTAssertTrue(current?.intent.canonicalRequest == f.saga.intent.canonicalRequest)
+    await relay.releaseAll()
+    _ = await first.result; _ = await duplicate.result; _ = await recovery.result; _ = await control.result
+    try await stop1.value; try await stop2.value
+    XCTAssertEqual(stopped, 2)
+    deadline = .now.advanced(by: .seconds(2))
+    let finalCalls = await relay.calls; XCTAssertEqual(finalCalls, 1)
+    do { _ = try await controller.recover(); XCTFail("final stop closes every kind of admission") }
+    catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
+    try await f.close()
+  }
+  func testReconcileDeduplicatesExactInputAndRejectsConflictingSameRawParent() async throws {
+    let relay = GateMultiHeldAuthorityRelay()
+    let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false, authorityRelay: relay, hasCredential: true)
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger))
+    let first = Task { try await controller.reconcile(f.saga.intent) }
+    let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    while await relay.calls == 0, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(2)) }
+    let duplicate = Task { try await controller.reconcile(f.saga.intent) }
+    try await Task.sleep(for: .milliseconds(20))
+    var fields = f.saga.intent.fields; fields.reauthenticationID = "different-immutable-auth"
+    let conflicting = try ControlIntentV1(requestID: f.saga.intent.requestID, operation: .deleteAccount, fields: fields)
+    do { _ = try await controller.reconcile(conflicting); XCTFail("same raw parent cannot replace its canonical request") }
+    catch { XCTAssertEqual(error as? AuthorityError, .conflict) }
+    let calls = await relay.calls; XCTAssertEqual(calls, 1)
+    await relay.releaseAll(); _ = await first.result; _ = await duplicate.result
+    // A failed predecessor must release the FIFO for a later real original call.
+    _ = try? await controller.resume(requestID: f.saga.intent.requestID)
+    let actualCalls = await relay.calls; XCTAssertGreaterThan(actualCalls, 1)
+    try await f.close()
+  }
+  func testSelfCloseAndStopRejectBeforeJoiningAnExistingExternalClose() async throws {
+    let f = try await deletionGuardFixture(healthIssue: nil, acceptBackend: false)
+    let controller = M4DeletionResumeController(admission: M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger))
+    let gate = GateControllerStage()
+    var quiesced = false, selfCloseRejected = false, selfStopRejected = false
+    controller.observation = { [weak controller] phase in
+      guard phase == .beforeResume, let controller else { return }
+      try await f.composition.quiesceBusiness(); quiesced = true
+      await gate.pause()
+      do { try await f.composition.close(); XCTFail("in-flight operation must not join external close waiting on itself") }
+      catch { selfCloseRejected = error as? AuthorityError == .conflict }
+      do { try await controller.stopAndJoin(); XCTFail("self caller must be rejected before the existing stop task") }
+      catch { selfStopRejected = error as? AuthorityError == .conflict }
+      throw GateControllerVeto.stage
+    }
+    let operation = Task { try await controller.resume(requestID: f.saga.intent.requestID) }
+    await gate.waitForEntry()
+    var closing = false, closed = false
+    let close = Task { closing = true; try await f.composition.close(); closed = true }
+    while !closing { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
+    XCTAssertFalse(closed)
+    await gate.release(); _ = await operation.result; try await close.value
+    XCTAssertTrue(quiesced && selfCloseRejected && selfStopRejected && closed)
+    try await f.close()
+  }
   func testControllerFinalStopJoinsHeldOriginalCloudTaskAndRetainsSagaFacade() async throws {
     let f = try await deletionGuardFixture(healthIssue: .missingMapping), cloud = GateHeldCloud(), admission = M4DeletionAdmission(composition: f.composition, catalog: f.catalog, scope: f.scope, ledger: f.ledger)
     let controller = M4DeletionResumeController(admission: admission, cloudDeletion: cloud)
     let running = Task { try await controller.resume(requestID: f.saga.intent.requestID) }
     await cloud.waitForEntry()
     var stopping = false, done = false
-    let stop = Task { stopping = true; await controller.stopAndJoin(); done = true }
+    let stop = Task { stopping = true; try await controller.stopAndJoin(); done = true }
     while !stopping { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
     XCTAssertFalse(done, "final stop must join the original cancellation-insensitive control task")
     let pending = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
-    XCTAssertEqual(pending?.intent, f.saga.intent); XCTAssertEqual(pending?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(pending?.intent, f.saga.intent); XCTAssertTrue(pending?.recoveryCapability == f.saga.recoveryCapability)
     do { _ = try await controller.resume(requestID: f.saga.intent.requestID); XCTFail("stopped controller cannot admit a later resume") } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
-    await cloud.release(); _ = await running.result; await stop.value
+    await cloud.release(); _ = await running.result; try await stop.value
     let actual = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
     XCTAssertEqual(actual?.cloudProgress, .completed); XCTAssertEqual(actual?.localProgress, .failed)
-    XCTAssertEqual(actual?.intent, f.saga.intent); XCTAssertEqual(actual?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(actual?.intent, f.saga.intent); XCTAssertTrue(actual?.recoveryCapability == f.saga.recoveryCapability)
     XCTAssertEqual(try businessWitnessCount(f.database), 1)
     do { _ = try await controller.recover(); XCTFail("stopped automatic recovery is closed") } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
     try await f.close()
@@ -486,15 +579,15 @@ import MatchPresentation
     let running = Task { try await controller.reconcile(f.saga.intent) }
     await relay.waitForEntry()
     var stopping = false, done = false
-    let stop = Task { stopping = true; await controller.stopAndJoin(); done = true }
+    let stop = Task { stopping = true; try await controller.stopAndJoin(); done = true }
     while !stopping { await Task.yield() }; try await Task.sleep(for: .milliseconds(20))
     XCTAssertFalse(done, "generic reconciliation owns its same original HTTP operation until it returns")
     let current = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
     XCTAssertEqual(current?.intent, f.saga.intent); XCTAssertFalse(current?.backendDeleted ?? true)
     do { _ = try await controller.reconcile(f.saga.intent); XCTFail("final stop closes generic control admission") } catch { XCTAssertEqual(error as? AuthorityError, .identityChanged) }
-    await relay.release(); _ = await running.result; await stop.value
+    await relay.release(); _ = await running.result; try await stop.value
     let actual = try await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID), calls = await relay.calls
-    XCTAssertEqual(calls, 1); XCTAssertEqual(actual?.intent, f.saga.intent); XCTAssertEqual(actual?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(calls, 1); XCTAssertEqual(actual?.intent, f.saga.intent); XCTAssertTrue(actual?.recoveryCapability == f.saga.recoveryCapability)
     XCTAssertFalse(actual?.backendDeleted ?? true); XCTAssertEqual(try businessWitnessCount(f.database), 1)
     try await f.close()
   }
@@ -505,7 +598,7 @@ import MatchPresentation
     await f.composition.context.shutdown()
     XCTAssertNotNil(f.composition.lastCloseFailure, "Void API records typed failure instead of pretending the original owner closed")
     let retainedSaga = try? await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
-    XCTAssertEqual(retainedSaga?.intent, f.saga.intent); XCTAssertEqual(retainedSaga?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(retainedSaga?.intent, f.saga.intent); XCTAssertTrue(retainedSaga?.recoveryCapability == f.saga.recoveryCapability)
     do { try await f.composition.close(); XCTFail("throwing owner close exposes the same real lease-preflight refusal") }
     catch { XCTAssertEqual(error as? M4BootstrapError, .identityUnavailable) }
     let foreign = f.root.appendingPathComponent("foreign-owner-preserved")
@@ -514,7 +607,7 @@ import MatchPresentation
     let prepared = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }
     let reopened = try prepared.openRepository(authorityTrust: f.composition.client.trust)
     let saga = try await reopened.deletionSagaV4(requestID: f.saga.intent.requestID)
-    XCTAssertEqual(saga?.intent, f.saga.intent); XCTAssertEqual(saga?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(saga?.intent, f.saga.intent); XCTAssertTrue(saga?.recoveryCapability == f.saga.recoveryCapability)
     XCTAssertEqual(try Data(contentsOf: foreign), Data("foreign-owner-preserved".utf8))
     try f.catalog.close(); try await f.ledger.close(); try await prepared.close()
   }
@@ -718,7 +811,7 @@ import MatchPresentation
     do { try await adapters.assertDrained(scope: f.scope, requestID: f.saga.intent.requestID, parentIntentDigest: f.saga.intent.digest); XCTFail("unknown mailbox payload cannot authorize local erasure") } catch { XCTAssertEqual(error as? M4LocalErasureError, .pendingTransfer) }
     do { try await f.composition.close(); XCTFail("undrained client final close must preserve the original DB") } catch { XCTAssertEqual(error as? M4LocalErasureError, .pendingTransfer) }
     let retained = try? await f.composition.repository.deletionSagaV4(requestID: f.saga.intent.requestID)
-    XCTAssertEqual(retained?.intent, f.saga.intent); XCTAssertEqual(retained?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(retained?.intent, f.saga.intent); XCTAssertTrue(retained?.recoveryCapability == f.saga.recoveryCapability)
     XCTAssertEqual(try Data(contentsOf: file), bytes); XCTAssertNotNil(f.composition.lastCloseFailure)
     do { _ = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }; XCTFail("failed final close retains original identity lease") } catch { XCTAssertEqual(error as? M4BootstrapError, .leaseInUse) }
     // Only this fixture removes its own exact byte-matched test file.
@@ -726,7 +819,7 @@ import MatchPresentation
     try await f.composition.close(); XCTAssertNil(f.composition.lastCloseFailure)
     let prepared = try await M4IdentityBootstrap.prepare(root: f.prepared.seed.root, namespace: f.prepared.seed.namespace, controlDirectory: f.prepared.seed.controlDirectory) { _ in f.prepared.material }
     let repository = try prepared.openRepository(authorityTrust: f.composition.client.trust), original = try await repository.deletionSagaV4(requestID: f.saga.intent.requestID)
-    XCTAssertEqual(original?.intent, f.saga.intent); XCTAssertEqual(original?.recoveryCapability, f.saga.recoveryCapability)
+    XCTAssertEqual(original?.intent, f.saga.intent); XCTAssertTrue(original?.recoveryCapability == f.saga.recoveryCapability)
     try await prepared.close(); try f.catalog.close(); try await f.ledger.close()
   }
   private struct ProtocolRequest {
@@ -891,6 +984,32 @@ private actor GateHeldCloud: CloudAccountDeletionDriver {
     await withCheckedContinuation { held = $0; waiter?.resume(); waiter = nil }
   }
   func release() { held?.resume(); held = nil }
+}
+private enum GateControllerVeto: Error { case stage }
+private actor GateControllerStage {
+  private var entered = false, released = false
+  private var held: CheckedContinuation<Void, Never>?
+  func pause() async {
+    entered = true
+    if !released { await withCheckedContinuation { held = $0 } }
+  }
+  func waitForEntry() async { while !entered { await Task.yield() } }
+  func release() { released = true; held?.resume(); held = nil }
+}
+private actor GateMultiHeldAuthorityRelay: AuthorityHTTPRelay {
+  private(set) var calls = 0
+  private var released = false
+  private var held: [CheckedContinuation<Void, Never>] = []
+  func send(_ request: AuthorityHTTPRequest) async throws -> AuthorityHTTPResponse {
+    calls += 1
+    if !released { await withCheckedContinuation { held.append($0) } }
+    throw URLError(.networkConnectionLost)
+  }
+  func releaseAll() {
+    released = true
+    let pending = held; held.removeAll()
+    pending.forEach { $0.resume() }
+  }
 }
 private actor GateHeldAuthorityRelay: AuthorityHTTPRelay {
   private(set) var calls = 0

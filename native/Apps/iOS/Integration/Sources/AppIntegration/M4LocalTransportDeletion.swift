@@ -113,15 +113,49 @@ struct M4UnavailableLocalCopyDrain: M4LocalCopyDrainChecking {
   let allowedHealthSourceOrigin: M4HealthSourceEvidence.Origin
   let localLeaves: M4LocalTransportLeaves?
   let copyDrain: any M4LocalCopyDrainChecking
+  private weak var managedController: M4DeletionResumeController?
   init(composition: M4AccountComposition, catalog: M4OwnedDataCatalog, scope: CloudScope, ledger: any CloudLedger,
        healthArtifacts: M4RetainedHealthArtifactStore? = nil, healthLedger: SQLiteHealthDeletionLedger? = nil,
        allowedHealthSourceOrigin: M4HealthSourceEvidence.Origin = .platformObservation,
-       localLeaves: M4LocalTransportLeaves? = nil, copyDrain: any M4LocalCopyDrainChecking = M4UnavailableLocalCopyDrain()) {
+       localLeaves: M4LocalTransportLeaves? = nil, copyDrain: any M4LocalCopyDrainChecking = M4UnavailableLocalCopyDrain(), managedController: M4DeletionResumeController? = nil) {
     self.composition = composition; self.catalog = catalog; self.scope = scope; self.ledger = ledger
     self.healthArtifacts = healthArtifacts; self.healthLedger = healthLedger; self.allowedHealthSourceOrigin = allowedHealthSourceOrigin
     self.localLeaves = localLeaves; self.copyDrain = copyDrain
+    self.managedController = managedController
+  }
+  func positiveGate(requireFullSeal: Bool = true) async throws {
+    guard try catalog.physicalBootstrap() != nil else { return }
+    guard let managedController, let creation = try catalog.deletionCreation(),
+          let actual = try await composition.repository.deletionSagaV4(requestID: creation.requestID) else { throw AuthorityError.identityChanged }
+    let borrow = try await composition.verifyManagedDeletionParent(controller: managedController, saga: actual, requireFullSeal: requireFullSeal)
+    guard borrow.catalog === catalog, let originalLedger = ledger as? SQLiteCloudLedger, borrow.ledger === originalLedger else { throw AuthorityError.identityChanged }
+  }
+  func intentGate(_ intent: ControlIntentV1) async throws {
+    guard try catalog.physicalBootstrap() != nil else { return }
+    guard intent.operation == .deleteAccount, let creation = try catalog.deletionCreation(),
+          M4CatalogIO.raw(creation.requestID, intent.requestID),
+          let actual = try await composition.repository.deletionSagaV4(requestID: intent.requestID),
+          actual.intent.canonicalRequest == intent.canonicalRequest else { throw AuthorityError.intentMismatch }
+    try await positiveGate()
+  }
+  func analyticsGate(_ enabled: Bool) async throws {
+    guard try catalog.physicalBootstrap() != nil else { return }
+    guard !enabled, let managedController, let creation = try catalog.deletionCreation() else { throw AuthorityError.identityChanged }
+    try await positiveGate(requireFullSeal: !managedController.isDispatching(creation.requestID))
+  }
+  func creationCommitted(_ saga: DeletionSagaV4) async throws {
+    try await positiveGate(requireFullSeal: false)
+    _ = try catalog.requireOriginalReservation(saga: saga)
+    try await composition.session.setAnalyticsEnabled(false)
+    try await positiveGate(requireFullSeal: false)
+    do { try await ledger.recordScopeIssue(scope: scope, issue: .accountChanged, at: Date(), nextAttemptAt: nil) }
+    catch let error as CloudError where error.issue == .accountChanged {
+      guard try await ledger.scopeState(scope: scope).issue == .accountChanged else { throw error }
+    }
+    try await positiveGate(requireFullSeal: false)
   }
   func resume(requestID: String) async throws -> DeletionSagaV4 {
+    try await positiveGate()
     guard let original = try await composition.repository.deletionSagaV4(requestID: requestID) else { throw LifecycleClientError.unknownOriginal }
     let plan = try catalog.requireOriginalParentSeal(saga: original)
     guard plan.scope == scope else { throw AuthorityError.intentMismatch }
@@ -130,20 +164,35 @@ struct M4UnavailableLocalCopyDrain: M4LocalCopyDrainChecking {
     _ = try await rawArtifact(plan)
     // requestDeletion's prior-saga return skips these operations. Restore them
     // idempotently on every original resume, including reopen and generic retry.
+    try await positiveGate()
     try await composition.session.setAnalyticsEnabled(false)
+    try await positiveGate()
     do { try await ledger.recordScopeIssue(scope: scope, issue: .accountChanged, at: Date(), nextAttemptAt: nil) }
     catch let error as CloudError where error.issue == .accountChanged {
       guard try await ledger.scopeState(scope: scope).issue == .accountChanged else { throw error }
     }
     guard let actual = try await composition.repository.deletionSagaV4(requestID: requestID), actual.intent == original.intent else { throw AuthorityError.intentMismatch }
     _ = try catalog.requireOriginalParentSeal(saga: actual)
+    try await positiveGate()
     return actual
   }
   func creation(_ saga: DeletionSagaV4) async throws {
+    let managed = try catalog.physicalBootstrap() != nil
+    if managed {
+      guard let managedController else { throw AuthorityError.identityChanged }
+      let borrow = try managedController.creationBorrow()
+      guard borrow.catalog === catalog, let originalLedger = ledger as? SQLiteCloudLedger, borrow.ledger === originalLedger else { throw AuthorityError.identityChanged }
+      try await composition.verifyManagedDeletionCreation(controller: managedController, proposed: saga, borrow: borrow)
+    }
     let plan = try catalog.requireOriginalReservation(saga: saga)
     guard plan.scope == scope else { throw AuthorityError.intentMismatch }
     try await composition.quiesceBusiness(); try await sameFacade(); _ = try await rawArtifact(plan)
     _ = try catalog.requireOriginalReservation(saga: saga)
+    if managed {
+      guard let managedController else { throw AuthorityError.identityChanged }
+      try await composition.verifyManagedDeletionCreation(controller: managedController, proposed: saga, borrow: managedController.creationBorrow())
+      try managedController.recordDispatchProposal(saga)
+    }
   }
   func localErase(requestID: String) async throws -> DeletionSagaV4 {
     let original = try await resume(requestID: requestID), plan = try catalog.requireOriginalParentSeal(saga: original)
@@ -188,6 +237,7 @@ struct M4UnavailableLocalCopyDrain: M4LocalCopyDrainChecking {
   private func localPrerequisites(_ plan: M4FrozenDeletionPlan) async throws {
     guard let leaves = localLeaves, leaves.catalog === catalog else { throw M4LocalErasureError.unsupportedComponent }
     try await copyDrain.assertDrained(scope: scope, requestID: plan.requestID, parentIntentDigest: try requiredDigest(plan))
+    try await positiveGate()
     // Every business Store needs its own original facade and same-parent proof.
     // Prove route identities before the first mutating Store entrance.
     let stores = plan.entries.filter { $0.capsule.kind == .businessStore }
@@ -265,41 +315,68 @@ struct M4GuardedLifecycleCoordinator: LifecycleInboundCoordinator, ControlQueueI
   @MainActor init(admission: M4DeletionAdmission) { self.admission = admission; original = admission.composition.session }
   func syncRepositoryIdentity() async -> SyncRepositoryIdentity { await original.syncRepositoryIdentity() }
   func beginControlAttempt(_ intent: ControlIntentV1, at: Date) async throws {
+    try await admission.intentGate(intent)
     if intent.operation == .deleteAccount { guard try await admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
     try await original.beginControlAttempt(intent, at: at)
+    try await admission.intentGate(intent)
   }
   func failControlAttempt(_ intent: ControlIntentV1, issue: LifecycleIssueV4, retryable: Bool, at: Date) async throws {
-    if intent.operation == .deleteAccount { guard try await admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
+    // Failure bookkeeping cannot be blocked by a new positive authority veto.
+    // The original Session/Store still validates its pending intent/queue.
     try await original.failControlAttempt(intent, issue: issue, retryable: retryable, at: at)
   }
   func prepareLifecycleControl(_ intent: ControlIntentV1) async throws -> ControlIntentReceiptV4 {
+    try await admission.intentGate(intent)
     if intent.operation == .deleteAccount { guard try await admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
-    return try await original.prepareLifecycleControl(intent)
+    let result = try await original.prepareLifecycleControl(intent)
+    try await admission.intentGate(intent); return result
   }
-  func acceptMigrationCheckpoint(migrationID: String, proof: VerifiedAccountCheckpointV4) async throws { try await original.acceptMigrationCheckpoint(migrationID: migrationID, proof: proof) }
+  func acceptMigrationCheckpoint(migrationID: String, proof: VerifiedAccountCheckpointV4) async throws {
+    guard try admission.catalog.physicalBootstrap() == nil else { throw AuthorityError.unavailable }
+    try await original.acceptMigrationCheckpoint(migrationID: migrationID, proof: proof)
+  }
   func acceptLifecycleResult(intent: ControlIntentV1, receipt: VerifiedAuthorityReceiptV1) async throws {
+    try await admission.intentGate(intent)
     if intent.operation == .deleteAccount { guard try await admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
     try await original.acceptLifecycleResult(intent: intent, receipt: receipt)
+    try await admission.intentGate(intent)
   }
-  func suspendAccount() async throws { try await original.suspendAccount() }
-  func createDeletionSaga(_ saga: DeletionSagaV4) async throws { try await admission.creation(saga); try await original.createDeletionSaga(saga) }
+  func suspendAccount() async throws {
+    guard try admission.catalog.physicalBootstrap() == nil else { throw AuthorityError.unavailable }
+    try await original.suspendAccount()
+  }
+  func createDeletionSaga(_ saga: DeletionSagaV4) async throws {
+    try await admission.creation(saga); try await original.createDeletionSaga(saga)
+    try await admission.positiveGate(requireFullSeal: false)
+  }
   func updateDeletionSaga(_ saga: DeletionSagaV4, expectedRevision: Int64) async throws {
     let prior = try await admission.resume(requestID: saga.intent.requestID)
     if prior.localProgress == .completed { try await admission.storeCompletion(requestID: saga.intent.requestID) }
     if saga.localTransportProgress == .completed { try await admission.purgeLocalCopies(requestID: saga.intent.requestID, requireFirstReceipts: true) }
     if saga.healthProgress == .completed, prior.healthProgress != .completed { try await admission.healthCompletion(requestID: saga.intent.requestID) }
     try await original.updateDeletionSaga(saga, expectedRevision: expectedRevision)
+    try await admission.positiveGate()
   }
-  func acceptDeletion(requestID: String, receipt: VerifiedAuthorityReceiptV1, expectedRevision: Int64) async throws -> DeletionSagaV4 { _ = try await admission.resume(requestID: requestID); return try await original.acceptDeletion(requestID: requestID, receipt: receipt, expectedRevision: expectedRevision) }
+  func acceptDeletion(requestID: String, receipt: VerifiedAuthorityReceiptV1, expectedRevision: Int64) async throws -> DeletionSagaV4 {
+    _ = try await admission.resume(requestID: requestID)
+    let result = try await original.acceptDeletion(requestID: requestID, receipt: receipt, expectedRevision: expectedRevision)
+    try await admission.positiveGate(); return result
+  }
   func eraseLocalBusiness(requestID: String, expectedRevision: Int64) async throws -> DeletionSagaV4 {
     _ = try await admission.localErase(requestID: requestID)
     let erased = try await original.eraseLocalBusiness(requestID: requestID, expectedRevision: expectedRevision)
     try await admission.storeCompletion(requestID: requestID)
     return erased
   }
-  func setAnalyticsEnabled(_ enabled: Bool) async throws { try await original.setAnalyticsEnabled(enabled) }
-  func enqueueAnalytics(_ event: AnalyticsEventV4) async throws { try await original.enqueueAnalytics(event) }
-  func acknowledgeAnalytics(requestID: String) async throws { try await original.acknowledgeAnalytics(requestID: requestID) }
+  func setAnalyticsEnabled(_ enabled: Bool) async throws {
+    try await admission.analyticsGate(enabled); try await original.setAnalyticsEnabled(enabled); try await admission.analyticsGate(enabled)
+  }
+  func enqueueAnalytics(_ event: AnalyticsEventV4) async throws {
+    try await admission.positiveGate(); try await original.enqueueAnalytics(event); try await admission.positiveGate()
+  }
+  func acknowledgeAnalytics(requestID: String) async throws {
+    try await admission.positiveGate(); try await original.acknowledgeAnalytics(requestID: requestID); try await admission.positiveGate()
+  }
 }
 struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
   let admission: M4DeletionAdmission
@@ -310,69 +387,290 @@ struct M4GuardedLocalTransportDeletion: LocalTransportDeletionDriver {
   }
 }
 
+private enum M4DeletionOperationContext {
+  @TaskLocal static var ownerID: UUID?
+}
+private enum M4DeletionOperationResult: Sendable {
+  case saga(DeletionSagaV4), recovery([DeletionSagaV4]), receipt(VerifiedAuthorityReceiptV1)
+}
+
 @MainActor final class M4DeletionResumeController {
-  private let admission: M4DeletionAdmission
-  private let service: LifecycleService
-  private var running: [Data: Task<DeletionSagaV4, any Error>] = [:]
+  private struct Binding {
+    let admission: M4DeletionAdmission
+    let service: LifecycleService
+    let borrow: M4ManagedDeletionBorrow?
+  }
+  private let composition: M4AccountComposition
+  let controlLifetime: UUID?
+  private var binding: Binding?
+  private var dispatchParent: Data?
+  private var dispatchProposal: DeletionSagaV4?
+  enum Phase: Equatable { case reserved, started, requestReturned, beforeFullSeal, sealed, beforeResume, afterResume }
+  /// A veto/delay after real stages only; never supplies proof or service output.
+  #if DEBUG
+  var observation: (@MainActor (Phase) async throws -> Void)?
+  #endif
+  private func observe(_ phase: Phase) async throws {
+    #if DEBUG
+    try await observation?(phase)
+    #endif
+  }
+  private let operationOwnerID = UUID()
+  private struct Key: Hashable {
+    enum Kind: Hashable { case create, resume, recover, reconcile }
+    let kind: Kind
+    let parent: Data
+  }
+  private final class Operation {
+    let fingerprint: Data
+    let task: Task<M4DeletionOperationResult, any Error>
+    let join: Task<Void, Never>
+    var returns = 0
+    var finished = false
+    init(fingerprint: Data, task: Task<M4DeletionOperationResult, any Error>, join: Task<Void, Never>) {
+      self.fingerprint = fingerprint; self.task = task; self.join = join
+    }
+  }
+  private var operations: [Key: Operation] = [:]
+  private var fifoTail: Task<Void, Never>?
   private var stopped = false
-  private var stopping: Task<Void, Never>?
-  private var reconciliations: [UUID: Task<VerifiedAuthorityReceiptV1, any Error>] = [:]
+  private var stopping: Task<Void, any Error>?
+  private var returnWaiters: [CheckedContinuation<Void, Never>] = []
   init(admission: M4DeletionAdmission, cloudDeletion: any CloudAccountDeletionDriver = UnavailableCloudAccountDeletionDriver(), healthDeletion: any AppWorkoutDeletionDriver = UnavailableAppWorkoutDeletionDriver()) {
-    self.admission = admission
-    service = LifecycleService(client: admission.composition.client, repository: admission.composition.repository,
+    composition = admission.composition; controlLifetime = nil
+    let service = LifecycleService(client: admission.composition.client, repository: admission.composition.repository,
       coordinator: M4GuardedLifecycleCoordinator(admission: admission), scope: admission.scope, ledger: admission.ledger,
       cloudDeletion: cloudDeletion, healthDeletion: healthDeletion, localTransportDeletion: M4GuardedLocalTransportDeletion(admission: admission))
+    binding = Binding(admission: admission, service: service, borrow: nil)
     if !admission.composition.registerControlOwner(self) { stopped = true }
   }
-  func resume(requestID: String) async throws -> DeletionSagaV4 {
-    guard !stopped else { throw AuthorityError.identityChanged }
-    let key = Data(requestID.utf8)
-    if let prior = running[key] { return try await prior.value }
-    let admission = admission, service = service
-    let task = Task {
-      let original = try await admission.resume(requestID: requestID)
-      try await admission.validateHistoricalLocalCompletion(original); try Task.checkCancellation()
-      let result = try await service.resumeDeletion(requestID: requestID)
-      try await admission.validateHistoricalLocalCompletion(result)
-      try Task.checkCancellation()
-      return result
+  init(managedComposition: M4AccountComposition, controlLifetime: UUID) {
+    composition = managedComposition; self.controlLifetime = controlLifetime
+    if !composition.registerControlOwner(self) { stopped = true }
+  }
+  func bindManagedBorrow(_ borrow: M4ManagedDeletionBorrow) throws {
+    try composition.requireManagedDeletionBinding(controller: self, borrow: borrow)
+    if binding != nil { try requireBinding(borrow); return }
+    let drain = try composition.managedDeletionCopyDrain(controller: self)
+    let leaves = M4LocalTransportLeaves(catalog: borrow.catalog, storeRoutes: [borrow.storeCapsule.componentID: composition])
+    let admission = M4DeletionAdmission(composition: composition, catalog: borrow.catalog, scope: borrow.attachment.scope,
+      ledger: borrow.ledger, localLeaves: leaves, copyDrain: drain, managedController: self)
+    let service = LifecycleService(client: composition.client, repository: composition.repository,
+      coordinator: M4GuardedLifecycleCoordinator(admission: admission), scope: borrow.attachment.scope, ledger: borrow.ledger,
+      localTransportDeletion: M4GuardedLocalTransportDeletion(admission: admission))
+    binding = Binding(admission: admission, service: service, borrow: borrow)
+  }
+  func requireBinding(_ borrow: M4ManagedDeletionBorrow) throws {
+    try composition.requireManagedDeletionBinding(controller: self, borrow: borrow)
+    guard let original = binding?.borrow, original.catalog === borrow.catalog, original.ledger === borrow.ledger,
+          try original.attachment.digest() == borrow.attachment.digest(),
+          try M4CatalogIO.encode(original.physical) == M4CatalogIO.encode(borrow.physical),
+          try M4CatalogIO.encode(original.seal) == M4CatalogIO.encode(borrow.seal) else { throw AuthorityError.identityChanged }
+    try original.verify(); try borrow.verify()
+  }
+  func isDispatching(_ parent: String) -> Bool { dispatchParent == Data(parent.utf8) }
+  func creationBorrow() throws -> M4ManagedDeletionBorrow {
+    try composition.requireManagedDeletionController(self)
+    guard let borrow = binding?.borrow else { throw AuthorityError.identityChanged }
+    try requireBinding(borrow); return borrow
+  }
+  func recordDispatchProposal(_ proposal: DeletionSagaV4) throws {
+    guard isDispatching(proposal.intent.requestID), dispatchProposal == nil else { throw AuthorityError.conflict }
+    dispatchProposal = proposal
+  }
+  private func currentBinding() throws -> Binding {
+    guard let binding else { throw AuthorityError.unavailable }; return binding
+  }
+  private func checkedParent(_ requestID: String, full: Bool = true) async throws -> DeletionSagaV4 {
+    guard let saga = try await composition.repository.deletionSagaV4(requestID: requestID) else { throw LifecycleClientError.unknownOriginal }
+    if controlLifetime != nil {
+      _ = try await composition.verifyManagedDeletionParent(controller: self, saga: saga, requireFullSeal: full)
     }
-    running[key] = task; defer { running[key] = nil }
-    return try await task.value
+    return saga
+  }
+  private func enqueue(kind: Key.Kind, parent: String, fingerprint: Data = Data(), body: @escaping @MainActor @Sendable () async throws -> M4DeletionOperationResult) async throws -> M4DeletionOperationResult {
+    guard !stopped else { throw AuthorityError.identityChanged }
+    try requireExternalCloseCaller()
+    let key = Key(kind: kind, parent: Data(parent.utf8)), operation: Operation
+    // Deduplicate overlapping borrowers only. A sequential invocation must
+    // revalidate current Store/leaf truth even if join cleanup is still queued.
+    if let prior = operations[key], prior.returns > 0 {
+      guard prior.fingerprint == fingerprint else { throw AuthorityError.conflict }
+      operation = prior
+    } else {
+      let predecessor = fifoTail, ownerID = operationOwnerID
+      let task = Task<M4DeletionOperationResult, any Error> {
+        await predecessor?.value
+        try Task.checkCancellation()
+        return try await M4DeletionOperationContext.$ownerID.withValue(ownerID) { try await body() }
+      }
+      let join = Task<Void, Never> { _ = await task.result }
+      operation = Operation(fingerprint: fingerprint, task: task, join: join)
+      operations[key] = operation; fifoTail = join
+      Task { [weak self, weak operation] in
+        await join.value
+        guard let self, let operation else { return }
+        operation.finished = true; self.removeFinished(key, operation)
+      }
+    }
+    operation.returns += 1
+    defer {
+      operation.returns -= 1; removeFinished(key, operation)
+      if operations.values.allSatisfy({ $0.returns == 0 }) {
+        let waiters = returnWaiters; returnWaiters.removeAll(); waiters.forEach { $0.resume() }
+      }
+    }
+    let task = operation.task
+    let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    try Task.checkCancellation()
+    return result
+  }
+  private func removeFinished(_ key: Key, _ operation: Operation) {
+    if operation.finished, operation.returns == 0, operations[key] === operation { operations[key] = nil }
+  }
+  private func resumeNow(requestID: String) async throws -> DeletionSagaV4 {
+    if controlLifetime != nil { _ = try await checkedParent(requestID) }
+    let bound = try currentBinding(), admission = bound.admission, service = bound.service
+    let original = try await admission.resume(requestID: requestID)
+    try await admission.validateHistoricalLocalCompletion(original); try Task.checkCancellation()
+    try await observe(.beforeResume)
+    if controlLifetime != nil { _ = try await checkedParent(requestID) }
+    let result = try await service.resumeDeletion(requestID: requestID)
+    try await admission.validateHistoricalLocalCompletion(result)
+    try await observe(.afterResume)
+    if controlLifetime != nil { _ = try await checkedParent(requestID) }
+    try Task.checkCancellation()
+    return result
+  }
+  func resume(requestID: String) async throws -> DeletionSagaV4 {
+    let value = try await enqueue(kind: .resume, parent: requestID) { .saga(try await self.resumeNow(requestID: requestID)) }
+    guard case .saga(let saga) = value else { throw AuthorityError.conflict }; return saga
   }
   func recover() async throws -> [DeletionSagaV4] {
-    guard !stopped else { throw AuthorityError.identityChanged }
-    let originals = try await admission.composition.repository.deletionSagasV4()
-    var results: [DeletionSagaV4] = []
-    for original in originals { results.append(try await resume(requestID: original.intent.requestID)) }
-    return results
+    let value = try await enqueue(kind: .recover, parent: "") {
+      let originals = try await self.composition.repository.deletionSagasV4()
+      var results: [DeletionSagaV4] = []
+      for original in originals { results.append(try await self.resumeNow(requestID: original.intent.requestID)) }
+      return .recovery(results)
+    }
+    guard case .recovery(let sagas) = value else { throw AuthorityError.conflict }; return sagas
+  }
+  func requireExternalCloseCaller() throws {
+    guard M4DeletionOperationContext.ownerID != operationOwnerID else { throw AuthorityError.conflict }
+  }
+  func requireManagedOperationCaller() throws {
+    guard M4DeletionOperationContext.ownerID == operationOwnerID else { throw AuthorityError.conflict }
   }
   /// Final-close only. Business quiescence must retain this same control facade
   /// and relay so the original deletion Saga can still recover unknown outcomes.
-  func stopAndJoin() async {
-    if let stopping { await stopping.value; return }
+  func stopAndJoin() async throws {
+    try requireExternalCloseCaller()
+    if let stopping { return try await stopping.value }
     stopped = true
-    let resumes = Array(running.values), controls = Array(reconciliations.values)
-    resumes.forEach { $0.cancel() }; controls.forEach { $0.cancel() }
-    let join = Task<Void, Never> {
-      for task in resumes { _ = await task.result }
-      for task in controls { _ = await task.result }
+    let pending = Array(operations.values)
+    pending.forEach { $0.task.cancel() }
+    let join = Task<Void, any Error> {
+      for operation in pending { await operation.join.value }
+      if self.operations.values.contains(where: { $0.returns > 0 }) {
+        await withCheckedContinuation { self.returnWaiters.append($0) }
+      }
+      self.operations.removeAll(); self.fifoTail = nil
     }
     stopping = join
-    await join.value
-    running.removeAll(); reconciliations.removeAll()
+    try await join.value
   }
   func reconcile(_ intent: ControlIntentV1) async throws -> VerifiedAuthorityReceiptV1 {
-    guard !stopped else { throw AuthorityError.identityChanged }
-    let id = UUID(), admission = admission, service = service
-    let task = Task {
+    let value = try await enqueue(kind: .reconcile, parent: intent.requestID, fingerprint: intent.canonicalRequest) {
       try Task.checkCancellation()
-      if intent.operation == .deleteAccount { guard try await admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
-      let result = try await service.reconcileLifecycle(intent)
+      if self.controlLifetime != nil {
+        guard intent.operation == .deleteAccount, try await self.checkedParent(intent.requestID).intent.canonicalRequest == intent.canonicalRequest else { throw AuthorityError.intentMismatch }
+      }
+      let bound = try self.currentBinding()
+      if intent.operation == .deleteAccount { guard try await bound.admission.resume(requestID: intent.requestID).intent == intent else { throw AuthorityError.intentMismatch } }
+      let result = try await bound.service.reconcileLifecycle(intent)
+      if self.controlLifetime != nil { _ = try await self.checkedParent(intent.requestID) }
       try Task.checkCancellation()
-      return result
+      return .receipt(result)
     }
-    reconciliations[id] = task; defer { reconciliations[id] = nil }
-    return try await task.value
+    guard case .receipt(let receipt) = value else { throw AuthorityError.conflict }; return receipt
   }
+  func create(requestID: String, confirmedAt: Int64) async throws -> DeletionSagaV4 {
+    let value = try await enqueue(kind: .create, parent: requestID, fingerprint: Data(String(confirmedAt).utf8)) {
+      .saga(try await self.createNow(requestID: requestID, confirmedAt: confirmedAt))
+    }
+    guard case .saga(let saga) = value else { throw AuthorityError.conflict }; return saga
+  }
+  private func createNow(requestID: String, confirmedAt: Int64) async throws -> DeletionSagaV4 {
+    try composition.requireManagedDeletionController(self)
+    if let borrow = binding?.borrow, let prior = try borrow.catalog.deletionCreation(), prior.dispatch == .started {
+      guard M4CatalogIO.raw(prior.requestID, requestID), prior.confirmedAt == confirmedAt else { throw AuthorityError.conflict }
+      // A started dispatch can only reuse actual original Store bytes. Its
+      // absence remains unknown, regardless of the prior caller's outcome.
+      let actual = try await checkedParent(requestID, full: false)
+      return try await sealCreation(actual)
+    }
+    let (creation, borrow) = try await composition.prepareManagedDeletionCreation(controller: self, requestID: requestID, confirmedAt: confirmedAt)
+    try bindManagedBorrow(borrow)
+    _ = try borrow.catalog.reserveManagedDeletion(creation: creation, borrow: borrow, health: .empty)
+    guard let saved = try borrow.catalog.deletionCreation(), try M4CatalogIO.encode(saved) == M4CatalogIO.encode(creation) else { throw M4CatalogError.storageBlocked }
+    try await observe(.reserved)
+    try await composition.revalidateManagedDeletionCreation(controller: self, creation: creation, borrow: borrow)
+    let started = try borrow.catalog.markManagedDeletionStarted(requestID: requestID, borrow: borrow)
+    var expected = creation; expected.dispatch = .started
+    guard try M4CatalogIO.encode(started) == M4CatalogIO.encode(expected) else { throw M4CatalogError.storageBlocked }
+    try await observe(.started)
+    try await composition.revalidateManagedDeletionCreation(controller: self, creation: started, borrow: borrow)
+    let bound = try currentBinding()
+    dispatchParent = Data(requestID.utf8); dispatchProposal = nil
+    let outcome: Result<DeletionSagaV4, any Error>
+    do {
+      outcome = .success(try await bound.service.requestDeletion(requestID: requestID, reauthenticationID: started.firstReauthID,
+        cloud: .keep, local: .delete, health: .keep, healthConfirmed: false))
+    } catch { outcome = .failure(error) }
+    let proposed = dispatchProposal; dispatchParent = nil; dispatchProposal = nil
+    // Read-only outcome inspection is deliberately unconditional, even after
+    // cancellation/close. No positive seal can pass the subsequent live gate.
+    let actual = try await composition.repository.deletionSagaV4(requestID: requestID)
+    let control = try await composition.repository.lifecycleControlIntentV4(requestID: requestID)
+    guard let actual else {
+      if case .failure(let error) = outcome { throw error }
+      throw LifecycleClientError.unknownOriginal
+    }
+    guard let proposed, actual.intent.canonicalRequest == proposed.intent.canonicalRequest,
+          Data(actual.recoveryCapability.utf8) == Data(proposed.recoveryCapability.utf8),
+          control?.canonicalRequest == actual.intent.canonicalRequest else { throw AuthorityError.intentMismatch }
+    if case .success(let result) = outcome {
+      guard result.intent.canonicalRequest == actual.intent.canonicalRequest,
+            Data(result.recoveryCapability.utf8) == Data(actual.recoveryCapability.utf8) else { throw AuthorityError.intentMismatch }
+    }
+    try await observe(.requestReturned)
+    return try await sealCreation(actual)
+  }
+  private func sealCreation(_ saga: DeletionSagaV4) async throws -> DeletionSagaV4 {
+    let borrow = try await composition.verifyManagedDeletionParent(controller: self, saga: saga, requireFullSeal: false)
+    let bound = try currentBinding()
+    try await bound.admission.creationCommitted(saga)
+    try borrow.verify(); _ = try borrow.catalog.seal(requestID: saga.intent.requestID, parentIntentDigest: saga.intent.digest)
+    try borrow.verify(); try await observe(.beforeFullSeal)
+    _ = try await composition.verifyManagedDeletionParent(controller: self, saga: saga, requireFullSeal: false)
+    try borrow.verify(); try borrow.catalog.sealFullControls(saga: saga); try borrow.verify()
+    try await observe(.sealed)
+    return try await checkedParent(saga.intent.requestID)
+  }
+  #if DEBUG
+  struct Snapshot {
+    let dispatch: M4DeletionCreationMetadata.Dispatch
+    let parentDigest: String?
+    let fullSealDigest: String?
+    let entryCount: Int
+    let receiptCount: Int
+    let catalogID, ledgerID: ObjectIdentifier
+  }
+  func snapshot() throws -> Snapshot {
+    guard let borrow = binding?.borrow, let creation = try borrow.catalog.deletionCreation(),
+          let plan = try borrow.catalog.plan(requestID: creation.requestID) else { throw AuthorityError.unavailable }
+    return Snapshot(dispatch: creation.dispatch, parentDigest: plan.parentIntentDigest, fullSealDigest: plan.fullSeal?.parentIntentDigest,
+      entryCount: plan.entries.count, receiptCount: plan.receipts?.count ?? 0, catalogID: ObjectIdentifier(borrow.catalog), ledgerID: ObjectIdentifier(borrow.ledger))
+  }
+  #endif
 }
